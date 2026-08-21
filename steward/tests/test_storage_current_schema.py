@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import coquic_steward.storage.sqlite as sqlite_module
+from coquic_steward.core.models import TaskKind, TaskSpec, TaskWorkflow, WorkerKind
 from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
@@ -20,7 +24,11 @@ from coquic_steward.publication.outbox import (
     PublicationState,
     _PERSISTED_REASON_VALUES,
 )
-from coquic_steward.storage import SQLiteStoreLifecycleError, StoreRecoveryResult, TaskStore
+from coquic_steward.storage import (
+    SQLiteStoreLifecycleError,
+    StoreRecoveryResult,
+    TaskStore,
+)
 from coquic_steward.storage.sqlite import (
     CURRENT_SCHEMA_CATALOG_DIGEST,
     SQLITE_USER_VERSION,
@@ -394,6 +402,101 @@ def test_open_validation_does_not_repair_or_write(tmp_path: Path) -> None:
 
     after = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in tracked}
     assert after == before
+
+
+def test_finalization_keeps_a_concurrent_wal_commit_authoritative(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    created = TaskStore.create(database, dry_run=True)
+    created._finalize_exact_store()
+    observer = TaskStore.open(database)
+    writer = TaskStore.open(database)
+    try:
+        writer.add_task(
+            TaskSpec(
+                id="task-finalize-concurrent",
+                kind=TaskKind.custom,
+                workflow=TaskWorkflow.fix,
+                worker=WorkerKind.custom,
+                title="concurrent commit",
+                prompt="preserve the current WAL",
+            )
+        )
+        wal = database.with_name(database.name + "-wal")
+        wal_before = wal.read_bytes()
+        assert wal_before
+        writer.engine.dispose()
+
+        observer._finalize_exact_store()
+
+        assert wal.read_bytes() == wal_before
+        reopened = TaskStore.open(database)
+        try:
+            assert reopened.get("task-finalize-concurrent").id == (
+                "task-finalize-concurrent"
+            )
+        finally:
+            reopened.engine.dispose()
+    finally:
+        writer.engine.dispose()
+
+
+def test_finalized_store_is_reopenable_from_a_new_process(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database, dry_run=True)
+    store._finalize_exact_store()
+
+    epoch = database.parent / "tasks" / "epoch.json"
+    tracked = (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+        epoch,
+    )
+
+    def snapshot() -> dict[Path, tuple[bytes, int, int]]:
+        return {
+            path: (
+                path.read_bytes(),
+                path.stat().st_mode & 0o777,
+                path.stat().st_mtime_ns,
+            )
+            for path in tracked
+        }
+
+    before = snapshot()
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(source_root), environment.get("PYTHONPATH")))
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from pathlib import Path
+import sys
+from coquic_steward.storage import TaskStore
+store = TaskStore.open(Path(sys.argv[1]), dry_run=True)
+store._finalize_exact_store()
+print("reopenable")
+""",
+            str(database),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.stdout.strip() == "reopenable"
+    assert snapshot() == before
+
+    reopened = TaskStore.open(database, dry_run=False)
+    reopened.engine.dispose()
 
 
 def test_open_ignores_valid_sibling_json_without_mutation(tmp_path: Path) -> None:

@@ -305,6 +305,13 @@ class _StoreSidecarSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _StoreDatabaseSnapshot:
+    digest: bytes
+    mode: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class StoreRecoveryResult:
     """The durable changes made while recovering one exact Store."""
 
@@ -444,9 +451,16 @@ class SQLiteTaskStore:
         database = Path(path).expanduser()
         epoch = _read_task_epoch(database.parent / "tasks")
         epoch_id = epoch["epochId"]
+        database_snapshot = _snapshot_store_database(database)
+        sidecar_snapshot = _snapshot_store_sidecars(database)
         cls._validate_current_database(database, epoch_id)
         store = cls._open_validated(
-            database, epoch_id, on_change, dry_run=dry_run
+            database,
+            epoch_id,
+            on_change,
+            dry_run=dry_run,
+            database_snapshot=database_snapshot,
+            sidecar_snapshot=sidecar_snapshot,
         )
         if dry_run is not None:
             store.resolve_execution_modes(dry_run)
@@ -460,21 +474,33 @@ class SQLiteTaskStore:
         on_change: Callable[[], None] | None,
         *,
         dry_run: bool | None = None,
+        database_snapshot: _StoreDatabaseSnapshot | None = None,
+        sidecar_snapshot: Mapping[str, _StoreSidecarSnapshot] | None = None,
     ) -> "SQLiteTaskStore":
         store = cls._blank_store(
             database, on_change=on_change, wal=False, dry_run=dry_run
         )
         store._control_loop = _bind_existing_control_loop(database, epoch_id)
-        store._sidecar_snapshot = _snapshot_store_sidecars(database)
-        store._database_snapshot_digest = hashlib.sha256(
-            database.read_bytes()
-        ).digest()
+        store._database_snapshot = (
+            database_snapshot
+            if database_snapshot is not None
+            else _snapshot_store_database(database)
+        )
+        store._sidecar_snapshot = dict(
+            sidecar_snapshot
+            if sidecar_snapshot is not None
+            else _snapshot_store_sidecars(database)
+        )
+        store._database_snapshot_digest = store._database_snapshot.digest
         return store
 
     def _finalize_exact_store(self) -> None:
-        """Close an initialized Store while retaining required WAL sidecars."""
+        """Close an initialized Store without replaying stale WAL state."""
 
-        snapshots = getattr(self, "_sidecar_snapshot", {})
+        # The WAL snapshot is used only as an equality guard.  It is never
+        # written back, so a latch resolution or concurrent WAL commit remains
+        # authoritative; a clean SHM image is preserved only after that proof.
+        snapshots = self._sidecar_snapshot
         self.engine.dispose()
         database_changed = (
             self._database_snapshot_digest is not None
@@ -484,10 +510,15 @@ class SQLiteTaskStore:
         sidecars = _database_publication_paths(self.path)[1:]
         if database_changed or not all(os.path.lexists(sidecar) for sidecar in sidecars):
             self._durabilize_database(self.path)
-        if not database_changed:
-            _restore_store_sidecars(self.path, snapshots)
         epoch_id = _read_task_epoch(self.path.parent / "tasks")["epochId"]
         self._validate_current_database(self.path, epoch_id)
+        _ensure_store_sidecars(self.path)
+        _preserve_store_database_metadata(self.path, self._database_snapshot)
+        _preserve_store_sidecar_metadata(
+            self.path,
+            snapshots,
+            database_snapshot=self._database_snapshot,
+        )
 
     def resolve_execution_modes(
         self, dry_run: bool | ExecutionMode | str
@@ -672,8 +703,8 @@ class SQLiteTaskStore:
         store.path = database
         store.on_change = on_change
         store.path_codec = PathCodec(database.parent)
+        store._database_snapshot = None
         store._database_snapshot_digest = None
-        store._sidecar_snapshot = {}
         store.engine = create_engine(f"sqlite:///{database}", future=True)
         event.listen(
             store.engine,
@@ -813,13 +844,18 @@ class SQLiteTaskStore:
 
     @classmethod
     def _durabilize_database(cls, database: Path) -> None:
+        connection: sqlite3.Connection | None = None
         try:
-            with sqlite3.connect(database, timeout=30) as connection:
-                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            connection = sqlite3.connect(database, timeout=30)
+            _disable_sqlite_close_checkpoint(connection)
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         except sqlite3.Error as exc:
             raise SQLiteStoreLifecycleError(
                 "unable to checkpoint the Store database"
             ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
         for suffix in ("-wal", "-shm"):
             sidecar = database.with_name(database.name + suffix)
             if os.path.lexists(sidecar):
@@ -5089,7 +5125,9 @@ class SQLiteTaskStore:
         if required is None:
             now_text = _publication_timestamp(timestamp)
             uri = self.path.resolve().as_uri() + "?mode=ro"
-            with sqlite3.connect(uri, uri=True) as connection:
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(uri, uri=True)
                 expired = connection.execute(
                     """
                     SELECT 1
@@ -5109,6 +5147,9 @@ class SQLiteTaskStore:
                 health_exists = connection.execute(
                     "SELECT 1 FROM publication_health WHERE id=1"
                 ).fetchone()
+            finally:
+                if connection is not None:
+                    connection.close()
             required = expired is not None or health_exists is None
         if not required:
             return
@@ -7483,6 +7524,7 @@ def _refresh_publication_health(
 
 
 def _configure_sqlite(dbapi_connection, _connection_record) -> None:
+    _disable_sqlite_close_checkpoint(dbapi_connection)
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=5000")
@@ -7493,10 +7535,22 @@ def _configure_sqlite(dbapi_connection, _connection_record) -> None:
 def _configure_sqlite_read_only(dbapi_connection, _connection_record) -> None:
     """Configure an already validated WAL database without changing its mode."""
 
+    _disable_sqlite_close_checkpoint(dbapi_connection)
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+def _disable_sqlite_close_checkpoint(connection: sqlite3.Connection) -> None:
+    try:
+        option = sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE
+        connection.setconfig(option, 1)
+    except AttributeError:
+        # Python versions before sqlite3.Connection.setconfig do not expose
+        # the close-checkpoint switch; explicit Store finalization remains the
+        # fallback on those runtimes.
+        return
 
 
 def _require_directory(path: Path, label: str) -> None:
@@ -7577,12 +7631,24 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
     )
 
 
+def _snapshot_store_database(database: Path) -> _StoreDatabaseSnapshot:
+    _require_regular_file(database, "Store database")
+    metadata = os.stat(database)
+    return _StoreDatabaseSnapshot(
+        digest=hashlib.sha256(database.read_bytes()).digest(),
+        mode=stat.S_IMODE(metadata.st_mode),
+        mtime_ns=metadata.st_mtime_ns,
+    )
+
+
 def _snapshot_store_sidecars(
     database: Path,
 ) -> dict[str, _StoreSidecarSnapshot]:
     snapshots: dict[str, _StoreSidecarSnapshot] = {}
     for suffix in ("-wal", "-shm"):
         sidecar = database.with_name(database.name + suffix)
+        if not os.path.lexists(sidecar):
+            raise SQLiteStoreLifecycleError("Store WAL sidecar is missing")
         _require_regular_file(sidecar, "Store WAL sidecar")
         metadata = os.stat(sidecar)
         snapshots[suffix] = _StoreSidecarSnapshot(
@@ -7593,39 +7659,110 @@ def _snapshot_store_sidecars(
     return snapshots
 
 
-def _restore_store_sidecars(
+def _preserve_store_database_metadata(
+    database: Path,
+    snapshot: _StoreDatabaseSnapshot | None,
+) -> None:
+    if snapshot is None:
+        return
+    _require_regular_file(database, "Store database")
+    if hashlib.sha256(database.read_bytes()).digest() != snapshot.digest:
+        return
+    try:
+        os.chmod(database, snapshot.mode)
+        os.utime(database, ns=(snapshot.mtime_ns, snapshot.mtime_ns))
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(
+            "unable to preserve Store database metadata"
+        ) from exc
+    _fsync_directory(database.parent)
+
+
+def _ensure_store_sidecars(database: Path) -> None:
+    """Materialize empty sidecars after SQLite has finished validating state."""
+
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if os.path.lexists(sidecar):
+            _require_regular_file(sidecar, "Store WAL sidecar")
+            continue
+        try:
+            with sidecar.open("xb"):
+                pass
+        except OSError as exc:
+            raise SQLiteStoreLifecycleError(
+                "unable to preserve Store WAL sidecar"
+            ) from exc
+        _require_regular_file(sidecar, "Store WAL sidecar")
+    _fsync_directory(database.parent)
+
+
+def _preserve_clean_store_shm(
+    sidecar: Path,
+    snapshot: _StoreSidecarSnapshot,
+) -> None:
+    temporary = sidecar.with_name(
+        f".{sidecar.name}.preserve-{secrets.token_hex(8)}"
+    )
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(snapshot.data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, snapshot.mode)
+        os.replace(temporary, sidecar)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(
+            "unable to preserve clean Store WAL state"
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _preserve_store_sidecar_metadata(
     database: Path,
     snapshots: Mapping[str, _StoreSidecarSnapshot],
+    *,
+    database_snapshot: _StoreDatabaseSnapshot | None,
 ) -> None:
-    restored = False
+    """Preserve clean metadata without replaying a stale WAL."""
+
+    if database_snapshot is not None:
+        _require_regular_file(database, "Store database")
+        if hashlib.sha256(database.read_bytes()).digest() != database_snapshot.digest:
+            return
+    wal_snapshot = snapshots.get("-wal")
+    if wal_snapshot is not None:
+        wal = database.with_name(database.name + "-wal")
+        _require_regular_file(wal, "Store WAL sidecar")
+        if wal.read_bytes() != wal_snapshot.data:
+            return
+    clean_wal = wal_snapshot is not None and not wal_snapshot.data
+    preserved = False
     for suffix in ("-wal", "-shm"):
         snapshot = snapshots.get(suffix)
         if snapshot is None:
             continue
-        # A non-empty WAL may contain application changes that were already
-        # checkpointed into the database while the Store was closed.  The
-        # empty WAL produced by a clean initialized Store is safe to restore;
-        # otherwise the freshly materialized sidecar remains authoritative.
-        if suffix == "-wal" and snapshot.data:
-            continue
         sidecar = database.with_name(database.name + suffix)
         _require_regular_file(sidecar, "Store WAL sidecar")
-        if sidecar.read_bytes() != snapshot.data:
-            temporary = sidecar.with_name(
-                f".{sidecar.name}.restore-{secrets.token_hex(8)}"
-            )
-            try:
-                with temporary.open("xb") as handle:
-                    handle.write(snapshot.data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.chmod(temporary, snapshot.mode)
-                os.replace(temporary, sidecar)
-            finally:
-                temporary.unlink(missing_ok=True)
-        os.utime(sidecar, ns=(snapshot.mtime_ns, snapshot.mtime_ns))
-        restored = True
-    if restored:
+        current = sidecar.read_bytes()
+        # A changed WAL is authoritative, even if the main database bytes did
+        # not change because the write is still resident in the WAL.  A clean
+        # empty WAL proves that an SHM refresh contains only transient reader
+        # state, so that exact clean SHM image may be retained.
+        if suffix == "-wal" and current != snapshot.data:
+            return
+        if suffix == "-shm" and clean_wal and current != snapshot.data:
+            _preserve_clean_store_shm(sidecar, snapshot)
+        try:
+            os.chmod(sidecar, snapshot.mode)
+            os.utime(sidecar, ns=(snapshot.mtime_ns, snapshot.mtime_ns))
+        except OSError as exc:
+            raise SQLiteStoreLifecycleError(
+                "unable to preserve Store WAL sidecar metadata"
+            ) from exc
+        preserved = True
+    if preserved:
         _fsync_directory(database.parent)
 
 

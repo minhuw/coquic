@@ -447,16 +447,21 @@ def init() -> None:
     store: TaskStore | None = None
     try:
         with acquire_daemon_lock(config):
-            if os.path.lexists(config.db_path):
-                store = TaskStore.open(
-                    config.db_path, dry_run=_publication_mutation_blocked(config)
-                )
-                outcome = "already initialized"
-            else:
-                store = TaskStore.create(
-                    config.db_path, dry_run=_publication_mutation_blocked(config)
-                )
-                outcome = "initialized"
+            try:
+                if os.path.lexists(config.db_path):
+                    store = TaskStore.open(
+                        config.db_path, dry_run=_publication_mutation_blocked(config)
+                    )
+                    outcome = "already initialized"
+                else:
+                    store = TaskStore.create(
+                        config.db_path, dry_run=_publication_mutation_blocked(config)
+                    )
+                    outcome = "initialized"
+            finally:
+                if store is not None:
+                    store._finalize_exact_store()
+                    store = None
     except DaemonAlreadyRunning as exc:
         typer.echo(f"Steward daemon already running: {exc.lock_path}", err=True)
         if exc.owner:
@@ -465,9 +470,6 @@ def init() -> None:
     except Exception as exc:
         typer.echo(f"Steward store initialization refused: {exc}", err=True)
         raise typer.Exit(1) from exc
-    finally:
-        if store is not None:
-            store._finalize_exact_store()
     typer.echo(f"Steward store {outcome}: {config.db_path}")
 
 

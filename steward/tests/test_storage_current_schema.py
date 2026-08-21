@@ -235,10 +235,16 @@ def test_create_and_open_bind_the_immutable_task_epoch_and_callback(tmp_path: Pa
 
     assert created.on_change is on_change
     assert reopened.on_change is on_change
+    assert created.control_loop is created.control_loop_ledger
+    assert reopened.control_loop is reopened.control_loop_ledger
     assert created.control_loop.epoch_id == reopened.control_loop.epoch_id
     assert json.loads(
         (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
-    )["epochId"] == created.control_loop.epoch_id
+    )["epochId"] == created.control_loop_ledger.epoch_id
+    with pytest.raises(AttributeError):
+        created.control_loop = None
+    with pytest.raises(AttributeError):
+        created.control_loop_ledger = None
     assert calls == []
 
 

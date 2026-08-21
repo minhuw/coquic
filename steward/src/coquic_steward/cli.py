@@ -677,46 +677,43 @@ def diagnostics() -> None:
             ]
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
-    retry = ledger.pending_retry("planner") if ledger is not None else None
+    retry = ledger.pending_retry("planner")
     active_run = None
     last_materialized_sequence = None
     last_materialized_at = None
     event_count = 0
     planning_block_reason = None
-    if ledger is not None:
-        runs = ledger.list_planner_runs(include_terminal=False)
-        active_run = runs[-1].planner_run_id if runs else None
-        with ledger._connect() as connection:
-            event_count = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM control_loop_events"
-                ).fetchone()[0]
-            )
-            materialized = connection.execute(
-                "SELECT sequence,materialized_at FROM control_loop_outbox "
-                "WHERE materialized_at IS NOT NULL ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
-            if materialized is not None:
-                last_materialized_sequence = int(materialized[0])
-                last_materialized_at = materialized[1]
-            blocked = connection.execute(
-                "SELECT value FROM control_loop_meta WHERE key='planning_block_reason'"
-            ).fetchone()
-            planning_block_reason = blocked[0] if blocked is not None else None
+    runs = ledger.list_planner_runs(include_terminal=False)
+    active_run = runs[-1].planner_run_id if runs else None
+    with ledger._connect() as connection:
+        event_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM control_loop_events"
+            ).fetchone()[0]
+        )
+        materialized = connection.execute(
+            "SELECT sequence,materialized_at FROM control_loop_outbox "
+            "WHERE materialized_at IS NOT NULL ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        if materialized is not None:
+            last_materialized_sequence = int(materialized[0])
+            last_materialized_at = materialized[1]
+        blocked = connection.execute(
+            "SELECT value FROM control_loop_meta WHERE key='planning_block_reason'"
+        ).fetchone()
+        planning_block_reason = blocked[0] if blocked is not None else None
     payload = {
-        "epochId": ledger.epoch_id if ledger is not None else None,
+        "epochId": ledger.epoch_id,
         "archiveFormatVersion": (
             archive_epoch.format_version if archive_epoch is not None else None
         ),
         "taskFormatVersion": (
             archive_epoch.task_format_version if archive_epoch is not None else None
         ),
-        "planningBlocked": ledger.planning_blocked if ledger is not None else False,
+        "planningBlocked": ledger.planning_blocked,
         "planningBlockReason": planning_block_reason,
         "ledgerEventCount": event_count,
-        "pendingArchiveEvents": (
-            len(ledger.outbox(limit=10_000)) if ledger is not None else 0
-        ),
+        "pendingArchiveEvents": len(ledger.outbox(limit=10_000)),
         "lastMaterializedSequence": last_materialized_sequence,
         "lastMaterializedAt": last_materialized_at,
         "activePlannerRunId": active_run,
@@ -755,9 +752,8 @@ def health() -> None:
                 cleanup_pending += 1
         publication_health = publication_health_view(store)
         ledger = store.control_loop_ledger
-        if ledger is not None:
-            planner_active = bool(ledger.list_planner_runs(include_terminal=False))
-            archive_pending = bool(ledger.outbox(limit=1))
+        planner_active = bool(ledger.list_planner_runs(include_terminal=False))
+        archive_pending = bool(ledger.outbox(limit=1))
         persisted_pressure = store.get_resource_pressure()
         references = store.list_container_references()
         container_counts["owned"] = len(references)

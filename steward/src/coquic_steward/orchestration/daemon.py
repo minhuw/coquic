@@ -223,9 +223,7 @@ class StewardDaemon:
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
-        self._control_loop_ledger: ControlLoopLedger | None = (
-            store.control_loop_ledger
-        )
+        self._control_loop_ledger: ControlLoopLedger = store.control_loop_ledger
         self._control_loop_archive = ControlLoopArchive(config, task_root=config)
         usage_catalog = None
         try:
@@ -554,17 +552,16 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                     state={"reconciliation_complete": True},
                 )
-                if self._control_loop_ledger is not None:
-                    try:
-                        self._control_loop_ledger.record_runtime(
-                            "running", {"instanceId": self.runtime.instance_id}
-                        )
-                        self._control_loop_wakeup.set()
-                    except Exception as exc:
-                        self._log(
-                            "control-loop runtime start lag "
-                            f"error={exc.__class__.__name__}"
-                        )
+                try:
+                    self._control_loop_ledger.record_runtime(
+                        "running", {"instanceId": self.runtime.instance_id}
+                    )
+                    self._control_loop_wakeup.set()
+                except Exception as exc:
+                    self._log(
+                        "control-loop runtime start lag "
+                        f"error={exc.__class__.__name__}"
+                    )
                 self._enqueue_materialized_publications()
                 self._start_publication_worker()
                 self._startup_complete = True
@@ -590,8 +587,6 @@ class StewardDaemon:
     def _startup_reconcile_control_loop(self) -> None:
         """Establish the shared epoch and repair archive lag before dispatch."""
 
-        if self._control_loop_ledger is None:
-            return
         try:
             task_epoch = self.config.ensure_epoch()
             archive_epoch = self._control_loop_archive.ensure_task_epoch(task_epoch)
@@ -602,12 +597,6 @@ class StewardDaemon:
             # every retained event and planner artifact once, after which the
             # archive can reuse identity-checked facts for recurring drains.
             result = self._drain_control_loop_once(full_audit=True, publish=False)
-            if result is None:
-                self._control_loop_ledger.set_planning_blocked(
-                    True, reason="control-loop startup audit incomplete"
-                )
-                self._log("control-loop reconciliation blocked error=missing-result")
-                return
             if (
                 result.get("error")
                 or result.get("auditIncomplete")
@@ -640,8 +629,6 @@ class StewardDaemon:
 
     def _reconcile_interrupted_planner_runs(self) -> None:
         ledger = self._control_loop_ledger
-        if ledger is None:
-            return
         for run in ledger.list_planner_runs(include_terminal=False):
             if run.planner_run_id == self._active_planner_run_id:
                 continue
@@ -702,8 +689,6 @@ class StewardDaemon:
 
     def _build_control_loop_current(self) -> CurrentState | None:
         ledger = self._control_loop_ledger
-        if ledger is None:
-            return None
         try:
             poll_result = scheduler_state(self.config, self.store)
             state = poll_result.state
@@ -777,21 +762,10 @@ class StewardDaemon:
     def overhead_usage_rows(self) -> tuple[object, ...]:
         """Return local aggregate rows without reading planner artifacts."""
 
-        ledger = self._control_loop_ledger
-        if ledger is None:
-            return ()
-        return tuple(ledger.list_overhead_usage())
+        return tuple(self._control_loop_ledger.list_overhead_usage())
 
     def _reconcile_control_loop_usage(self) -> dict[str, Any]:
         reducer = self._control_loop_usage
-        if reducer.ledger is None:
-            return {
-                "processed": 0,
-                "skipped": 0,
-                "errors": [],
-                "pending": False,
-                "watermark": None,
-            }
         # The committed repository catalog is the sole pricing authority.
         # Refresh it at the bounded control-loop boundary so a catalog
         # replacement is observed without restarting the daemon.  A malformed
@@ -806,10 +780,8 @@ class StewardDaemon:
 
     def _drain_control_loop_once(
         self, *, full_audit: bool = False, publish: bool = True
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         ledger = self._control_loop_ledger
-        if ledger is None:
-            return None
         with self._control_loop_lock:
             try:
                 result = self._control_loop_archive.reconcile(
@@ -863,8 +835,6 @@ class StewardDaemon:
             return result
 
     def _start_control_loop_writer(self) -> None:
-        if self._control_loop_ledger is None:
-            return
         with self._control_loop_lock:
             if self._control_loop_thread is not None and self._control_loop_thread.is_alive():
                 return
@@ -1078,11 +1048,8 @@ class StewardDaemon:
         return None
 
     def _publication_overhead_rows(self) -> tuple[object, ...]:
-        ledger = getattr(self, "_control_loop_ledger", None)
-        if ledger is None:
-            return ()
         try:
-            return tuple(ledger.list_overhead_usage())
+            return tuple(self._control_loop_ledger.list_overhead_usage())
         except Exception as exc:
             self._log(f"publication overhead listing failed error={exc.__class__.__name__}")
             return ()
@@ -3646,15 +3613,14 @@ class StewardDaemon:
             instance_id=self.runtime.instance_id,
             state={"forced": force},
         )
-        if self._control_loop_ledger is not None:
-            try:
-                self._control_loop_ledger.record_runtime(
-                    "stopping",
-                    {"instanceId": self.runtime.instance_id, "forced": force},
-                )
-                self._control_loop_wakeup.set()
-            except Exception as exc:
-                self._log(f"control-loop runtime stop lag error={exc.__class__.__name__}")
+        try:
+            self._control_loop_ledger.record_runtime(
+                "stopping",
+                {"instanceId": self.runtime.instance_id, "forced": force},
+            )
+            self._control_loop_wakeup.set()
+        except Exception as exc:
+            self._log(f"control-loop runtime stop lag error={exc.__class__.__name__}")
     stop = request_shutdown
 
     def shutdown(self, *, force: bool = False) -> ShutdownResult:
@@ -3959,8 +3925,6 @@ class StewardDaemon:
 
     def _record_control_loop_wakeups(self, wakeups: list[object]) -> None:
         ledger = self._control_loop_ledger
-        if ledger is None:
-            return
         for wakeup in wakeups:
             try:
                 data = getattr(wakeup, "data", {}) or {}
@@ -4415,7 +4379,7 @@ class StewardDaemon:
     def _plan_until_idle(self, result: TickResult) -> None:
         if self._active_planner_run_id is None:
             self._reconcile_interrupted_planner_runs()
-        if self._control_loop_ledger is not None and self._control_loop_ledger.planning_blocked:
+        if self._control_loop_ledger.planning_blocked:
             self._log("planner blocked by control-loop reconciliation conflict")
             return
         turns = 0
@@ -4440,20 +4404,19 @@ class StewardDaemon:
             )
             if not pending:
                 return
-            if self._control_loop_ledger is not None:
-                retry = self._control_loop_ledger.pending_retry("planner")
-                if retry is not None and retry[1] is not None and retry[1] > utc_now():
-                    current_signal_ids = set(self._canonical_signal_ids(pending))
-                    runs = self._control_loop_ledger.list_planner_runs()
-                    previous_signal_ids = set(runs[-1].input_signal_ids) if runs else set()
-                    if current_signal_ids != previous_signal_ids:
-                        self._control_loop_ledger.reset_retry("planner")
-                    else:
-                        self._log(
-                            "planner retry deferred "
-                            f"attempt={retry[0]} eligible_at={control_timestamp(retry[1])}"
-                        )
-                        return
+            retry = self._control_loop_ledger.pending_retry("planner")
+            if retry is not None and retry[1] is not None and retry[1] > utc_now():
+                current_signal_ids = set(self._canonical_signal_ids(pending))
+                runs = self._control_loop_ledger.list_planner_runs()
+                previous_signal_ids = set(runs[-1].input_signal_ids) if runs else set()
+                if current_signal_ids != previous_signal_ids:
+                    self._control_loop_ledger.reset_retry("planner")
+                else:
+                    self._log(
+                        "planner retry deferred "
+                        f"attempt={retry[0]} eligible_at={control_timestamp(retry[1])}"
+                    )
+                    return
             turns += 1
             before_pending = {item.id for item in pending}
             actionable, stale_reasons = revalidate_signal_items(self.config, pending)
@@ -4511,24 +4474,22 @@ class StewardDaemon:
         )
         control_run_id = new_control_loop_id("planner")
         canonical_signal_ids = self._canonical_signal_ids(inbox_items)
-        control_claim = None
-        if self._control_loop_ledger is not None:
-            try:
-                control_claim = self._control_loop_ledger.claim_planner_run(
-                    control_run_id,
-                    canonical_signal_ids,
-                    [task.id for task in active_tasks],
-                    prompt={
-                        "signalIds": canonical_signal_ids,
-                        "signalItemIds": [item.id for item in inbox_items],
-                        "activeTaskCount": len(active_tasks),
-                    },
-                )
-                self._active_planner_run_id = control_run_id
-                self._control_loop_wakeup.set()
-            except Exception as exc:
-                self._log(f"planner claim failed error={exc.__class__.__name__}")
-                return
+        try:
+            self._control_loop_ledger.claim_planner_run(
+                control_run_id,
+                canonical_signal_ids,
+                [task.id for task in active_tasks],
+                prompt={
+                    "signalIds": canonical_signal_ids,
+                    "signalItemIds": [item.id for item in inbox_items],
+                    "activeTaskCount": len(active_tasks),
+                },
+            )
+            self._active_planner_run_id = control_run_id
+            self._control_loop_wakeup.set()
+        except Exception as exc:
+            self._log(f"planner claim failed error={exc.__class__.__name__}")
+            return
         planner_run = None
         planner_error: Exception | None = None
         try:
@@ -4562,73 +4523,68 @@ class StewardDaemon:
                     ),
                 }
             )
-        if self._control_loop_ledger is not None and control_claim is not None:
-            try:
-                canonical_signal_by_item = {
-                    item.id: signal_id
-                    for item in inbox_items
-                    if (
-                        signal_id := self._control_loop_ledger.canonical_signal_id(
-                            item.provider, item.fingerprint
-                        )
+        try:
+            canonical_signal_by_item = {
+                item.id: signal_id
+                for item in inbox_items
+                if (
+                    signal_id := self._control_loop_ledger.canonical_signal_id(
+                        item.provider, item.fingerprint
                     )
-                    is not None
-                }
-                selected_item_ids_by_dedupe = {
-                    dedupe_key: selected_signal_item_ids(
-                        spec.metadata or {}, planner_run.consumed_item_ids
+                )
+                is not None
+            }
+            selected_item_ids_by_dedupe = {
+                dedupe_key: selected_signal_item_ids(
+                    spec.metadata or {}, planner_run.consumed_item_ids
+                )
+                for spec, dedupe_key in planner_run.planned
+            }
+            artifact_sources = self._planner_artifact_sources(
+                planner_run,
+                signals,
+                task_context,
+                run_id,
+            )
+            committed = self.store.commit_planner_decision(
+                run_id,
+                planned=planner_run.planned,
+                planner_dispositions=planner_run.dispositions,
+                consumed_item_ids=planner_run.consumed_item_ids,
+                selected_item_ids_by_dedupe=selected_item_ids_by_dedupe,
+                canonical_signal_by_item=canonical_signal_by_item,
+                state=state,
+                result={
+                    "acceptedCount": planner_run.accepted_count,
+                    "proposedCount": planner_run.proposed_count,
+                    "consumedItemIds": planner_run.consumed_item_ids,
+                },
+                diagnostics=diagnostics,
+                retry_after=retry_after,
+                artifact_sources=artifact_sources,
+                schedule_retry_key=(
+                    "planner" if state in {"failed", "interrupted"} else None
+                ),
+            )
+            completed = committed["completed"]
+            diagnostics = dict(completed.diagnostics)
+            planned_item_count = int(committed["planned_item_count"])
+            superseded_count = int(committed["superseded_item_count"])
+            consumed_count = planned_item_count + superseded_count
+            for record, created in committed["records"]:
+                if created:
+                    result.enqueued += 1
+                    self._log(f"enqueued {record.id} {_task_label(record)}")
+                else:
+                    result.skipped += 1
+                    self._log(
+                        f"skipped duplicate plan {record.id} "
+                        f"dedupe={record.spec.metadata.get('dedupe_key')}"
                     )
-                    for spec, dedupe_key in planner_run.planned
-                }
-                artifact_sources = self._planner_artifact_sources(
-                    planner_run,
-                    signals,
-                    task_context,
-                    run_id,
-                )
-                committed = self.store.commit_planner_decision(
-                    run_id,
-                    planned=planner_run.planned,
-                    planner_dispositions=planner_run.dispositions,
-                    consumed_item_ids=planner_run.consumed_item_ids,
-                    selected_item_ids_by_dedupe=selected_item_ids_by_dedupe,
-                    canonical_signal_by_item=canonical_signal_by_item,
-                    state=state,
-                    result={
-                        "acceptedCount": planner_run.accepted_count,
-                        "proposedCount": planner_run.proposed_count,
-                        "consumedItemIds": planner_run.consumed_item_ids,
-                    },
-                    diagnostics=diagnostics,
-                    retry_after=retry_after,
-                    artifact_sources=artifact_sources,
-                    schedule_retry_key=(
-                        "planner" if state in {"failed", "interrupted"} else None
-                    ),
-                )
-                completed = committed["completed"]
-                diagnostics = dict(completed.diagnostics)
-                planned_item_count = int(committed["planned_item_count"])
-                superseded_count = int(committed["superseded_item_count"])
-                consumed_count = planned_item_count + superseded_count
-                for record, created in committed["records"]:
-                    if created:
-                        result.enqueued += 1
-                        self._log(f"enqueued {record.id} {_task_label(record)}")
-                    else:
-                        result.skipped += 1
-                        self._log(
-                            f"skipped duplicate plan {record.id} "
-                            f"dedupe={record.spec.metadata.get('dedupe_key')}"
-                        )
-                self._planner_publication_queue[run_id] = completed
-                self._control_loop_wakeup.set()
-            except Exception as exc:
-                self._log(f"planner completion lag run={run_id} error={exc.__class__.__name__}")
-                planned_item_count = 0
-                superseded_count = 0
-                consumed_count = 0
-        else:
+            self._planner_publication_queue[run_id] = completed
+            self._control_loop_wakeup.set()
+        except Exception as exc:
+            self._log(f"planner completion lag run={run_id} error={exc.__class__.__name__}")
             planned_item_count = 0
             superseded_count = 0
             consumed_count = 0
@@ -4671,8 +4627,6 @@ class StewardDaemon:
 
     def _canonical_signal_ids(self, items: list[SignalItem]) -> list[str]:
         ledger = self._control_loop_ledger
-        if ledger is None:
-            return []
         values: list[str] = []
         for item in items:
             signal_id = ledger.canonical_signal_id(item.provider, item.fingerprint)
@@ -4768,8 +4722,6 @@ class StewardDaemon:
 
     def _planner_artifacts(self, completed: ControlPlannerRun) -> dict[str, bytes]:
         artifacts: dict[str, bytes] = {}
-        if self._control_loop_ledger is None:
-            raise ArchiveError("control-loop ledger is unavailable")
         for name, (path, required) in self._control_loop_ledger.planner_artifact_sources(
             completed.planner_run_id
         ).items():
@@ -4841,19 +4793,18 @@ class StewardDaemon:
             self.runtime.current_cycle_reason = _bounded_cycle_reason(reason)
         self._current_control_cycle_id = new_control_loop_id("cycle")
         self._current_control_cycle_started_at = started_at
-        if self._control_loop_ledger is not None:
-            try:
-                self._control_loop_ledger.record_cycle(
-                    ControlLoopCycle(
-                        cycleId=self._current_control_cycle_id,
-                        reason=_bounded_cycle_reason(reason),
-                        startedAt=started_at,
-                        runtimeState="active",
-                    )
+        try:
+            self._control_loop_ledger.record_cycle(
+                ControlLoopCycle(
+                    cycleId=self._current_control_cycle_id,
+                    reason=_bounded_cycle_reason(reason),
+                    startedAt=started_at,
+                    runtimeState="active",
                 )
-                self._control_loop_wakeup.set()
-            except Exception as exc:
-                self._log(f"control-loop cycle start lag error={exc.__class__.__name__}")
+            )
+            self._control_loop_wakeup.set()
+        except Exception as exc:
+            self._log(f"control-loop cycle start lag error={exc.__class__.__name__}")
 
     def _complete_cycle(self, result: TickResult, reason: str) -> None:
         completed_at = utc_now()
@@ -4869,7 +4820,7 @@ class StewardDaemon:
             self.runtime.current_cycle_reason = None
             self.runtime.last_completed_cycle = summary
         cycle_id = getattr(self, "_current_control_cycle_id", None)
-        if self._control_loop_ledger is not None and cycle_id is not None:
+        if cycle_id is not None:
             try:
                 self._control_loop_ledger.record_cycle(
                     ControlLoopCycle(

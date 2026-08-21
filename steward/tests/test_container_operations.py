@@ -1419,36 +1419,3 @@ def test_health_is_not_quiescent_with_pending_archive_outbox(
     assert result.exit_code == 0
     assert payload["archivePending"] is True
     assert payload["quiescent"] is False
-
-
-def test_cli_treats_absent_control_loop_ledger_as_idle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = StewardConfig(repo_root=tmp_path, local_codex_test_harness=True)
-    config = replace(
-        config,
-        deployment=replace(config.deployment, home=tmp_path / "steward"),
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    store.control_loop = None
-    assert store.control_loop_ledger is None
-
-    monkeypatch.setattr(cli_module, "_context", lambda: (store, config))
-    diagnostics = CliRunner().invoke(cli_module.app, ["diagnostics"])
-    diagnostics_payload = json.loads(diagnostics.stdout)
-    assert diagnostics.exit_code == 0
-    assert diagnostics_payload["planningBlocked"] is False
-    assert diagnostics_payload["pendingArchiveEvents"] == 0
-    assert diagnostics_payload["activePlannerRunId"] is None
-
-    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: config)
-    monkeypatch.setattr(cli_module.TaskStore, "open", lambda _path: store)
-    health = CliRunner().invoke(cli_module.app, ["health"])
-    health_payload = json.loads(health.stdout)
-    assert health.exit_code == 0
-    assert health_payload["lifecycle"] == "running"
-    assert health_payload["heartbeat"] == "ok"
-    assert health_payload["plannerActive"] is False
-    assert health_payload["archivePending"] is False
-    assert health_payload["quiescent"] is True

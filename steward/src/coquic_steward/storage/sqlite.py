@@ -260,6 +260,8 @@ class TaskPage(NamedTuple):
 class SQLiteTaskStore:
     """SQLite-backed store hidden behind Steward's TaskStore API."""
 
+    _control_loop: ControlLoopLedger
+
     def __init__(self, path: Path, on_change: Callable[[], None] | None = None):
         raise TypeError(
             "TaskStore cannot be constructed directly; use TaskStore.create() "
@@ -360,7 +362,7 @@ class SQLiteTaskStore:
         on_change: Callable[[], None] | None,
     ) -> "SQLiteTaskStore":
         store = cls._blank_store(database, on_change=on_change, wal=False)
-        store.control_loop = _bind_existing_control_loop(database, epoch_id)
+        store._control_loop = _bind_existing_control_loop(database, epoch_id)
         return store
 
     def recover(self) -> StoreRecoveryResult:
@@ -434,7 +436,6 @@ class SQLiteTaskStore:
             "connect",
             _configure_sqlite if wal else _configure_sqlite_read_only,
         )
-        store.control_loop = None
         return store
 
     @classmethod
@@ -552,7 +553,7 @@ class SQLiteTaskStore:
         store = cls._blank_store(database, on_change=None, wal=True)
         try:
             Base.metadata.create_all(store.engine)
-            store.control_loop = ControlLoopLedger(database, epoch_id=epoch_id)
+            store._control_loop = ControlLoopLedger(database, epoch_id=epoch_id)
             with store.engine.begin() as connection:
                 connection.exec_driver_sql(
                     f"PRAGMA user_version = {SQLITE_USER_VERSION}"
@@ -2239,8 +2240,12 @@ class SQLiteTaskStore:
         self._notify_change()
 
     @property
+    def control_loop(self) -> ControlLoopLedger:
+        return self._control_loop
+
+    @property
     def control_loop_ledger(self) -> ControlLoopLedger:
-        return self.control_loop
+        return self._control_loop
 
     def ingest_signal_collection(
         self,
@@ -5358,16 +5363,15 @@ class SQLiteTaskStore:
                 row.planner_run_id = planner_run_id
                 row.planned_task_id = task_id
             session.flush()
-            if self.control_loop is not None:
-                raw_connection = session.connection().connection.driver_connection
-                raw_connection.row_factory = sqlite3.Row
-                self.control_loop.transition_signal_identities(
-                    [(row.provider, row.fingerprint) for row in rows],
-                    "planned",
-                    planner_run_id=planner_run_id,
-                    reason="legacy_signal_planned",
-                    connection=raw_connection,
-                )
+            raw_connection = session.connection().connection.driver_connection
+            raw_connection.row_factory = sqlite3.Row
+            self.control_loop.transition_signal_identities(
+                [(row.provider, row.fingerprint) for row in rows],
+                "planned",
+                planner_run_id=planner_run_id,
+                reason="legacy_signal_planned",
+                connection=raw_connection,
+            )
             planned = len(rows)
         if planned:
             self._notify_change()
@@ -5432,7 +5436,7 @@ class SQLiteTaskStore:
                 signal_row.planned_task_id = None
                 requeued += 1
             session.flush()
-            if requeued and self.control_loop is not None:
+            if requeued:
                 raw_connection = session.connection().connection.driver_connection
                 raw_connection.row_factory = sqlite3.Row
                 self.control_loop.transition_signal_identities(
@@ -5470,16 +5474,15 @@ class SQLiteTaskStore:
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
             session.flush()
-            if self.control_loop is not None:
-                raw_connection = session.connection().connection.driver_connection
-                raw_connection.row_factory = sqlite3.Row
-                self.control_loop.transition_signal_identities(
-                    [(row.provider, row.fingerprint) for row in rows],
-                    "superseded",
-                    planner_run_id=planner_run_id,
-                    reason="signal_superseded",
-                    connection=raw_connection,
-                )
+            raw_connection = session.connection().connection.driver_connection
+            raw_connection.row_factory = sqlite3.Row
+            self.control_loop.transition_signal_identities(
+                [(row.provider, row.fingerprint) for row in rows],
+                "superseded",
+                planner_run_id=planner_run_id,
+                reason="signal_superseded",
+                connection=raw_connection,
+            )
             superseded = len(rows)
         if superseded:
             self._notify_change()

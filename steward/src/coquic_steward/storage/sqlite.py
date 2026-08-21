@@ -1783,14 +1783,6 @@ class SQLiteTaskStore:
                 time.sleep(0.005 * (attempt + 1))
         raise RuntimeError("run allocation failed")
 
-    def _activate_run_ownership(self, item: TaskRun) -> None:
-        """Activate an already allocated run without a partial ownership update."""
-
-        with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-            self._activate_run_ownership_connection(connection, item)
-            connection.exec_driver_sql("COMMIT")
-
     def get_run(self, run_id: str) -> TaskRun:
         with Session(self.engine) as session:
             row = session.get(TaskRunRow, run_id)
@@ -6213,9 +6205,6 @@ class SQLiteTaskStore:
             )
             return row_to_task(row, path_codec=self.path_codec) if row is not None else None
 
-    def _find_active_dedupe(self, dedupe_key: str) -> TaskRecord | None:
-        return self.find_active_dedupe(dedupe_key)
-
     def _upsert_iteration(
         self, item: TaskIteration, *, running_summary: str | None = None
     ) -> None:
@@ -6400,26 +6389,6 @@ def _validated_fields(
     if unknown:
         raise ValueError(f"unsupported {label} fields: {sorted(unknown)}")
     return {key: fields[key] for key in allowed if key in fields}
-
-
-def _execution_fields(fields: dict[str, object]) -> dict[str, object]:
-    return _validated_fields(
-        fields,
-        (
-            "state",
-            "current_phase",
-            "owning_pipeline_id",
-            "active_session_id",
-            "active_run_id",
-            "base_commit",
-            "expected_tree",
-            "worktree_path",
-            "image_version",
-            "runtime_version",
-            "archive_generation",
-        ),
-        "execution",
-    )
 
 
 def _pipeline_fields(fields: dict[str, object]) -> dict[str, object]:

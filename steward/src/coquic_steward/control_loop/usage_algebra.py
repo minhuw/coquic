@@ -36,9 +36,12 @@ def merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
         "totalTokens": _optional_sum(left.total_tokens, right.total_tokens),
     }
     if values["inputTokens"] is not None and values["cachedInputTokens"] is not None:
-        expected = values["inputTokens"] - values["cachedInputTokens"]
-        if values["uncachedInputTokens"] != expected:
-            values["uncachedInputTokens"] = None
+        if values["cachedInputTokens"] > values["inputTokens"]:
+            values["cachedInputTokens"] = None
+        else:
+            expected = values["inputTokens"] - values["cachedInputTokens"]
+            if values["uncachedInputTokens"] != expected:
+                values["uncachedInputTokens"] = None
     if values["outputTokens"] is not None and values["reasoningOutputTokens"] is not None:
         if values["reasoningOutputTokens"] > values["outputTokens"]:
             values["reasoningOutputTokens"] = None

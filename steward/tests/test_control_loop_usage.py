@@ -223,6 +223,11 @@ def _run(
             UsageTokens(outputTokens=2),
         ),
         (
+            UsageTokens(inputTokens=1),
+            UsageTokens(cachedInputTokens=2),
+            UsageTokens(inputTokens=1),
+        ),
+        (
             UsageTokens(),
             UsageTokens(),
             UsageTokens(),

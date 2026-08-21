@@ -2741,26 +2741,6 @@ def convert_completed_run(
     return AtifDocument(document, content, artifacts=_retained_artifact_components(states))
 
 
-def convert_run(*args: Any, **kwargs: Any) -> AtifDocument:
-    return convert_completed_run(*args, **kwargs)
-
-
-def to_atif(*args: Any, **kwargs: Any) -> AtifDocument:
-    return convert_completed_run(*args, **kwargs)
-
-
-def map_completed_run(*args: Any, **kwargs: Any) -> AtifDocument:
-    return convert_completed_run(*args, **kwargs)
-
-
-def convert_snapshot(*args: Any, **kwargs: Any) -> AtifDocument:
-    return convert_completed_run(*args, **kwargs)
-
-
-def build_atif(*args: Any, **kwargs: Any) -> AtifDocument:
-    return convert_completed_run(*args, **kwargs)
-
-
 __all__ = [
     "ATIF_SCHEMA_VERSION",
     "SUPPORTED_IMAGE_MEDIA_TYPES",
@@ -2768,10 +2748,5 @@ __all__ = [
     "AtifSource",
     "canonical_atif_bytes",
     "convert_completed_run",
-    "convert_run",
-    "convert_snapshot",
-    "build_atif",
-    "map_completed_run",
-    "to_atif",
     "validate_atif_document",
 ]

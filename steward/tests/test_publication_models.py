@@ -40,6 +40,7 @@ def test_publication_exports_use_canonical_names() -> None:
     exported = set(publication.__all__)
     assert {
         "AtifSource",
+        "convert_completed_run",
         "SanitizationResult",
         "UsageTokens",
         "MediaInspection",
@@ -50,6 +51,7 @@ def test_publication_exports_use_canonical_names() -> None:
     } <= exported
     from coquic_steward.publication import (
         AtifSource,
+        convert_completed_run,
         SanitizationResult,
         MediaInspection,
         inspect_media,
@@ -58,6 +60,7 @@ def test_publication_exports_use_canonical_names() -> None:
         publish_generation,
     )
     assert publication.AtifSource is AtifSource
+    assert publication.convert_completed_run is convert_completed_run
     assert publication.SanitizationResult is SanitizationResult
     assert publication.UsageTokens is UsageTokens
     assert publication.MediaInspection is MediaInspection
@@ -73,6 +76,11 @@ def test_publication_exports_use_canonical_names() -> None:
         "scan_corpus",
         "build_publication",
         "Publisher",
+        "build_atif",
+        "convert_run",
+        "convert_snapshot",
+        "map_completed_run",
+        "to_atif",
     }
     assert removed.isdisjoint(exported)
     assert all(not hasattr(publication, name) for name in removed)

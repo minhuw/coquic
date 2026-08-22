@@ -508,7 +508,18 @@ class GitHubFeatureIssuesProvider:
             return None
         if state.lower() != "open":
             return "source_closed"
-        labels = set(_label_names(decoded.get("labels")))
+        raw_labels = decoded.get("labels")
+        if strict:
+            if "labels" not in decoded:
+                raise ProviderRevalidationError("provider_response_missing_labels")
+            if not isinstance(raw_labels, list) or any(
+                not isinstance(label, dict)
+                or not isinstance(label.get("name"), str)
+                or not label["name"].strip()
+                for label in raw_labels
+            ):
+                raise ProviderRevalidationError("provider_response_invalid_labels")
+        labels = set(_label_names(raw_labels))
         if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
             return "required_label_removed"
         return None

@@ -56,6 +56,7 @@ from ..core.models import (
     EffectProposal,
     EffectResult,
     EFFECT_RESULT_EVENT_KIND,
+    DRY_RUN_OF_TASK_ID_METADATA_ALIAS,
     DRY_RUN_OF_TASK_ID_METADATA_KEY,
     LiveRerunAllocation,
     EFFECT_RESULT_METADATA_KEY,
@@ -1668,6 +1669,46 @@ class SQLiteTaskStore:
         finally:
             connection.close()
 
+    def _is_verified_live_rerun_owner(
+        self, session: Session, owner: TaskRow, source_task_id: str
+    ) -> bool:
+        """Prove that a signal owner is an allocated live rerun descendant."""
+
+        if owner.id == source_task_id:
+            return True
+        if owner.source != "rerun-live":
+            return False
+        owner_metadata = _metadata_dict(owner.metadata_json, self.path_codec)
+        try:
+            owner_mode = execution_mode_from_metadata(owner_metadata)
+        except (TypeError, ValueError):
+            return False
+        if owner_mode is not ExecutionMode.live:
+            return False
+        lineage = owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY)
+        if lineage is None:
+            lineage = owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_ALIAS)
+        if lineage != source_task_id:
+            return False
+        if not owner.dedupe_key or owner_metadata.get("dedupe_key") != owner.dedupe_key:
+            return False
+        return (
+            session.execute(
+                text(
+                    "SELECT 1 FROM control_loop_edges "
+                    "WHERE epoch_id=:epoch_id AND edge_type=:edge_type "
+                    "AND source_id=:source_id AND target_id=:target_id"
+                ),
+                {
+                    "epoch_id": self.control_loop.epoch_id,
+                    "edge_type": "task_rerun",
+                    "source_id": source_task_id,
+                    "target_id": owner.id,
+                },
+            ).first()
+            is not None
+        )
+
     def active_live_descendants(self, source_task_id: str) -> list[TaskRecord]:
         """Return all active live descendants recorded for one source."""
 
@@ -1680,10 +1721,8 @@ class SQLiteTaskStore:
             ).all()
             for row in rows:
                 record = row_to_task(row, path_codec=self.path_codec)
-                if (
-                    record.dry_run_of_task_id == source_task_id
-                    and execution_mode_from_metadata(record.spec.metadata)
-                    is ExecutionMode.live
+                if record.id != source_task_id and self._is_verified_live_rerun_owner(
+                    session, row, source_task_id
                 ):
                     values.append(record)
         values.sort(key=lambda value: (value.created_at, value.id))
@@ -1783,8 +1822,7 @@ class SQLiteTaskStore:
                 owner = session.get(TaskRow, row.planned_task_id)
                 if owner is None:
                     raise ValueError("task selected signal link owner is missing")
-                owner_metadata = _metadata_dict(owner.metadata_json, self.path_codec)
-                if owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY) != task_id:
+                if not self._is_verified_live_rerun_owner(session, owner, task_id):
                     raise ValueError("task selected signal link owner is unrelated")
             return [
                 row_to_signal_item(by_id[item_id], path_codec=self.path_codec)
@@ -1856,14 +1894,8 @@ class SQLiteTaskStore:
                 ).all()
                 existing_row = None
                 for candidate in active_rows:
-                    candidate_metadata = _metadata_dict(
-                        candidate.metadata_json, self.path_codec
-                    )
-                    candidate_record = row_to_task(candidate, path_codec=self.path_codec)
-                    if (
-                        candidate_record.dry_run_of_task_id == source_task_id
-                        and execution_mode_from_metadata(candidate_metadata)
-                        is ExecutionMode.live
+                    if self._is_verified_live_rerun_owner(
+                        session, candidate, source_task_id
                     ):
                         existing_row = candidate
                         break
@@ -1889,10 +1921,9 @@ class SQLiteTaskStore:
                             owner = session.get(TaskRow, row.planned_task_id)
                             if owner is None:
                                 raise ValueError("live rerun signal owner is missing")
-                            owner_metadata = _metadata_dict(
-                                owner.metadata_json, self.path_codec
-                            )
-                            if owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY) != source_task_id:
+                            if not self._is_verified_live_rerun_owner(
+                                session, owner, source_task_id
+                            ):
                                 raise ValueError("live rerun signal owner is unrelated")
                     if set(selected) & set(stale):
                         raise ValueError("live rerun signal cannot be both actionable and stale")
@@ -1906,15 +1937,12 @@ class SQLiteTaskStore:
                     metadata["dedupe_key"] = lineage_dedupe
                     metadata["selected_signal_item_ids"] = list(selected)
                     if signal_rows:
-                        current_items = [
-                            row_to_signal_item(row, path_codec=self.path_codec)
-                            for row in signal_rows
-                        ]
+                        # Signal rows retain historical provider payloads.  A live
+                        # rerun must carry only canonical identities so stale
+                        # titles, bodies, and provider instructions cannot become
+                        # worker input before the scheduler refreshes state.
                         metadata["source_context"] = {
                             "selected_signal_item_ids": list(selected),
-                            "selected_signal_items": [
-                                item.model_dump(mode="json") for item in current_items
-                            ],
                         }
                         metadata["evidence"] = list(selected)
                     else:

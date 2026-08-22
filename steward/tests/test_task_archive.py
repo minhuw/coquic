@@ -161,13 +161,42 @@ def test_effects_sidecar_is_bounded_canonical_and_tamper_evident(tmp_path: Path)
         archive.effect_records("task-effects")
 
 
-def test_empty_effects_sidecar_is_compatible_with_not_applicable(tmp_path: Path) -> None:
+def test_not_applicable_effects_sidecar_is_canonical_and_distinct_from_missing(
+    tmp_path: Path,
+) -> None:
     archive = TaskArchive(tmp_path / "tasks")
     archive.create_task("task-no-effects", "prompt", pipeline_id="pipeline-effects")
     path = archive.materialize_effects(
-        "task-no-effects", (), result=EffectResult.not_applicable
+        "task-no-effects",
+        (),
+        result=EffectResult.not_applicable,
+        mode=ExecutionMode.dry_run.value,
+        recorded_at="2026-07-22T00:00:04Z",
     )
-    assert path.read_bytes() == b""
+    first = path.read_bytes()
+    assert first
+    assert first == archive.materialize_effects(
+        "task-no-effects",
+        (),
+        result=EffectResult.not_applicable,
+        mode=ExecutionMode.dry_run.value,
+        recorded_at="2026-07-22T00:00:04Z",
+    ).read_bytes()
+    records = archive.effect_records("task-no-effects")
+    assert records == (
+        {
+            "action": "none",
+            "actionId": "none",
+            "at": "2026-07-22T00:00:04Z",
+            "decision": "not-applicable",
+            "effectId": records[0]["effectId"],
+            "mode": "dry-run",
+            "proposalId": None,
+            "result": "not-applicable",
+            "taskId": "task-no-effects",
+        },
+    )
+    path.unlink()
     assert archive.effect_records("task-no-effects") == ()
 
 

@@ -148,6 +148,89 @@ def test_effect_result_is_typed_write_once_and_contradictions_fail(tmp_path: Pat
     assert live.finalize_effect_result(live_task.id) is EffectResult.applied
 
 
+def test_historical_live_effect_survives_dry_run_restart(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    live = TaskStore.create(database, dry_run=False)
+    task, _ = live.add_task(_spec())
+    live.record_effect_applied(
+        task.id,
+        action=EffectActionKind.git_push.value,
+        action_id="restart-live-effect",
+    )
+    live._finalize_exact_store()
+
+    restarted = TaskStore.open(database, dry_run=True)
+    assert restarted.task_execution_mode(task.id) is ExecutionMode.dry_run
+    evidence = restarted.effect_evidence(task.id)
+    assert len(evidence) == 1
+    assert evidence[0].mode is ExecutionMode.live
+    assert restarted.finalize_effect_result(task.id) is EffectResult.applied
+    assert restarted.effect_result(task.id) is EffectResult.applied
+
+
+def test_finalized_effect_result_rejects_late_applied_evidence(tmp_path: Path) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    assert store.finalize_effect_result(task.id) is EffectResult.not_applicable
+    event_count = len(store.events(task.id))
+
+    with pytest.raises(ValueError, match="already finalized"):
+        store.record_effect_applied(
+            task.id,
+            action=EffectActionKind.git_push.value,
+            action_id="late-live-effect",
+        )
+    assert len(store.events(task.id)) == event_count
+    assert store.effect_result(task.id) is EffectResult.not_applicable
+
+
+def test_proposal_bookkeeping_failure_is_not_external_effect_evidence(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=True)
+    task, _ = store.add_task(_spec())
+    store.add_event(
+        task.id,
+        "github.issue_update_failed",
+        "credentials and /private/path must not become an action id",
+        {"step": "proposal"},
+    )
+
+    assert store.effect_evidence(task.id) == ()
+    assert store.finalize_effect_result(task.id) is EffectResult.not_applicable
+
+
+def test_push_budget_legacy_evidence_uses_safe_identity(tmp_path: Path) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    store.add_event(
+        task.id,
+        "pipeline.push.blocked",
+        "main push budget reached; command=/private/secret token=credential",
+        {"pipeline_id": "pipeline-safe"},
+    )
+
+    evidence = store.effect_evidence(task.id)
+    assert len(evidence) == 1
+    assert evidence[0].action is EffectActionKind.git_push
+    assert evidence[0].action_id != (
+        "git-push:main push budget reached; command=/private/secret token=credential"
+    )
+    assert len(evidence[0].action_id) <= 160
+    from coquic_steward.execution.task_archive import TaskArchive
+
+    archive = TaskArchive(tmp_path / "tasks")
+    archive.create_task(task.id, "prompt", pipeline_id="pipeline-safe")
+    archive.materialize_effects(
+        task.id,
+        evidence,
+        result=EffectResult.not_applied,
+        mode=ExecutionMode.live.value,
+    )
+    assert archive.effect_records(task.id)[0]["actionId"] == evidence[0].action_id
+    assert store.finalize_effect_result(task.id) is EffectResult.not_applied
+
+
 def test_live_effect_is_allowed(tmp_path: Path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
     task, _ = store.add_task(_spec())
@@ -230,7 +313,10 @@ def test_dry_run_finalization_seals_and_retains_without_proposals(
     assert store.effect_result(task.id).value == "not-applicable"
     archive = TaskArchiveWriter(config)
     assert archive.verify(task.id)
-    assert archive.task_path(task.id, "effects.jsonl").is_file()
+    effect_records = archive.effect_records(task.id)
+    assert len(effect_records) == 1
+    assert effect_records[0]["result"] == "not-applicable"
+    assert effect_records[0]["actionId"] == "none"
     assert [
         event.kind
         for event in store.events(task.id)
@@ -285,7 +371,30 @@ def test_status_reports_mode_and_external_effect_separately(tmp_path: Path, monk
     assert result.exit_code == 0, result.stdout
     assert "mode=dry-run" in result.stdout
     assert "effect=not-applicable" in result.stdout
-    assert "validated; external operation not applied" in result.stdout
+    assert "validated; no external operation applicable" in result.stdout
+
+
+def test_status_and_timeline_do_not_validate_failed_dry_run_tasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.cli as cli
+
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=True)
+    tasks = []
+    for status in (TaskStatus.failed, TaskStatus.blocked, TaskStatus.cancelled):
+        task, _ = store.add_task(_spec(title=status.value))
+        store.finish_task(task.id, status, status.value)
+        store.finalize_effect_result(task.id)
+        tasks.append(task)
+    monkeypatch.setattr(cli, "_context", lambda: (store, SimpleNamespace()))
+
+    status_output = CliRunner().invoke(app, ["status"])
+    assert status_output.exit_code == 0, status_output.stdout
+    assert "validated;" not in status_output.stdout
+    for task in tasks:
+        timeline_output = CliRunner().invoke(app, ["timeline", task.id])
+        assert timeline_output.exit_code == 0, timeline_output.stdout
+        assert "validated;" not in timeline_output.stdout
 
 
 def test_dry_run_publication_cli_does_not_construct_mutator(monkeypatch) -> None:

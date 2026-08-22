@@ -347,6 +347,45 @@ class TaskLedgerOwnershipError(ValueError):
     """A task execution cannot be used without its persisted pipeline owner."""
 
 
+_EFFECT_ACTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+
+
+def _fallback_effect_action_id(
+    prefix: str,
+    task_id: str,
+    event_kind: str,
+    *semantic_parts: object,
+) -> str:
+    """Derive a bounded legacy identity without retaining event text."""
+
+    seed = "\0".join(
+        [prefix, task_id, event_kind, *(str(part) for part in semantic_parts)]
+    ).encode("utf-8")
+    return f"{prefix}:{hashlib.sha256(seed).hexdigest()}"
+
+
+def _event_effect_action_id(
+    data: Mapping[str, object],
+    *,
+    task_id: str,
+    event_kind: str,
+    prefix: str,
+    semantic_parts: tuple[object, ...],
+) -> str:
+    """Keep persisted identities or replace unsafe legacy fallbacks."""
+
+    candidate = data.get("action_id")
+    if candidate is None:
+        candidate = data.get("actionId")
+    if candidate is None or candidate == "":
+        return _fallback_effect_action_id(
+            prefix, task_id, event_kind, *semantic_parts
+        )
+    if isinstance(candidate, str) and _EFFECT_ACTION_ID_RE.fullmatch(candidate):
+        return candidate
+    raise ValueError("effect action identity is invalid")
+
+
 class TaskPage(NamedTuple):
     """One detached keyset page of tasks and its continuation cursor."""
 
@@ -670,14 +709,17 @@ class SQLiteTaskStore:
                     action_id = data.get("actionId", data.get("action_id"))
                     if not isinstance(action_id, str) or not action_id:
                         raise ValueError("applied effect action identity is missing")
-                    if mode is not ExecutionMode.live:
+                    evidence_mode = coerce_execution_mode(data.get("mode"))
+                    if evidence_mode is None:
+                        raise ValueError("applied effect mode is missing")
+                    if evidence_mode is not ExecutionMode.live:
                         raise ValueError("dry-run task contains an applied effect")
                     values.append(
                         EffectEvidence(
                             task_id=task_id,
                             action=action,
                             action_id=action_id,
-                            mode=mode,
+                            mode=evidence_mode,
                             decision=EffectDecisionKind.allow,
                             result=EffectResult.applied,
                             at=event_record.created_at,
@@ -689,45 +731,94 @@ class SQLiteTaskStore:
                 action: EffectActionKind | None = None
                 action_id: str | None = None
                 result = EffectResult.applied
+                evidence_mode = ExecutionMode.live
+                pipeline_id = data.get("pipeline_id", data.get("pipelineId"))
+                commit = data.get("commit")
+                attempt = data.get("attempt")
                 if event_record.kind in {
                     "pipeline.push",
                     "main.pushed",
                     "pipeline.push.ambiguous_resolved",
                 }:
                     action = EffectActionKind.git_push
-                    action_id = data.get("action_id", data.get("actionId"))
-                    if not isinstance(action_id, str) or not action_id:
-                        action_id = f"git-push:{data.get('commit', event_record.message)}"
+                    action_id = _event_effect_action_id(
+                        data,
+                        task_id=task_id,
+                        event_kind=event_record.kind,
+                        prefix="git-push-legacy",
+                        semantic_parts=(pipeline_id, commit, attempt),
+                    )
                 elif event_record.kind in {"github.issue_closed", "github.issue_commented"}:
                     action = (
                         EffectActionKind.github_issue_close
                         if event_record.kind == "github.issue_closed"
                         else EffectActionKind.github_issue_comment
                     )
-                    action_id = data.get("action_id", data.get("actionId"))
-                    if not isinstance(action_id, str) or not action_id:
-                        action_id = f"{action.value}:{data.get('issue_number', event_record.message)}"
+                    issue_number = data.get("issue_number", data.get("issueNumber"))
+                    action_id = _event_effect_action_id(
+                        data,
+                        task_id=task_id,
+                        event_kind=event_record.kind,
+                        prefix=(
+                            "github-issue-close-legacy"
+                            if action is EffectActionKind.github_issue_close
+                            else "github-issue-comment-legacy"
+                        ),
+                        semantic_parts=(issue_number, data.get("integration_task_id")),
+                    )
                 elif event_record.kind in {"publication.exposed", "publication.applied"}:
                     action = EffectActionKind.publication_transport
-                    action_id = data.get("action_id", data.get("actionId"))
-                    if not isinstance(action_id, str) or not action_id:
-                        action_id = f"publication-expose:{data.get('publication_id', event_record.message)}"
+                    publication_id = data.get(
+                        "publication_id", data.get("publicationId")
+                    )
+                    action_id = _event_effect_action_id(
+                        data,
+                        task_id=task_id,
+                        event_kind=event_record.kind,
+                        prefix="publication-expose-legacy",
+                        semantic_parts=(publication_id,),
+                    )
                 elif event_record.kind in {"pipeline.push.failure", "pipeline.push.blocked"}:
                     action = EffectActionKind.git_push
-                    action_id = data.get("action_id", data.get("actionId"))
-                    if not isinstance(action_id, str) or not action_id:
-                        action_id = f"git-push:{data.get('commit', event_record.message)}"
+                    action_id = _event_effect_action_id(
+                        data,
+                        task_id=task_id,
+                        event_kind=event_record.kind,
+                        prefix="git-push-legacy",
+                        semantic_parts=(
+                            pipeline_id,
+                            commit,
+                            attempt,
+                            data.get("day"),
+                        ),
+                    )
                     result = EffectResult.not_applied
                 elif event_record.kind == "github.issue_update_failed":
                     step = str(data.get("step", "comment"))
+                    if step == "proposal":
+                        # This records a local proposal-bookkeeping failure,
+                        # not a failed external action.  A later retry may
+                        # still persist the real proposal evidence.
+                        continue
+                    if step not in {"comment", "close"}:
+                        raise ValueError("unknown GitHub issue update step")
                     action = (
                         EffectActionKind.github_issue_close
                         if step == "close"
                         else EffectActionKind.github_issue_comment
                     )
-                    action_id = data.get("action_id", data.get("actionId"))
-                    if not isinstance(action_id, str) or not action_id:
-                        action_id = f"{action.value}:{data.get('issue_number', event_record.message)}"
+                    issue_number = data.get("issue_number", data.get("issueNumber"))
+                    action_id = _event_effect_action_id(
+                        data,
+                        task_id=task_id,
+                        event_kind=event_record.kind,
+                        prefix=(
+                            "github-issue-close-legacy"
+                            if action is EffectActionKind.github_issue_close
+                            else "github-issue-comment-legacy"
+                        ),
+                        semantic_parts=(issue_number, data.get("integration_task_id"), step),
+                    )
                     result = EffectResult.not_applied
                 if action is None or action_id is None:
                     continue
@@ -736,7 +827,7 @@ class SQLiteTaskStore:
                         task_id=task_id,
                         action=action,
                         action_id=action_id,
-                        mode=mode,
+                        mode=evidence_mode,
                         decision=EffectDecisionKind.allow,
                         result=result,
                         at=event_record.created_at,
@@ -1057,6 +1148,8 @@ class SQLiteTaskStore:
                             raise ValueError("contradictory applied effect evidence")
                         session.commit()
                         return existing_evidence
+                    if effect_result_from_metadata(metadata) is not None:
+                        raise ValueError("external effect result is already finalized")
                     event = Event(
                         task_id=task_id,
                         kind="effect.applied",
@@ -1133,6 +1226,12 @@ class SQLiteTaskStore:
                 ):
                     raise ValueError("contradictory recorded effect evidence")
             else:
+                row = session.get(TaskRow, task_id)
+                if row is None:
+                    raise KeyError(task_id)
+                metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                if effect_result_from_metadata(metadata) is not None:
+                    raise ValueError("external effect result is already finalized")
                 session.add(
                     event_to_row(
                         Event(

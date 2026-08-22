@@ -1518,6 +1518,7 @@ class StewardExecutor:
                             summary,
                             {
                                 "pipeline_id": pipeline.id,
+                                "action_id": action,
                                 "attempt": attempt,
                                 "count": push_count,
                                 "limit": self.config.limits.max_main_pushes_per_day,

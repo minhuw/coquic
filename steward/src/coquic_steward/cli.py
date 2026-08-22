@@ -521,6 +521,25 @@ def agents() -> None:
         typer.echo(f"{agent.worker}\t{mode}\t{skills}\t{agent.purpose}")
 
 
+def _dry_run_terminal_outcome(
+    status: TaskStatus | str,
+    effect: EffectResult | None,
+) -> str:
+    """Render validation wording only for successful local lifecycles."""
+
+    if TaskStatus(status) not in {
+        TaskStatus.succeeded,
+        TaskStatus.pushed,
+        TaskStatus.no_changes,
+    }:
+        return ""
+    if effect is EffectResult.not_applied:
+        return "validated; external operation not applied"
+    if effect is EffectResult.not_applicable:
+        return "validated; no external operation applicable"
+    return ""
+
+
 @app.command()
 def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None:
     store, _ = _context()
@@ -536,12 +555,10 @@ def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None
         mode_text = mode.value if isinstance(mode, ExecutionMode) else "unknown"
         effect_text = effect.value if isinstance(effect, EffectResult) else "pending"
         outcome = ""
-        if (
-            mode is ExecutionMode.dry_run
-            and TaskStatus(task.status).terminal
-            and effect in {EffectResult.not_applied, EffectResult.not_applicable}
-        ):
-            outcome = "\tvalidated; external operation not applied"
+        if mode is ExecutionMode.dry_run:
+            rendered = _dry_run_terminal_outcome(task.status, effect)
+            if rendered:
+                outcome = f"\t{rendered}"
         typer.echo(
             f"{task.id}\t{task.status}\t{task.spec.workflow}\t"
             f"{task.spec.kind}\t{task.spec.title}\t"
@@ -701,12 +718,10 @@ def timeline(task_id: str, limit: int = 100) -> None:
     mode_text = mode.value if isinstance(mode, ExecutionMode) else "unknown"
     effect_text = effect.value if isinstance(effect, EffectResult) else "pending"
     typer.echo(f"execution-mode={mode_text}\teffect-result={effect_text}")
-    if (
-        mode is ExecutionMode.dry_run
-        and TaskStatus(task.status).terminal
-        and effect in {EffectResult.not_applied, EffectResult.not_applicable}
-    ):
-        typer.echo("validated; external operation not applied")
+    if mode is ExecutionMode.dry_run:
+        rendered = _dry_run_terminal_outcome(task.status, effect)
+        if rendered:
+            typer.echo(rendered)
     for event in store.events(task_id, limit=limit):
         typer.echo(f"{event.created_at.isoformat()}\t{event.kind}\t{event.message}")
 

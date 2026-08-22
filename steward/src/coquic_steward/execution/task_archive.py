@@ -362,6 +362,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _not_applicable_effect_id(task_id: str, mode: str) -> str:
+    """Return the stable identity for an aggregate with no actions."""
+
+    seed = f"not-applicable\0{task_id}\0{mode}".encode("utf-8")
+    return "effect-" + hashlib.sha256(seed).hexdigest()
+
+
 def _json_bytes(value: Mapping[str, Any] | list[Any]) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
@@ -515,6 +522,12 @@ def _validate_effect_record(value: Any, label: str = "effect") -> None:
     if value["result"] == "not-applicable":
         if value["action"] != "none" or value["actionId"] != "none" or value["decision"] != "not-applicable":
             raise ArchiveValidationError(f"{label}.not-applicable evidence is invalid")
+        if value["effectId"] != _not_applicable_effect_id(
+            value["taskId"], value["mode"]
+        ):
+            raise ArchiveValidationError(
+                f"{label}.not-applicable identity is invalid"
+            )
     else:
         try:
             expected_effect_id = effect_evidence_identity(
@@ -1790,6 +1803,25 @@ class TaskArchive:
             if isinstance(result, EffectResult)
             else str(result or EffectResult.not_applicable.value)
         )
+        selected_mode = getattr(mode, "value", str(mode))
+        default_recorded_at = recorded_at
+        if not default_recorded_at:
+            try:
+                metadata = json.loads(
+                    self.task_path(task_id, "task.json").read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                metadata = {}
+            candidate_timestamp = (
+                metadata.get("updatedAt")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            default_recorded_at = (
+                candidate_timestamp
+                if isinstance(candidate_timestamp, str) and candidate_timestamp
+                else _now()
+            )
         values: list[dict[str, Any]] = []
         for item in effects or ():
             if isinstance(item, EffectEvidence):
@@ -1797,7 +1829,7 @@ class TaskArchive:
             else:
                 value = dict(item)
                 if "at" not in value:
-                    value["at"] = recorded_at or _now()
+                    value["at"] = default_recorded_at
                 if "taskId" not in value:
                     value["taskId"] = task_id
             if value.get("taskId") is None:
@@ -1810,6 +1842,19 @@ class TaskArchive:
                 raise ArchiveValidationError(
                     "empty effects evidence requires not-applicable result"
                 )
+            values.append(
+                {
+                    "effectId": _not_applicable_effect_id(task_id, selected_mode),
+                    "taskId": task_id,
+                    "action": "none",
+                    "actionId": "none",
+                    "mode": selected_mode,
+                    "decision": "not-applicable",
+                    "result": selected_result,
+                    "at": default_recorded_at,
+                    "proposalId": None,
+                }
+            )
         else:
             if selected_result == EffectResult.not_applicable.value:
                 raise ArchiveValidationError(

@@ -1070,6 +1070,14 @@ def test_live_rerun_rejects_incomplete_feature_response_without_mutation(
             "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
             "most_recent_instance": {"location": {"path": "src/main.cpp"}},
         },
+        {
+            "number": 42,
+            "html_url": "https://github.com/other/repo/security/code-scanning/42",
+            "url": "https://api.github.com/repos/other/repo/code-scanning/alerts/42",
+            "state": "open",
+            "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
+            "most_recent_instance": {"location": {"path": "src/main.cpp"}},
+        },
     ],
 )
 def test_live_rerun_rejects_incomplete_or_mismatched_codeql_response(
@@ -1173,6 +1181,50 @@ def test_strict_codeql_hydration_accepts_matching_alert(
     assert [current.id for current in result.actionable] == [item.id]
     assert result.refreshed[item.id].payload["alert_number"] == 42
     assert result.refreshed[item.id].payload["rule_id"] == "cpp/use-after-free"
+
+
+def test_strict_feature_issue_hydration_rejects_foreign_repository(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.signals.collector import revalidate_signal_items_with_context
+    import coquic_steward.signals.providers as providers
+
+    item = SignalItem(
+        id="feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="feature-42",
+        title="Feature issue 42",
+        links=[
+            {
+                "label": "Open GitHub issue",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+            }
+        ],
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+        },
+    )
+    response = {
+        "number": 42,
+        "url": "https://github.com/other/repo/issues/42",
+        "state": "OPEN",
+        "labels": [{"name": "steward:feature"}],
+    }
+    monkeypatch.setattr(
+        providers,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True, stdout=json.dumps(response), stderr=""
+        ),
+    )
+
+    result = revalidate_signal_items_with_context(config, [item], strict=True)
+
+    assert result.actionable == []
+    assert result.stale_reasons == {item.id: "provider_unavailable"}
+    assert result.refreshed == {}
 
 
 def test_live_rerun_drops_source_artifact_aliases_from_metadata_and_prompt(
@@ -1321,20 +1373,50 @@ def test_live_rerun_atomic_allocation_rolls_back(monkeypatch, tmp_path: Path) ->
     config.repo_root.mkdir()
     store = TaskStore.create(config.db_path, dry_run=True)
     source = _sealed_dry_run_source(config, store)
-    before_ids = {task.id for task in store.list_tasks()}
-    before_wakeups = {item.id for item in store.pending_wakeups()}
-    original_edge = store.control_loop._edge
+    live_store = TaskStore.open(store.path, dry_run=False)
+    before_ids = {task.id for task in live_store.list_tasks()}
+    before_wakeups = {item.id for item in live_store.pending_wakeups()}
+    original_edge = live_store.control_loop._edge
 
     def fail_after_lineage(connection, edge_type, source_id, target_id):
         if edge_type == "task_rerun":
             raise RuntimeError("injected rerun allocation failure")
         return original_edge(connection, edge_type, source_id, target_id)
 
-    monkeypatch.setattr(store.control_loop, "_edge", fail_after_lineage)
+    monkeypatch.setattr(live_store.control_loop, "_edge", fail_after_lineage)
     with pytest.raises(RuntimeError, match="injected rerun allocation failure"):
+        live_store.allocate_live_rerun(source.id)
+    assert {task.id for task in live_store.list_tasks()} == before_ids
+    assert {item.id for item in live_store.pending_wakeups()} == before_wakeups
+
+
+def test_store_rejects_live_rerun_under_dry_run_startup_without_mutation(
+    tmp_path: Path,
+) -> None:
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    source = _sealed_dry_run_source(config, store)
+    before_tasks = [(task.id, task.status) for task in store.list_tasks()]
+    before_events = [
+        (event.task_id, event.kind, event.data)
+        for task in store.list_tasks()
+        for event in store.events(task.id)
+    ]
+    before_wakeups = [(item.id, item.reason) for item in store.pending_wakeups()]
+
+    with pytest.raises(ValueError, match="dry-run startup"):
         store.allocate_live_rerun(source.id)
-    assert {task.id for task in store.list_tasks()} == before_ids
-    assert {item.id for item in store.pending_wakeups()} == before_wakeups
+
+    assert [(task.id, task.status) for task in store.list_tasks()] == before_tasks
+    assert [
+        (event.task_id, event.kind, event.data)
+        for task in store.list_tasks()
+        for event in store.events(task.id)
+    ] == before_events
+    assert [(item.id, item.reason) for item in store.pending_wakeups()] == before_wakeups
 
 
 def test_dry_run_publication_cli_does_not_construct_mutator(monkeypatch) -> None:

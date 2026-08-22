@@ -1928,6 +1928,8 @@ class SQLiteTaskStore:
         signal ownership, duplicate lineage, and all durable writes together.
         """
 
+        if self._startup_dry_run:
+            raise ValueError("live rerun unavailable under dry-run startup")
         if not isinstance(source_task_id, str) or not source_task_id:
             raise ValueError("source task id is required")
         selected = list(dict.fromkeys(
@@ -2002,7 +2004,11 @@ class SQLiteTaskStore:
                             raise ValueError("live rerun signal context is missing")
                         for row in signal_rows:
                             current = current_items[row.id]
-                            if current.provider != row.provider or current.kind != row.kind:
+                            if (
+                                current.provider != row.provider
+                                or current.kind != row.kind
+                                or current.fingerprint != row.fingerprint
+                            ):
                                 raise ValueError("live rerun signal context identity disagrees")
                             if row.planned_task_id == source_task_id:
                                 continue

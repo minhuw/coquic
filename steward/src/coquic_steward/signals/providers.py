@@ -567,6 +567,10 @@ class GitHubFeatureIssuesProvider:
             if strict:
                 raise ProviderRevalidationError("signal_identity_missing")
             return None
+        if strict:
+            _validate_stored_feature_issue_identity(
+                item, config.github_repository, issue_number
+            )
         command = [
             "gh",
             "issue",
@@ -615,6 +619,9 @@ class GitHubFeatureIssuesProvider:
             current_number = _int_or_none(decoded.get("number"))
             if current_number != issue_number:
                 raise ProviderRevalidationError("provider_response_missing_issue_number")
+            _validate_feature_issue_response(
+                decoded, config.github_repository, issue_number
+            )
         labels = set(_label_names(raw_labels))
         if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
             return "required_label_removed"
@@ -634,13 +641,19 @@ class GitHubFeatureIssuesProvider:
         """Fetch the selected issue again and retain only current fields."""
 
         cached = _cached_revalidated_signal_item(self, item)
-        if cached is not None:
+        if cached is not None and not strict:
             return cached
         issue_number = _int_or_none(item.payload.get("issue_number"))
         if issue_number is None:
             if strict:
                 raise ProviderRevalidationError("signal_identity_missing")
             return None
+        if strict:
+            _validate_stored_feature_issue_identity(
+                item, config.github_repository, issue_number
+            )
+        if cached is not None:
+            return cached
         command = [
             "gh",
             "issue",
@@ -688,6 +701,10 @@ class GitHubFeatureIssuesProvider:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_issue_number")
             return None
+        if strict:
+            _validate_feature_issue_response(
+                decoded, config.github_repository, issue_number
+            )
         if state.lower() != "open":
             return None
         labels = set(_label_names(raw_labels))
@@ -742,6 +759,10 @@ class CodeScanningProvider:
             if strict:
                 raise ProviderRevalidationError("signal_identity_missing")
             return None
+        if strict:
+            _validate_stored_code_scanning_identity(
+                item, config.github_repository, alert_number
+            )
         command = [
             "gh",
             "api",
@@ -774,7 +795,9 @@ class CodeScanningProvider:
         if state != "open":
             return "source_not_open"
         if strict:
-            _validate_code_scanning_response(decoded, alert_number)
+            _validate_code_scanning_response(
+                decoded, alert_number, config.github_repository
+            )
             current = _code_scanning_item(decoded)
             _remember_revalidated_signal_item(self, item, current)
         return None
@@ -783,13 +806,19 @@ class CodeScanningProvider:
         self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> SignalItem | None:
         cached = _cached_revalidated_signal_item(self, item)
-        if cached is not None:
+        if cached is not None and not strict:
             return cached
         alert_number = _code_scanning_alert_number(item)
         if alert_number is None:
             if strict:
                 raise ProviderRevalidationError("signal_identity_missing")
             return None
+        if strict:
+            _validate_stored_code_scanning_identity(
+                item, config.github_repository, alert_number
+            )
+        if cached is not None:
+            return cached
         command = [
             "gh",
             "api",
@@ -822,7 +851,9 @@ class CodeScanningProvider:
         if state != "open":
             return None
         if strict:
-            _validate_code_scanning_response(decoded, alert_number)
+            _validate_code_scanning_response(
+                decoded, alert_number, config.github_repository
+            )
         return _remember_revalidated_signal_item(self, item, _code_scanning_item(decoded))
 
 
@@ -990,6 +1021,73 @@ def _workflow_item(
     )
 
 
+def _validate_github_canonical_url(
+    value: object, *, host: str, path: str
+) -> bool:
+    raw = _str_or_none(value)
+    if raw is None or raw != raw.strip():
+        return False
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == host
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path == path
+    )
+
+
+def _feature_issue_url_is_canonical(
+    value: object, repository: str, issue_number: int
+) -> bool:
+    return _validate_github_canonical_url(
+        value,
+        host="github.com",
+        path=f"/{repository}/issues/{issue_number}",
+    )
+
+
+def _validate_stored_feature_issue_identity(
+    item: SignalItem, repository: str, issue_number: int
+) -> None:
+    if (
+        isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or issue_number < 1
+    ):
+        raise ProviderRevalidationError("signal_identity_invalid")
+    if not _feature_issue_url_is_canonical(
+        item.payload.get("issue_url"), repository, issue_number
+    ):
+        raise ProviderRevalidationError("signal_identity_url_invalid")
+    for link in item.links:
+        if not _feature_issue_url_is_canonical(
+            link.get("url"), repository, issue_number
+        ):
+            raise ProviderRevalidationError("signal_identity_link_invalid")
+
+
+def _validate_feature_issue_response(
+    response: dict[str, Any], repository: str, issue_number: int
+) -> None:
+    returned_number = _int_or_none(response.get("number"))
+    if (
+        isinstance(response.get("number"), bool)
+        or returned_number is None
+        or returned_number < 1
+        or returned_number != issue_number
+    ):
+        raise ProviderRevalidationError("provider_response_issue_identity_mismatch")
+    if not _feature_issue_url_is_canonical(
+        response.get("url"), repository, issue_number
+    ):
+        raise ProviderRevalidationError("provider_response_issue_url_mismatch")
+
+
 def _github_feature_issue_item(
     item: dict[str, Any],
     *,
@@ -1099,26 +1197,72 @@ def _code_scanning_alert_number(item: SignalItem) -> int | None:
     return None
 
 
-def _code_scanning_url_alert_number(value: object, *, html: bool) -> int | None:
-    url = _str_or_none(value)
-    if url is None:
+def _code_scanning_url_alert_number(
+    value: object, *, repository: str, html: bool
+) -> int | None:
+    raw = _str_or_none(value)
+    if raw is None or raw != raw.strip():
         return None
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
         return None
-    parts = [part for part in parsed.path.rstrip("/").split("/") if part]
-    if not parts:
+    host = "github.com" if html else "api.github.com"
+    prefix = (
+        f"/{repository}/security/code-scanning/"
+        if html
+        else f"/repos/{repository}/code-scanning/alerts/"
+    )
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != host
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(prefix)
+    ):
         return None
-    if html:
-        if len(parts) < 3 or parts[-3:-1] != ["security", "code-scanning"]:
-            return None
-    elif len(parts) < 2 or parts[-2] != "alerts":
+    suffix = parsed.path[len(prefix) :]
+    if not suffix or "/" in suffix:
         return None
-    return _int_or_none(parts[-1])
+    return _int_or_none(suffix)
+
+
+def _validate_stored_code_scanning_identity(
+    item: SignalItem, repository: str, alert_number: int
+) -> None:
+    """Require the Store identity and retained URL to name one local alert."""
+
+    if (
+        isinstance(alert_number, bool)
+        or not isinstance(alert_number, int)
+        or alert_number <= 0
+    ):
+        raise ProviderRevalidationError("signal_identity_missing")
+    raw_number = item.payload.get("alert_number")
+    if raw_number is not None:
+        stored_number = _int_or_none(raw_number)
+        if (
+            stored_number is None
+            or isinstance(raw_number, bool)
+            or stored_number != alert_number
+            or stored_number <= 0
+        ):
+            raise ProviderRevalidationError("signal_identity_alert_mismatch")
+    link_numbers: list[int] = []
+    for link in item.links:
+        number = _code_scanning_url_alert_number(
+            link.get("url"), repository=repository, html=True
+        )
+        if number is None:
+            raise ProviderRevalidationError("signal_identity_url_invalid")
+        link_numbers.append(number)
+    if not link_numbers or any(number != alert_number for number in link_numbers):
+        raise ProviderRevalidationError("signal_identity_url_mismatch")
 
 
 def _validate_code_scanning_response(
-    response: dict[str, Any], requested_alert_number: int
+    response: dict[str, Any], requested_alert_number: int, repository: str
 ) -> None:
     """Require a complete response whose identity is the requested alert."""
 
@@ -1139,10 +1283,20 @@ def _validate_code_scanning_response(
         raise ProviderRevalidationError("provider_response_alert_identity_mismatch")
 
     html_url = response.get("html_url")
-    if _code_scanning_url_alert_number(html_url, html=True) != requested_alert_number:
+    if (
+        _code_scanning_url_alert_number(
+            html_url, repository=repository, html=True
+        )
+        != requested_alert_number
+    ):
         raise ProviderRevalidationError("provider_response_alert_url_mismatch")
     api_url = response.get("url")
-    if api_url is not None and _code_scanning_url_alert_number(api_url, html=False) != requested_alert_number:
+    if (
+        _code_scanning_url_alert_number(
+            api_url, repository=repository, html=False
+        )
+        != requested_alert_number
+    ):
         raise ProviderRevalidationError("provider_response_api_url_mismatch")
 
     rule = response.get("rule")

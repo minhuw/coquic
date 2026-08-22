@@ -9,6 +9,12 @@ describes the lifecycle and recovery boundary without repeating those tables.
 
 ## Eligibility
 
+Dry-run is a local evaluation mode, not a publication state. It may execute
+local work and seal a verified private archive, but it never creates an outbox
+row, waits for receipts, calls D1/R2, or exposes a task to Site V2. Its
+`effects.jsonl` evidence remains private, bounded, and locally verifiable. Only an explicit live startup may
+enter the publication lifecycle below.
+
 The session writes its transcript, activity, telemetry, result metadata, and
 the publication snapshot locally. After a run leaves `running` and its archive
 is fully materialized, the daemon composes one deterministic generation and
@@ -145,7 +151,12 @@ global control-loop publication, scheduled live monitor, or dedicated canary.
 
 ## Terminal archive cleanup
 
-Publication does not make an archive disposable by itself. For a terminal task,
+For dry-run, terminal cleanup seals and verifies the local archive, removes the
+owned container, worktree, and private session state, and retains that archive
+for inspection. It does not create a publication cleanup intent. The archive is
+never exposed to Site V2, D1, or R2.
+
+Publication does not make a live archive disposable by itself. For a terminal task,
 the daemon first authenticates the final exposed generation and verifies every
 expected public object receipt plus any expected private-original receipt. It
 then records one durable cleanup intent containing the task identity,
@@ -186,7 +197,9 @@ separately reviewed; no routine provider reversal runs.
 
 ## Deployment boundary
 
-Publication is disabled by default in local fixtures. The trusted daemon alone
+Publication is disabled by default in local fixtures. Dry-run is the safe
+startup default; changing mode requires a restart, and local commits remain
+local until live mode is explicitly selected. The trusted daemon alone
 receives the D1 and R2 credential files; task, planner, and validation
 containers receive none. Credential creation, Cloudflare bootstrap, Site
 configuration, bootstrap, start, upgrades, and rollback belong to the

@@ -43,10 +43,14 @@ reconciles durable task identities, repairs control-loop archive lag, and only
 then admits work. `dry_run = true` is the fail-closed default. It is a
 startup-only setting: changing it requires a restart, and legacy integration settings are rejected with migration guidance.
 
-In dry-run mode, task execution and publication mutations are paused while
-local evidence remains inspectable and recoverable. Existing outbox rows are
-left untouched, and publication `status`/`list` commands remain read-only.
-Set `dry_run = false` only when explicit live operation is intended.
+In dry-run mode, local planning, validation, commits, and archive materialization
+may run, but every external operation is suppressed and recorded as a bounded
+proposal. Terminal tasks are sealed and verified locally, their private archives
+are retained, and disposable containers, worktrees, and session homes are removed.
+The aggregate result is `not-applicable`, `not-applied`, or `applied`; dry-run
+success is rendered as validated with the external operation not applied. No
+outbox row or Site V2/D1/R2 publication is created. Set `dry_run = false` only
+when explicit live operation is intended.
 
 ## Control-loop archive
 
@@ -132,9 +136,9 @@ decision covers it; invalid, rejected, capacity-skipped, failed, and
 interrupted work leaves it pending.
 
 Tasks are queued through the CLI or planner and are admitted by the daemon.
-Each task receives a Store-owned monotonic execution latch. Dry-run tasks stay
-recoverable but are not advanced during this migration slice; selected signals
-remain preview-covered by their task and are not automatically replanned. Use
+Each task receives a Store-owned monotonic execution latch. Dry-run tasks run
+local work and retain proposal evidence; selected signals remain preview-covered
+by their task and are not automatically replanned. Use
 `enqueue`, `run`, `timeline`, and `status` for local operations. Commits, pushes,
 issue comments, and external publication remain daemon or human
 responsibilities; Codex workers do not perform those actions directly.
@@ -144,7 +148,7 @@ responsibilities; Codex workers do not perform those actions directly.
 ```text
 $COQUIC_HOME/
 ├── steward.sqlite          private task and control-loop ledger
-├── tasks/                  raw task archive
+├── tasks/                  raw task archive (including private effects.jsonl)
 ├── control-loop/           raw scheduler archive
 ├── private/                session homes and bounded scratch
 ├── worktrees/              task worktrees
@@ -154,10 +158,12 @@ $COQUIC_HOME/
 Steward uses only this current layout. Historic roots and SQLite rows are never
 scanned, imported, rewritten, or backfilled.
 
-Keep the entire state root private. Cloud publication reads a completed task
-snapshot through the daemon boundary and writes only validated D1 metadata and
-immutable R2 objects; it does not expose SQLite, raw archives, credentials,
-worktrees, or session homes.
+Keep the entire state root private. Only live tasks may cross the cloud
+publication boundary. Dry-run archives and effect evidence remain local and
+never reach Site V2, D1, or R2. Live publication reads a completed task snapshot
+through the daemon boundary and writes only validated D1 metadata and immutable
+R2 objects; it does not expose SQLite, raw archives, credentials, worktrees, or
+session homes.
 
 ## Verification
 

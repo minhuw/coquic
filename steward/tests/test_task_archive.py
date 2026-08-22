@@ -20,7 +20,16 @@ from coquic_steward.execution.task_archive import (
     MAX_ARCHIVE_INVOCATIONS,
 )
 from coquic_steward.core.config import StewardConfig
-from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import (
+    EffectActionKind,
+    EffectDecisionKind,
+    EffectEvidence,
+    EffectResult,
+    ExecutionMode,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -125,6 +134,41 @@ def _live_archive(tmp_path: Path) -> TaskArchive:
     pipeline["completedAt"] = "2026-07-22T00:00:03Z"
     archive.write_json("task-safe", "pipelines/pipeline-initial/pipeline.json", pipeline)
     return archive
+
+
+def test_effects_sidecar_is_bounded_canonical_and_tamper_evident(tmp_path: Path) -> None:
+    archive = TaskArchive(tmp_path / "tasks")
+    archive.create_task("task-effects", "prompt", pipeline_id="pipeline-effects")
+    proposal = EffectEvidence(
+        task_id="task-effects",
+        action=EffectActionKind.git_push,
+        action_id="push-effects",
+        mode=ExecutionMode.dry_run,
+        decision=EffectDecisionKind.proposal_required,
+        result=EffectResult.not_applied,
+        proposal_id="proposal-" + "a" * 64,
+    )
+    path = archive.materialize_effects(
+        "task-effects", [proposal], result=EffectResult.not_applied
+    )
+    first = path.read_bytes()
+    assert first == archive.materialize_effects(
+        "task-effects", [proposal], result=EffectResult.not_applied
+    ).read_bytes()
+    assert archive.effect_records("task-effects")[0]["proposalId"] == "proposal-" + "a" * 64
+    path.write_bytes(first.replace(b"not-applied", b"applied"))
+    with pytest.raises(ArchiveValidationError):
+        archive.effect_records("task-effects")
+
+
+def test_empty_effects_sidecar_is_compatible_with_not_applicable(tmp_path: Path) -> None:
+    archive = TaskArchive(tmp_path / "tasks")
+    archive.create_task("task-no-effects", "prompt", pipeline_id="pipeline-effects")
+    path = archive.materialize_effects(
+        "task-no-effects", (), result=EffectResult.not_applicable
+    )
+    assert path.read_bytes() == b""
+    assert archive.effect_records("task-no-effects") == ()
 
 
 def test_paths_reject_traversal_and_hidden_components(tmp_path: Path) -> None:

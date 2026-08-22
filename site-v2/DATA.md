@@ -9,7 +9,9 @@ there is no prior archive, local cache, or alternate source to preserve.
 The D1 reader uses native server-side `fetch` against the Cloudflare REST API.
 It reads only visible publication relationships and never mutates D1. R2 URLs
 are anonymous and are derived from validated content-addressed artifact identity;
-Site does not accept or proxy a caller-supplied object URL.
+Site does not accept or proxy a caller-supplied object URL. Steward dry-run
+archives and `effects.jsonl` evidence are private local evaluation artifacts and
+are never represented in this contract or sent to D1/R2.
 
 ## Envelope
 

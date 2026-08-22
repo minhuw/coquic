@@ -1530,7 +1530,12 @@ class StewardExecutor:
                     task.id,
                     "main.pushed",
                     commit,
-                    {"pipeline_id": pipeline.id, "commit": commit},
+                    {"pipeline_id": pipeline.id, "commit": commit, "action_id": action},
+                )
+                self.store.record_effect_applied(
+                    task.id,
+                    action=EffectActionKind.git_push.value,
+                    action_id=action,
                 )
             except RuntimeError as exc:
                 push_error = exc
@@ -1548,7 +1553,13 @@ class StewardExecutor:
                             "pipeline_id": pipeline.id,
                             "commit": commit,
                             "ambiguous": True,
+                            "action_id": action,
                         },
+                    )
+                    self.store.record_effect_applied(
+                        task.id,
+                        action=EffectActionKind.git_push.value,
+                        action_id=action,
                     )
                 self._complete_confirmed_push(task, commit)
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
@@ -1600,6 +1611,11 @@ class StewardExecutor:
                 return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"commit": commit, "detail": detail})
             return self._block_pipeline(task, pipeline, f"push failed: {detail}")
         self.store.add_event(task.id, "pipeline.push", commit, {"pipeline_id": pipeline.id, "action_id": action, "commit": commit, "result": _command_result_text(result)})
+        self.store.record_effect_applied(
+            task.id,
+            action=EffectActionKind.git_push.value,
+            action_id=action,
+        )
         self._archive_write(task, pipeline, "push.json", {"commit": commit, "result": _command_result_text(result)})
         self._complete_confirmed_push(task, commit)
         self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
@@ -2880,6 +2896,12 @@ class StewardExecutor:
                         task, source, number, "comment", comment.stderr, transcript
                     )
                     comment_failed = True
+                else:
+                    self.store.record_effect_applied(
+                        task.id,
+                        action=EffectActionKind.github_issue_comment.value,
+                        action_id=f"github-issue-comment:{bounded_fingerprint(source.id, number, sha, limit=64)}",
+                    )
         if comment_failed:
             return
 
@@ -2923,6 +2945,11 @@ class StewardExecutor:
                 task, source, number, "close", close.stderr, transcript
             )
             return
+        self.store.record_effect_applied(
+            task.id,
+            action=EffectActionKind.github_issue_close.value,
+            action_id=f"github-issue-close:{bounded_fingerprint(source.id, number, sha, limit=64)}",
+        )
         transcript.write("issue_closed", f"#{number}")
         self.store.add_event(
             source.id,

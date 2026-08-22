@@ -21,7 +21,11 @@ from ..core.models import (
     TaskSpec,
     ValidationResult,
     EXECUTION_MODE_METADATA_KEY,
+    EFFECT_RESULT_METADATA_KEY,
+    LEGACY_EFFECT_RESULT_METADATA_KEY,
+    EffectResult,
     ExecutionMode,
+    coerce_effect_result,
     coerce_execution_mode,
 )
 from .schema import (
@@ -132,11 +136,15 @@ class PathCodec:
 
 
 def _validated_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Copy task metadata and validate the Store-reserved admission latch."""
+    """Copy task metadata and validate Store-owned reserved values."""
 
     copied = dict(metadata)
     if EXECUTION_MODE_METADATA_KEY in copied:
         coerce_execution_mode(copied[EXECUTION_MODE_METADATA_KEY])
+    if EFFECT_RESULT_METADATA_KEY in copied:
+        coerce_effect_result(copied[EFFECT_RESULT_METADATA_KEY])
+    if LEGACY_EFFECT_RESULT_METADATA_KEY in copied:
+        coerce_effect_result(copied[LEGACY_EFFECT_RESULT_METADATA_KEY])
     return copied
 
 
@@ -144,6 +152,15 @@ def execution_mode_from_metadata(metadata: Mapping[str, Any]) -> ExecutionMode |
     """Read the reserved mode without granting metadata ownership."""
 
     return coerce_execution_mode(metadata.get(EXECUTION_MODE_METADATA_KEY))
+
+
+def effect_result_from_metadata(metadata: Mapping[str, Any]) -> EffectResult | None:
+    """Read the Store-owned aggregate without inferring one from a row."""
+
+    value = metadata.get(EFFECT_RESULT_METADATA_KEY)
+    if value is None:
+        value = metadata.get(LEGACY_EFFECT_RESULT_METADATA_KEY)
+    return coerce_effect_result(value)
 
 
 def preserve_execution_mode(
@@ -165,6 +182,35 @@ def preserve_execution_mode(
         copied.pop(EXECUTION_MODE_METADATA_KEY, None)
     else:
         copied[EXECUTION_MODE_METADATA_KEY] = selected.value
+    return copied
+
+
+def preserve_effect_result(
+    metadata: dict[str, Any],
+    *,
+    existing: EffectResult | str | None = None,
+    resolved: EffectResult | str | None = None,
+) -> dict[str, Any]:
+    """Preserve the Store-owned terminal aggregate across detached saves."""
+
+    copied = _validated_metadata(metadata)
+    persisted = coerce_effect_result(existing)
+    requested = effect_result_from_metadata(copied)
+    selected = coerce_effect_result(resolved)
+    if persisted is not None:
+        if requested is not None and requested is not persisted:
+            raise ValueError("external effect result is write-once")
+        if selected is not None and selected is not persisted:
+            raise ValueError("external effect result is write-once")
+        selected = persisted
+    elif selected is None:
+        if requested is not None:
+            raise ValueError("external effect result is Store-owned")
+    copied.pop(LEGACY_EFFECT_RESULT_METADATA_KEY, None)
+    if selected is None:
+        copied.pop(EFFECT_RESULT_METADATA_KEY, None)
+    else:
+        copied[EFFECT_RESULT_METADATA_KEY] = selected.value
     return copied
 
 
@@ -222,6 +268,10 @@ def update_task_row(
         record.spec.metadata,
         existing=execution_mode_from_metadata(current),
         resolved=execution_mode,
+    )
+    metadata = preserve_effect_result(
+        metadata,
+        existing=effect_result_from_metadata(current),
     )
     row.metadata_json = _dump_json(metadata, path_codec=path_codec)
     row.dedupe_key = str(metadata.get("dedupe_key")) if metadata.get("dedupe_key") is not None else None

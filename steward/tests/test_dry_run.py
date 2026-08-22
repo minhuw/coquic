@@ -12,11 +12,9 @@ from coquic_steward.core.models import (
     EffectActionKind,
     EffectDecisionKind,
     EffectProposal,
+    EffectResult,
     EXECUTION_MODE_METADATA_KEY,
     ExecutionMode,
-    SignalFetchRun,
-    SignalFetchStatus,
-    SignalItem,
     TaskKind,
     TaskSpec,
     TaskStatus,
@@ -118,6 +116,38 @@ def test_effect_proposal_is_bounded_and_idempotent(tmp_path: Path) -> None:
         )
 
 
+def test_effect_result_is_typed_write_once_and_contradictions_fail(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    dry_store = TaskStore.create(database, dry_run=True)
+    task, _ = dry_store.add_task(_spec())
+    dry_store.effect_decision(
+        task.id,
+        action=EffectActionKind.git_push.value,
+        action_id="push-result",
+        target="origin/main",
+        payload={"commit": "a" * 40},
+    )
+    assert dry_store.derive_effect_result(task.id) is EffectResult.not_applied
+    assert dry_store.finalize_effect_result(task.id) is EffectResult.not_applied
+    assert dry_store.finalize_effect_result(task.id) is EffectResult.not_applied
+    detached = dry_store.get(task.id)
+    detached.spec.metadata["effect_result"] = EffectResult.applied.value
+    with pytest.raises(ValueError, match="write-once"):
+        dry_store.save(detached)
+    assert dry_store.effect_result(task.id) is EffectResult.not_applied
+    with pytest.raises(ValueError, match="contradict"):
+        dry_store.finalize_effect_result(task.id, EffectResult.applied)
+
+    live = TaskStore.create(tmp_path / "live.sqlite", dry_run=False)
+    live_task, _ = live.add_task(_spec())
+    live.record_effect_applied(
+        live_task.id,
+        action=EffectActionKind.git_push.value,
+        action_id="push-applied",
+    )
+    assert live.finalize_effect_result(live_task.id) is EffectResult.applied
+
+
 def test_live_effect_is_allowed(tmp_path: Path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
     task, _ = store.add_task(_spec())
@@ -166,7 +196,7 @@ def test_daemon_allows_local_dry_run_phase(repo: Path, tmp_path: Path, monkeypat
     assert not any(event.kind == "effect.proposed" for event in store.events(task.id))
 
 
-def test_dry_run_finalization_waits_without_proposals(
+def test_dry_run_finalization_seals_and_retains_without_proposals(
     repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
     config = StewardConfig(repo_root=repo, dry_run=True, local_codex_test_harness=True)
@@ -194,16 +224,18 @@ def test_dry_run_finalization_waits_without_proposals(
     monkeypatch.setattr(TaskArchiveWriter, "seal", record_seal)
     daemon = StewardDaemon(config, store)
 
-    assert daemon.finalize_terminal_task(task.id) is False
-    assert seal_calls == []
+    assert daemon.finalize_terminal_task(task.id) is True
+    assert seal_calls == [task.id]
     assert not any(event.kind == "effect.proposed" for event in store.events(task.id))
-    blocked = [event for event in store.events(task.id) if event.kind == "cleanup_blocked"]
-    assert blocked and blocked[-1].data["reason"] == "dry_run_pending_finalization"
-    assert blocked[-1].data["proposal_count"] == 0
-    assert not any(
-        event.kind in {"cleanup_pending", "cleanup_complete"}
+    assert store.effect_result(task.id).value == "not-applicable"
+    archive = TaskArchiveWriter(config)
+    assert archive.verify(task.id)
+    assert archive.task_path(task.id, "effects.jsonl").is_file()
+    assert [
+        event.kind
         for event in store.events(task.id)
-    )
+        if event.kind in {"cleanup_pending", "cleanup_complete"}
+    ] == ["cleanup_pending", "cleanup_complete"]
 
 
 def test_publication_enqueue_rechecks_persisted_latch(tmp_path: Path) -> None:
@@ -238,6 +270,22 @@ def test_session_publication_uses_current_store_latch(tmp_path: Path) -> None:
     run = SimpleNamespace(id="run-stale", state="succeeded", completed_at=object())
 
     assert enqueue_materialized_publication(config, restarted, task, run) is None
+
+
+def test_status_reports_mode_and_external_effect_separately(tmp_path: Path, monkeypatch) -> None:
+    import coquic_steward.cli as cli
+
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database, dry_run=True)
+    task, _ = store.add_task(_spec())
+    store.finish_task(task.id, TaskStatus.succeeded, "validated")
+    store.finalize_effect_result(task.id)
+    monkeypatch.setattr(cli, "_context", lambda: (store, SimpleNamespace()))
+    result = CliRunner().invoke(app, ["status"])
+    assert result.exit_code == 0, result.stdout
+    assert "mode=dry-run" in result.stdout
+    assert "effect=not-applicable" in result.stdout
+    assert "validated; external operation not applied" in result.stdout
 
 
 def test_dry_run_publication_cli_does_not_construct_mutator(monkeypatch) -> None:

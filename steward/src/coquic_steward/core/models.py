@@ -363,6 +363,177 @@ class EffectDecisionKind(StrEnum):
     proposal_required = "proposal-required"
 
 
+class EffectResult(StrEnum):
+    """Durable aggregate describing whether external work crossed Steward."""
+
+    not_applicable = "not-applicable"
+    not_applied = "not-applied"
+    applied = "applied"
+
+
+# The longer names make the boundary obvious to callers while keeping one
+# canonical enum and one set of persisted values.
+ExternalEffectResult = EffectResult
+EffectOutcome = EffectResult
+
+EFFECT_RESULT_METADATA_KEY = "effect_result"
+# Accepted only for reading stores created by an early development snapshot.
+LEGACY_EFFECT_RESULT_METADATA_KEY = "external_effect_result"
+TASK_EFFECT_RESULT_METADATA_KEY = EFFECT_RESULT_METADATA_KEY
+EFFECT_RESULT_EVENT_KIND = "effect.result.finalized"
+_EFFECT_ID_RE = re.compile(r"^effect-[0-9a-f]{64}$")
+_PROPOSAL_ID_RE = re.compile(r"^proposal-[0-9a-f]{64}$")
+
+
+def coerce_effect_result(value: object) -> EffectResult | None:
+    """Normalize a persisted aggregate without treating missing as a result."""
+
+    if value is None:
+        return None
+    if isinstance(value, EffectResult):
+        return value
+    if isinstance(value, str):
+        try:
+            return EffectResult(value.strip().lower().replace("_", "-"))
+        except ValueError as exc:
+            raise ValueError(f"invalid external effect result {value!r}") from exc
+    raise ValueError(f"invalid external effect result {value!r}")
+
+
+def effect_evidence_identity(
+    action: EffectActionKind | str,
+    action_id: str,
+    mode: ExecutionMode | str,
+) -> str:
+    """Return a stable identity for one intended external action."""
+
+    selected_action = EffectActionKind(action)
+    selected_mode = coerce_execution_mode(mode)
+    if selected_mode is None:
+        raise ValueError("effect evidence mode is required")
+    if not isinstance(action_id, str) or not action_id or len(action_id) > 160:
+        raise ValueError("effect evidence action id is invalid")
+    if any(character in action_id for character in "\x00\r\n"):
+        raise ValueError("effect evidence action id contains controls")
+    encoded = json.dumps(
+        {
+            "action": selected_action.value,
+            "actionId": action_id,
+            "mode": selected_mode.value,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "effect-" + hashlib.sha256(encoded).hexdigest()
+
+
+class EffectEvidence(BaseModel):
+    """One bounded, identity-authenticated external-effect observation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    effect_id: str | None = Field(default=None, min_length=1, max_length=72)
+    task_id: str | None = Field(default=None, min_length=1, max_length=160)
+    action: EffectActionKind
+    action_id: str = Field(min_length=1, max_length=160)
+    mode: ExecutionMode
+    decision: EffectDecisionKind
+    result: EffectResult
+    at: datetime = Field(default_factory=utc_now)
+    proposal_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            copied = dict(value)
+            for source, target in (
+                ("effectId", "effect_id"),
+                ("taskId", "task_id"),
+                ("actionId", "action_id"),
+                ("proposalId", "proposal_id"),
+            ):
+                if source in copied and target not in copied:
+                    copied[target] = copied.pop(source)
+            return copied
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self) -> "EffectEvidence":
+        for value in (self.task_id, self.action_id):
+            if value is not None and any(character in value for character in "\x00\r\n"):
+                raise ValueError("effect evidence text contains controls")
+        if self.effect_id is not None and _EFFECT_ID_RE.fullmatch(self.effect_id) is None:
+            raise ValueError("effect evidence identity is invalid")
+        expected = effect_evidence_identity(self.action, self.action_id, self.mode)
+        if self.effect_id is not None and self.effect_id != expected:
+            raise ValueError("effect evidence identity does not match its contents")
+        object.__setattr__(self, "effect_id", expected)
+        if self.proposal_id is not None and _PROPOSAL_ID_RE.fullmatch(self.proposal_id) is None:
+            raise ValueError("effect evidence proposal identity is invalid")
+        if self.result is EffectResult.applied:
+            if self.mode is not ExecutionMode.live or self.decision is not EffectDecisionKind.allow:
+                raise ValueError("only a confirmed live allow may be applied")
+        elif self.result is EffectResult.not_applied:
+            if self.decision is not EffectDecisionKind.proposal_required and self.mode is not ExecutionMode.live:
+                raise ValueError("blocked effect evidence has an invalid decision")
+        elif self.result is EffectResult.not_applicable:
+            raise ValueError("not-applicable is an aggregate result, not an action observation")
+        if self.decision is EffectDecisionKind.proposal_required:
+            if self.mode is not ExecutionMode.dry_run or self.result is not EffectResult.not_applied:
+                raise ValueError("proposal evidence must be a blocked dry-run action")
+            if self.proposal_id is None:
+                raise ValueError("proposal evidence requires a proposal identity")
+        return self
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "effectId": self.effect_id,
+            "taskId": self.task_id,
+            "action": self.action.value,
+            "actionId": self.action_id,
+            "mode": self.mode.value,
+            "decision": self.decision.value,
+            "result": self.result.value,
+            "at": self.at.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "proposalId": self.proposal_id,
+        }
+
+
+def derive_effect_result(evidence: object) -> EffectResult:
+    """Derive one aggregate from validated action observations."""
+
+    if evidence is None:
+        values: list[object] = []
+    elif isinstance(evidence, Mapping):
+        values = [evidence]
+    elif isinstance(evidence, (list, tuple)):
+        values = list(evidence)
+    else:
+        raise TypeError("effect evidence must be a sequence of mappings")
+    observations = [
+        item if isinstance(item, EffectEvidence) else EffectEvidence.model_validate(item)
+        for item in values
+    ]
+    by_identity: dict[str, EffectEvidence] = {}
+    for item in observations:
+        assert item.effect_id is not None
+        previous = by_identity.get(item.effect_id)
+        if previous is not None and previous.result is not item.result:
+            raise ValueError("contradictory effect evidence")
+        if previous is None:
+            by_identity[item.effect_id] = item
+    unique = tuple(by_identity.values())
+    if any(item.result is EffectResult.applied for item in unique):
+        if any(item.mode is ExecutionMode.dry_run for item in unique):
+            raise ValueError("dry-run effect evidence contradicts an applied result")
+        return EffectResult.applied
+    if unique:
+        return EffectResult.not_applied
+    return EffectResult.not_applicable
+
+
 @dataclass(frozen=True, slots=True)
 class EffectDecision:
     """The trusted result immediately before a Steward-owned effect."""

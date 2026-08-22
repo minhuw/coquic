@@ -27,11 +27,13 @@ never unlocks dry-run. After the boundary it stores the result, output tree,
 patch digest, and next cursor. Duplicate `advance_once()` calls adopt a
 finished action or report `in_progress`; they do not repeat effects.
 
-During this migration slice, dry-run admission is fail-closed: dry-run tasks
-remain recoverable but are not advanced. Planner-selected signals stay
-atomically preview-covered by their task, without external completion or
-automatic replanning. Publication recovery, workers, and new outbox enqueue are
-also paused, while existing outbox rows remain untouched.
+Dry-run admission is fail-closed at every external seam. Local planning,
+validation, commits, and archive materialization may complete, while blocked
+external actions are retained as typed proposal evidence. Terminal dry-run tasks
+are sealed and verified locally, disposable resources are removed, and the
+archive remains private. Planner-selected signals stay atomically
+preview-covered by their task; no dry-run record enters the publication outbox
+or Site V2. Set `dry_run = false` at startup to opt into live publication.
 
 ## Review Formality
 
@@ -53,8 +55,11 @@ child; bounded transient transport failures may retry the same commit.
 
 Only the trusted daemon stages, commits, and pushes. Immediately before commit,
 the staged tree must equal the last validated and effectively reviewed tree.
-Successful task-owned work stops at durable `ready_to_seal`; lifecycle cleanup,
-terminal sealing, and final sync belong to Plan 006.
+Successful task-owned work stops at durable `ready_to_seal`; terminal sealing
+records an orthogonal external-effect result (`not-applicable`, `not-applied`,
+or `applied`) before lifecycle cleanup. Dry-run cleanup retains the verified
+private archive while removing disposable resources; live publication and its
+cleanup fencing remain unchanged.
 
 ## Daemon lifecycle
 

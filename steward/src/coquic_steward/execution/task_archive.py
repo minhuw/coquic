@@ -21,7 +21,16 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from ..core.models import TaskPipeline, TaskRecord, TaskRun, TaskStatus
+from ..core.models import (
+    EffectEvidence,
+    EffectResult,
+    effect_evidence_identity,
+    TaskPipeline,
+    TaskRecord,
+    TaskRun,
+    TaskStatus,
+    derive_effect_result,
+)
 from ..agents.telemetry import (
     TELEMETRY_MAX_SIDECAR_BYTES,
     TELEMETRY_MAX_TURNS,
@@ -126,6 +135,13 @@ MAX_ARCHIVE_INVOCATION_BYTES = TELEMETRY_MAX_SIDECAR_BYTES
 MAX_ARCHIVE_TELEMETRY_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_TOKEN_COUNT = 10**15
 MAX_ARCHIVE_TOTAL_TOKEN_COUNT = 10**16
+MAX_ARCHIVE_EFFECT_RECORDS = 512
+MAX_ARCHIVE_EFFECT_BYTES = 512 * 1024
+_EFFECTS_FILENAME = "effects.jsonl"
+EFFECTS_FILENAME = _EFFECTS_FILENAME
+_EFFECT_ID_RE = re.compile(r"^effect-[0-9a-f]{64}$")
+_EFFECT_ACTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_PROPOSAL_ID_RE = re.compile(r"^proposal-[0-9a-f]{64}$")
 _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _TELEMETRY_FILE_RE = re.compile(
     r"^telemetry(?:\.retry-([1-9][0-9]*))?(?:\.unavailable-([1-9][0-9]*))?\.json$"
@@ -468,6 +484,114 @@ def _validate_nonnegative_integer(value: Any, label: str) -> None:
         raise ArchiveValidationError(f"{label} must be a non-negative integer")
 
 
+def _validate_effect_record(value: Any, label: str = "effect") -> None:
+    """Validate one private effect line without widening task.json."""
+
+    keys = {
+        "effectId",
+        "taskId",
+        "action",
+        "actionId",
+        "mode",
+        "decision",
+        "result",
+        "at",
+        "proposalId",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label=label)
+    validate_opaque_id(value["taskId"])
+    if not isinstance(value["effectId"], str) or _EFFECT_ID_RE.fullmatch(value["effectId"]) is None:
+        raise ArchiveValidationError(f"{label}.effectId is invalid")
+    if not isinstance(value["action"], str) or not value["action"]:
+        raise ArchiveValidationError(f"{label}.action is invalid")
+    if not isinstance(value["actionId"], str) or _EFFECT_ACTION_ID_RE.fullmatch(value["actionId"]) is None:
+        raise ArchiveValidationError(f"{label}.actionId is invalid")
+    if value["mode"] not in {"dry-run", "live"}:
+        raise ArchiveValidationError(f"{label}.mode is invalid")
+    if value["decision"] not in {"allow", "proposal-required", "not-applicable"}:
+        raise ArchiveValidationError(f"{label}.decision is invalid")
+    if value["result"] not in {"not-applicable", "not-applied", "applied"}:
+        raise ArchiveValidationError(f"{label}.result is invalid")
+    if value["result"] == "not-applicable":
+        if value["action"] != "none" or value["actionId"] != "none" or value["decision"] != "not-applicable":
+            raise ArchiveValidationError(f"{label}.not-applicable evidence is invalid")
+    else:
+        try:
+            expected_effect_id = effect_evidence_identity(
+                value["action"], value["actionId"], value["mode"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ArchiveValidationError(f"{label}.action identity is invalid") from exc
+        if value["effectId"] != expected_effect_id:
+            raise ArchiveValidationError(f"{label}.effectId does not match identity")
+    if value["result"] == "applied" and (
+        value["mode"] != "live" or value["decision"] != "allow"
+    ):
+        raise ArchiveValidationError(f"{label}.applied evidence is not live")
+    if value["decision"] == "proposal-required" and (
+        value["mode"] != "dry-run" or value["result"] != "not-applied"
+    ):
+        raise ArchiveValidationError(f"{label}.proposal evidence is invalid")
+    _validate_timestamp(value["at"], f"{label}.at")
+    proposal_id = value["proposalId"]
+    if proposal_id is not None and (
+        not isinstance(proposal_id, str) or _PROPOSAL_ID_RE.fullmatch(proposal_id) is None
+    ):
+        raise ArchiveValidationError(f"{label}.proposalId is invalid")
+    if value["decision"] == "proposal-required" and proposal_id is None:
+        raise ArchiveValidationError(f"{label}.proposalId is required")
+
+
+def _effect_evidence_model(value: Mapping[str, Any]) -> EffectEvidence:
+    normalized = dict(value)
+    for source, target in (
+        ("effectId", "effect_id"),
+        ("taskId", "task_id"),
+        ("actionId", "action_id"),
+        ("proposalId", "proposal_id"),
+    ):
+        if source in normalized and target not in normalized:
+            normalized[target] = normalized.pop(source)
+    return EffectEvidence.model_validate(normalized)
+
+
+def _validate_effects_document(
+    raw: bytes,
+    *,
+    task_id: str,
+) -> tuple[dict[str, Any], ...]:
+    if len(raw) > MAX_ARCHIVE_EFFECT_BYTES:
+        raise ArchiveValidationError("effects evidence exceeds bound")
+    if not raw:
+        return ()
+    if not raw.endswith(b"\n"):
+        raise ArchiveValidationError("effects evidence has an incomplete line")
+    values: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for index, line in enumerate(raw.splitlines(), start=1):
+        try:
+            value = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ArchiveValidationError(f"effects evidence line {index} is invalid JSON") from exc
+        _validate_effect_record(value, f"effect[{index}]")
+        if value["taskId"] != task_id:
+            raise ArchiveConflictError("effects evidence task identity mismatch")
+        canonical = _json_bytes(value)
+        if line + b"\n" != canonical:
+            raise ArchiveValidationError("effects evidence is not canonical")
+        effect_id = value["effectId"]
+        previous = seen.get(effect_id)
+        if previous is not None and previous != canonical:
+            raise ArchiveConflictError("effects evidence identity is contradictory")
+        if previous is not None:
+            raise ArchiveValidationError("effects evidence identity is duplicated")
+        seen[effect_id] = canonical
+        values.append(dict(value))
+        if len(values) > MAX_ARCHIVE_EFFECT_RECORDS:
+            raise ArchiveValidationError("effects evidence record count exceeds bound")
+    return tuple(values)
+
+
 def _validate_artifact(value: Any, label: str) -> None:
     keys = {
         "path",
@@ -699,8 +823,10 @@ def _validate_pipeline_document(value: Any) -> None:
             raise ArchiveValidationError("review ordinal must be positive")
         validate_relative_path(reference["path"])
     _validate_integration(value["integration"])
-    if not isinstance(value["runs"], list) or not value["runs"]:
-        raise ArchiveValidationError("pipeline schema requires runs")
+    if not isinstance(value["runs"], list):
+        raise ArchiveValidationError("pipeline runs must be an array")
+    if not value["runs"] and value["state"] == "active":
+        raise ArchiveValidationError("active pipeline schema requires runs")
     for reference in value["runs"]:
         _validate_run_reference(reference)
 
@@ -1646,6 +1772,89 @@ class TaskArchive:
             raise ArchiveConflictError("task metadata identity does not match archive path")
         _validate_task_document(value)
         return self.write_json(task_id, "task.json", value)
+
+    def materialize_effects(
+        self,
+        task_id: str,
+        effects: Sequence[Mapping[str, Any] | EffectEvidence] | None = None,
+        *,
+        result: EffectResult | str | None = None,
+        mode: str = "dry-run",
+        recorded_at: str | None = None,
+    ) -> Path:
+        """Write one canonical, bounded private effect evidence sidecar."""
+
+        task_id = validate_opaque_id(task_id)
+        selected_result = (
+            result.value
+            if isinstance(result, EffectResult)
+            else str(result or EffectResult.not_applicable.value)
+        )
+        values: list[dict[str, Any]] = []
+        for item in effects or ():
+            if isinstance(item, EffectEvidence):
+                value = item.as_dict()
+            else:
+                value = dict(item)
+                if "at" not in value:
+                    value["at"] = recorded_at or _now()
+                if "taskId" not in value:
+                    value["taskId"] = task_id
+            if value.get("taskId") is None:
+                value["taskId"] = task_id
+            if value.get("taskId") != task_id:
+                raise ArchiveConflictError("effects evidence task identity mismatch")
+            values.append(value)
+        if not values:
+            if selected_result != EffectResult.not_applicable.value:
+                raise ArchiveValidationError(
+                    "empty effects evidence requires not-applicable result"
+                )
+        else:
+            if selected_result == EffectResult.not_applicable.value:
+                raise ArchiveValidationError(
+                    "action evidence cannot have not-applicable aggregate"
+                )
+            normalized: list[dict[str, Any]] = []
+            for value in values:
+                try:
+                    evidence = _effect_evidence_model(value)
+                except (TypeError, ValueError) as exc:
+                    raise ArchiveValidationError(
+                        "effects evidence action is malformed"
+                    ) from exc
+                normalized.append(evidence.as_dict())
+            values = normalized
+            try:
+                derived = derive_effect_result(values)
+            except (TypeError, ValueError) as exc:
+                raise ArchiveValidationError("effects evidence is contradictory") from exc
+            if selected_result and derived.value != selected_result:
+                raise ArchiveConflictError(
+                    "effects evidence aggregate conflicts with Store result"
+                )
+            selected_result = derived.value
+        values.sort(key=lambda item: (str(item["at"]), str(item["effectId"])))
+        raw = b"".join(_json_bytes(value) for value in values)
+        _validate_effects_document(raw, task_id=task_id)
+        return self.write_bytes(task_id, _EFFECTS_FILENAME, raw)
+
+    write_effects = materialize_effects
+
+    def effects_path(self, task_id: str) -> Path:
+        return self.task_path(task_id, _EFFECTS_FILENAME)
+
+    def effect_records(self, task_id: str) -> tuple[dict[str, Any], ...]:
+        """Read and validate the private effects sidecar when present."""
+
+        path = self.effects_path(task_id)
+        if not path.exists():
+            return ()
+        if path.is_symlink() or not path.is_file():
+            raise ArchiveValidationError("effects evidence is not a regular file")
+        return _validate_effects_document(path.read_bytes(), task_id=task_id)
+
+    validate_effects = effect_records
 
     def _task_metadata(
         self,
@@ -2796,6 +3005,12 @@ class TaskArchive:
             raise ArchiveSealError("task metadata has invalid canonical paths")
         if not (self.task_dir(task_id) / "prompt.md").is_file() or not (self.task_dir(task_id) / "events.jsonl").is_file():
             raise ArchiveSealError("prompt.md and events.jsonl are required")
+        effects_path = self.task_path(task_id, _EFFECTS_FILENAME)
+        if effects_path.exists():
+            try:
+                _validate_effects_document(effects_path.read_bytes(), task_id=task_id)
+            except ArchiveError as exc:
+                raise ArchiveSealError(f"effects evidence is invalid: {exc}") from exc
         pipelines = task.get("pipelines")
         if not isinstance(pipelines, list) or not pipelines:
             raise ArchiveSealError("task metadata must reference at least one pipeline")

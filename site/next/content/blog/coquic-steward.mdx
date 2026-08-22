@@ -95,7 +95,7 @@ Is an LLM reviewer proof of correctness? No, and I won't pretend otherwise. It i
 
 ## The only path to main
 
-By default, Steward starts in fail-closed dry-run mode: an approved task remains local evidence and is not advanced or published. Set the startup-only `dry_run = false` explicitly when live operation is intended; changing it requires a restart.
+By default, Steward starts in fail-closed dry-run mode: an approved task may complete local validation and commits, while external operations remain local proposal evidence. Its terminal archive is sealed, verified, and retained; no dry-run record is published. Set the startup-only `dry_run = false` explicitly when live operation is intended; changing it requires a restart.
 
 Approval queues a separate Integration task, serialized by its own lock — only one integration ever runs at a time. Integration trusts nothing that came before it. It fetches main, hard-resets a fresh worktree, applies the patch, and re-runs every validation gate on the rebased tree. If the patch no longer applies, or a gate fails against newer main, the original worker's thread is resumed to re-port its change — and the result goes through review again.
 
@@ -103,7 +103,7 @@ The commit message is produced by yet another schema-constrained agent run: a co
 
 Then there are the budgets. At most ten pushes to main per UTC day, checked against the event log before every integration. In explicit live operation, the daemon performs a push preflight — a `git push --dry-run` with all interactive prompts disabled — and refuses to start if it fails, so a credential problem surfaces in seconds rather than after a worker has spent an hour on a patch. After a feature task lands, Steward comments on the originating issue with the commit and closes it.
 
-The safe local evaluation path is `dry_run = true`. It pauses task advancement and all publication mutation, leaves existing outbox rows untouched, and keeps the local evidence recoverable for a later restart.
+The safe local evaluation path is `dry_run = true`. It permits local validation and commits, records every blocked external operation as proposal evidence, seals and retains the verified private archive, and removes disposable execution state. It never creates an outbox row or sends a dry-run record to Site V2, D1, or R2; local status reports validation separately from external effect.
 
 ## You can watch it work
 
@@ -208,7 +208,7 @@ LLM 评审者是正确性证明吗？不是，我也不打算假装它是。它�
 
 ## 通往 main 的唯一路径
 
-默认情况下 Steward 以故障关闭的 dry-run 模式启动：通过评审的任务只保留为本地证据，不会继续执行或发布。只有明确设置启动时的 `dry_run = false` 才会启用实时运行；修改后必须重启。
+默认情况下 Steward 以故障关闭的 dry-run 模式启动：通过评审的任务可以完成本地验证和提交，但外部操作只保留为本地 proposal 证据；终端 archive 会被封存、验证并保留，dry-run 记录不会发布。只有明确设置启动时的 `dry_run = false` 才会启用实时运行；修改后必须重启。
 
 评审通过会触发一个单独的 Integration 任务，由专门的锁串行化——任何时刻只有一个集成在运行。集成不信任它之前发生的任何事情。它 fetch main、把一个全新 worktree 硬重置到最新、应用补丁，然后在 rebase 后的代码树上重跑每一道验证关卡。如果补丁不再能应用，或者某道关卡在更新的 main 上失败，原 worker 的线程会被恢复来重新移植改动——结果再次经过评审。
 
@@ -216,7 +216,7 @@ LLM 评审者是正确性证明吗？不是，我也不打算假装它是。它�
 
 然后是预算。每个 UTC 日最多向 main 推送十次，每次集成前都核对事件日志。在明确启用实时运行时，守护进程先做推送预检——禁用一切交互提示的 `git push --dry-run`——失败则拒绝启动，让凭据问题在几秒内暴露，而不是在某个 worker 已经花了一小时写补丁之后。feature 任务落地后，Steward 会在对应 issue 下留言注明提交并关闭它。
 
-安全的本地评估路径是 `dry_run = true`：它暂停任务推进和所有发布变更，保留现有 outbox 行不动，并让本地证据可在之后重启时恢复。
+安全的本地评估路径是 `dry_run = true`：它允许本地验证和提交，把所有被阻止的外部操作记录为 proposal 证据，封存并保留经过验证的私有 archive，同时清理可丢弃的执行状态。它不会创建 outbox 行，也不会把 dry-run 记录发送到 Site V2、D1 或 R2；本地 status 会把验证结果与外部 effect 分开显示。
 
 ## 你可以看着它干活
 

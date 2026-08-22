@@ -50,6 +50,15 @@ from ..core.models import (
     DispatchSnapshot,
     SchedulerStoreSnapshot,
     CodexRunState,
+    EffectActionKind,
+    EffectDecisionKind,
+    EffectEvidence,
+    EffectProposal,
+    EffectResult,
+    EFFECT_RESULT_EVENT_KIND,
+    EFFECT_RESULT_METADATA_KEY,
+    LEGACY_EFFECT_RESULT_METADATA_KEY,
+    derive_effect_result,
     CodexSession,
     Event,
     ExecutionState,
@@ -71,6 +80,7 @@ from ..core.models import (
     TaskRun,
     TaskSpec,
     TaskStatus,
+    coerce_effect_result,
     coerce_execution_mode,
     execution_mode_for_dry_run,
     resolve_execution_mode,
@@ -104,7 +114,9 @@ from .mappers import (
     row_to_iteration,
     row_to_plan_run,
     row_to_task,
+    effect_result_from_metadata,
     execution_mode_from_metadata,
+    preserve_effect_result,
     preserve_execution_mode,
     scheduler_wakeup_to_row,
     pipeline_to_row,
@@ -589,6 +601,304 @@ class SQLiteTaskStore:
 
     get_task_execution_mode = task_execution_mode
 
+    @staticmethod
+    def _effect_evidence_from_events(
+        task_id: str,
+        events: Iterable[Event],
+        mode: ExecutionMode,
+    ) -> tuple[EffectEvidence, ...]:
+        """Validate and normalize the action facts already in the event ledger."""
+
+        values: list[EffectEvidence] = []
+        for event_record in events:
+            data = event_record.data if isinstance(event_record.data, Mapping) else {}
+            try:
+                if event_record.kind == "effect.proposed":
+                    proposal_data = dict(data)
+                    for source, target in (
+                        ("proposalId", "proposal_id"),
+                        ("actionId", "action_id"),
+                    ):
+                        if source in proposal_data and target not in proposal_data:
+                            proposal_data[target] = proposal_data.pop(source)
+                    proposal = EffectProposal.model_validate(proposal_data)
+                    if mode is not ExecutionMode.dry_run:
+                        raise ValueError("live task contains a blocked effect proposal")
+                    values.append(
+                        EffectEvidence(
+                            task_id=task_id,
+                            action=proposal.action,
+                            action_id=proposal.action_id,
+                            mode=mode,
+                            decision=EffectDecisionKind.proposal_required,
+                            result=EffectResult.not_applied,
+                            at=event_record.created_at,
+                            proposal_id=proposal.identity,
+                        )
+                    )
+                    continue
+                if event_record.kind in {"effect.authorized", "effect.recorded"}:
+                    action = EffectActionKind(data.get("action"))
+                    action_id = data.get("actionId", data.get("action_id"))
+                    if not isinstance(action_id, str) or not action_id:
+                        raise ValueError("effect action identity is missing")
+                    evidence_mode = coerce_execution_mode(data.get("mode")) or mode
+                    decision = EffectDecisionKind(
+                        data.get("decision", EffectDecisionKind.allow.value)
+                    )
+                    evidence_result = coerce_effect_result(
+                        data.get("result", EffectResult.not_applied.value)
+                    )
+                    if evidence_result is None:
+                        raise ValueError("effect result is missing")
+                    values.append(
+                        EffectEvidence(
+                            effect_id=data.get("effectId", data.get("effect_id")),
+                            task_id=task_id,
+                            action=action,
+                            action_id=action_id,
+                            mode=evidence_mode,
+                            decision=decision,
+                            result=evidence_result,
+                            at=event_record.created_at,
+                            proposal_id=data.get("proposalId", data.get("proposal_id")),
+                        )
+                    )
+                    continue
+                if event_record.kind == "effect.applied":
+                    action = EffectActionKind(data.get("action"))
+                    action_id = data.get("actionId", data.get("action_id"))
+                    if not isinstance(action_id, str) or not action_id:
+                        raise ValueError("applied effect action identity is missing")
+                    if mode is not ExecutionMode.live:
+                        raise ValueError("dry-run task contains an applied effect")
+                    values.append(
+                        EffectEvidence(
+                            task_id=task_id,
+                            action=action,
+                            action_id=action_id,
+                            mode=mode,
+                            decision=EffectDecisionKind.allow,
+                            result=EffectResult.applied,
+                            at=event_record.created_at,
+                            proposal_id=data.get("proposalId", data.get("proposal_id")),
+                        )
+                    )
+                    continue
+
+                action: EffectActionKind | None = None
+                action_id: str | None = None
+                result = EffectResult.applied
+                if event_record.kind in {
+                    "pipeline.push",
+                    "main.pushed",
+                    "pipeline.push.ambiguous_resolved",
+                }:
+                    action = EffectActionKind.git_push
+                    action_id = data.get("action_id", data.get("actionId"))
+                    if not isinstance(action_id, str) or not action_id:
+                        action_id = f"git-push:{data.get('commit', event_record.message)}"
+                elif event_record.kind in {"github.issue_closed", "github.issue_commented"}:
+                    action = (
+                        EffectActionKind.github_issue_close
+                        if event_record.kind == "github.issue_closed"
+                        else EffectActionKind.github_issue_comment
+                    )
+                    action_id = data.get("action_id", data.get("actionId"))
+                    if not isinstance(action_id, str) or not action_id:
+                        action_id = f"{action.value}:{data.get('issue_number', event_record.message)}"
+                elif event_record.kind in {"publication.exposed", "publication.applied"}:
+                    action = EffectActionKind.publication_transport
+                    action_id = data.get("action_id", data.get("actionId"))
+                    if not isinstance(action_id, str) or not action_id:
+                        action_id = f"publication-expose:{data.get('publication_id', event_record.message)}"
+                elif event_record.kind in {"pipeline.push.failure", "pipeline.push.blocked"}:
+                    action = EffectActionKind.git_push
+                    action_id = data.get("action_id", data.get("actionId"))
+                    if not isinstance(action_id, str) or not action_id:
+                        action_id = f"git-push:{data.get('commit', event_record.message)}"
+                    result = EffectResult.not_applied
+                elif event_record.kind == "github.issue_update_failed":
+                    step = str(data.get("step", "comment"))
+                    action = (
+                        EffectActionKind.github_issue_close
+                        if step == "close"
+                        else EffectActionKind.github_issue_comment
+                    )
+                    action_id = data.get("action_id", data.get("actionId"))
+                    if not isinstance(action_id, str) or not action_id:
+                        action_id = f"{action.value}:{data.get('issue_number', event_record.message)}"
+                    result = EffectResult.not_applied
+                if action is None or action_id is None:
+                    continue
+                values.append(
+                    EffectEvidence(
+                        task_id=task_id,
+                        action=action,
+                        action_id=action_id,
+                        mode=mode,
+                        decision=EffectDecisionKind.allow,
+                        result=result,
+                        at=event_record.created_at,
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"malformed external effect evidence in {event_record.kind}"
+                ) from exc
+        unique: dict[str, EffectEvidence] = {}
+        for value in values:
+            assert value.effect_id is not None
+            previous = unique.get(value.effect_id)
+            if previous is not None:
+                if previous.result is not value.result or previous.proposal_id != value.proposal_id:
+                    raise ValueError("contradictory external effect evidence")
+                continue
+            unique[value.effect_id] = value
+        return tuple(unique.values())
+
+    @staticmethod
+    def _validate_effect_result_events(
+        events: Iterable[Event],
+        *,
+        result: EffectResult,
+        evidence: Iterable[EffectEvidence],
+    ) -> None:
+        evidence_ids = {
+            item.effect_id for item in evidence if item.effect_id is not None
+        }
+        for event_record in events:
+            if event_record.kind != EFFECT_RESULT_EVENT_KIND:
+                continue
+            data = event_record.data if isinstance(event_record.data, Mapping) else {}
+            try:
+                observed = coerce_effect_result(data.get("result"))
+                if observed is not result:
+                    raise ValueError("effect result event disagrees with aggregate")
+                raw_evidence = data.get("evidence")
+                if not isinstance(raw_evidence, list):
+                    raise ValueError("effect result event evidence is not an array")
+                observed_ids = {
+                    EffectEvidence.model_validate(item).effect_id
+                    for item in raw_evidence
+                }
+                if observed_ids != evidence_ids:
+                    raise ValueError("effect result event evidence is incomplete")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("malformed external effect result event") from exc
+
+    def effect_evidence(self, task_id: str) -> tuple[EffectEvidence, ...]:
+        """Return validated action evidence without changing the Store."""
+
+        mode = self.task_execution_mode(task_id)
+        if mode is None:
+            raise ValueError("task execution mode is required for effect evidence")
+        return self._effect_evidence_from_events(task_id, self.events(task_id), mode)
+
+    list_effect_evidence = effect_evidence
+
+    def derive_effect_result(self, task_id: str) -> EffectResult:
+        """Derive the aggregate from validated action evidence."""
+
+        return derive_effect_result(self.effect_evidence(task_id))
+
+    def effect_result(self, task_id: str) -> EffectResult | None:
+        """Read the Store-owned aggregate; missing means not finalized."""
+
+        with Session(self.engine) as session:
+            row = session.get(TaskRow, task_id)
+            if row is None:
+                raise KeyError(task_id)
+            metadata = _metadata_dict(row.metadata_json, self.path_codec)
+        result = effect_result_from_metadata(metadata)
+        if result is None:
+            return None
+        evidence = self.effect_evidence(task_id)
+        self._validate_effect_result_events(
+            self.events(task_id), result=result, evidence=evidence
+        )
+        if derive_effect_result(evidence) is not result:
+            raise ValueError("stored external effect result contradicts evidence")
+        return result
+
+    get_effect_result = effect_result
+    get_external_effect_result = effect_result
+    external_effect_result = effect_result
+    aggregate_effect_result = effect_result
+
+    def finalize_effect_result(
+        self,
+        task_id: str,
+        result: EffectResult | str | None = None,
+    ) -> EffectResult:
+        """Finalize one aggregate exactly once and make retries idempotent."""
+
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(TaskRow, task_id)
+                    if row is None:
+                        raise KeyError(task_id)
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    mode = execution_mode_from_metadata(metadata)
+                    if mode is None:
+                        raise ValueError("task execution mode is required")
+                    event_values = [
+                        row_to_event(item, path_codec=self.path_codec)
+                        for item in session.scalars(
+                            select(EventRow)
+                            .where(EventRow.task_id == task_id)
+                            .order_by(EventRow.created_at, EventRow.id)
+                        ).all()
+                    ]
+                    evidence = self._effect_evidence_from_events(
+                        task_id, event_values, mode
+                    )
+                    derived = derive_effect_result(evidence)
+                    requested = coerce_effect_result(result)
+                    if requested is not None and requested is not derived:
+                        raise ValueError(
+                            "requested external effect result contradicts evidence"
+                        )
+                    existing = effect_result_from_metadata(metadata)
+                    self._validate_effect_result_events(
+                        event_values,
+                        result=existing or derived,
+                        evidence=evidence,
+                    )
+                    if existing is not None:
+                        if existing is not derived:
+                            raise ValueError(
+                                "stored external effect result contradicts evidence"
+                            )
+                        session.commit()
+                        return existing
+                    metadata = preserve_effect_result(metadata, resolved=derived)
+                    row.metadata_json = _dump_metadata(metadata, self.path_codec)
+                    event = Event(
+                        task_id=task_id,
+                        kind=EFFECT_RESULT_EVENT_KIND,
+                        message=derived.value,
+                        data={
+                            "result": derived.value,
+                            "evidence": [item.as_dict() for item in evidence],
+                        },
+                    )
+                    session.add(event_to_row(event, path_codec=self.path_codec))
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+        self._notify_change()
+        return derived
+
+    finalize_external_effect_result = finalize_effect_result
+    finalize_task_effect_result = finalize_effect_result
+    set_effect_result = finalize_effect_result
+    seal_effect_result = finalize_effect_result
+
     @contextmanager
     def phase_admission(self, task_id: str) -> Iterator[bool]:
         """Hold the Store authority across local phase work and effect checks.
@@ -680,6 +990,164 @@ class SQLiteTaskStore:
         if decision.proposal is not None:
             self._notify_change()
         return decision
+
+    def record_effect_applied(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        action_id: str,
+        proposal_id: str | None = None,
+    ) -> EffectEvidence:
+        """Record confirmation that one live external action completed."""
+
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(TaskRow, task_id)
+                    if row is None:
+                        raise KeyError(task_id)
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    mode = execution_mode_from_metadata(metadata)
+                    if mode is not ExecutionMode.live:
+                        raise ValueError("only live tasks may record applied effects")
+                    evidence = EffectEvidence(
+                        task_id=task_id,
+                        action=action,
+                        action_id=action_id,
+                        mode=mode,
+                        decision=EffectDecisionKind.allow,
+                        result=EffectResult.applied,
+                        proposal_id=proposal_id,
+                    )
+                    assert evidence.effect_id is not None
+                    for data_json in session.scalars(
+                        select(EventRow.data_json).where(
+                            EventRow.task_id == task_id,
+                            EventRow.kind == "effect.recorded",
+                        )
+                    ).all():
+                        try:
+                            recorded = json.loads(data_json or "{}")
+                        except (TypeError, json.JSONDecodeError) as exc:
+                            raise ValueError("malformed recorded effect evidence") from exc
+                        if isinstance(recorded, dict) and recorded.get("effectId") == evidence.effect_id:
+                            raise ValueError("contradictory applied effect evidence")
+                    matching: list[dict[str, object]] = []
+                    for data_json in session.scalars(
+                        select(EventRow.data_json).where(
+                            EventRow.task_id == task_id,
+                            EventRow.kind == "effect.applied",
+                        )
+                    ).all():
+                        try:
+                            existing = json.loads(data_json or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            raise ValueError("malformed applied effect evidence")
+                        if isinstance(existing, dict) and existing.get("effectId") == evidence.effect_id:
+                            matching.append(existing)
+                    if matching:
+                        existing_evidence = EffectEvidence.model_validate(matching[0])
+                        if (
+                            existing_evidence.effect_id != evidence.effect_id
+                            or existing_evidence.result is not EffectResult.applied
+                        ):
+                            raise ValueError("contradictory applied effect evidence")
+                        session.commit()
+                        return existing_evidence
+                    event = Event(
+                        task_id=task_id,
+                        kind="effect.applied",
+                        message=evidence.action.value,
+                        data=evidence.as_dict(),
+                    )
+                    session.add(event_to_row(event, path_codec=self.path_codec))
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+        self._notify_change()
+        return evidence
+
+    confirm_effect = record_effect_applied
+    record_applied_effect = record_effect_applied
+
+    def record_effect(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        action_id: str,
+        mode: ExecutionMode | str | None = None,
+        decision: EffectDecisionKind | str = EffectDecisionKind.allow,
+        result: EffectResult | str = EffectResult.not_applied,
+        proposal_id: str | None = None,
+    ) -> EffectEvidence:
+        """Record a typed effect observation for integrations and tests."""
+
+        selected_mode = coerce_execution_mode(mode) if mode is not None else self.task_execution_mode(task_id)
+        if selected_mode is None:
+            raise ValueError("effect mode is required")
+        selected_decision = EffectDecisionKind(decision)
+        selected_result = coerce_effect_result(result)
+        if selected_result is None:
+            raise ValueError("effect result is required")
+        evidence = EffectEvidence(
+            task_id=task_id,
+            action=action,
+            action_id=action_id,
+            mode=selected_mode,
+            decision=selected_decision,
+            result=selected_result,
+            proposal_id=proposal_id,
+        )
+        if selected_result is EffectResult.applied:
+            return self.record_effect_applied(
+                task_id,
+                action=action,
+                action_id=action_id,
+                proposal_id=proposal_id,
+            )
+        with Session(self.engine) as session, session.begin():
+            existing_values = session.scalars(
+                select(EventRow.data_json).where(
+                    EventRow.task_id == task_id,
+                    EventRow.kind == "effect.recorded",
+                )
+            ).all()
+            existing = None
+            for data_json in existing_values:
+                try:
+                    value = json.loads(data_json or "{}")
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("malformed recorded effect evidence") from exc
+                if isinstance(value, dict) and value.get("effectId") == evidence.effect_id:
+                    existing = EffectEvidence.model_validate(value)
+                    break
+            if existing is not None:
+                if (
+                    existing.result is not evidence.result
+                    or existing.proposal_id != evidence.proposal_id
+                ):
+                    raise ValueError("contradictory recorded effect evidence")
+            else:
+                session.add(
+                    event_to_row(
+                        Event(
+                            task_id=task_id,
+                            kind="effect.recorded",
+                            message=evidence.action.value,
+                            data=evidence.as_dict(),
+                        ),
+                        path_codec=self.path_codec,
+                    )
+                )
+        self._notify_change()
+        return evidence
+
+    record_effect_evidence = record_effect
 
     @contextmanager
     def effect_admission(
@@ -1042,6 +1510,9 @@ class SQLiteTaskStore:
     ) -> tuple[TaskRecord, bool]:
         self._ensure_archive_epoch()
         metadata = dict(spec.metadata)
+        # The aggregate is Store-owned and cannot be pre-seeded by a caller.
+        metadata.pop(EFFECT_RESULT_METADATA_KEY, None)
+        metadata.pop(LEGACY_EFFECT_RESULT_METADATA_KEY, None)
         if dedupe_key is not None:
             existing = self.find_active_dedupe(dedupe_key)
             if existing is not None:
@@ -6646,9 +7117,26 @@ class SQLiteTaskStore:
             if task.id in seen:
                 findings.append(f"duplicate task id: {task.id}")
             seen.add(task.id)
+            try:
+                task_mode = self.task_execution_mode(task.id)
+                task_effect = self.effect_result(task.id)
+            except (KeyError, TypeError, ValueError):
+                task_mode = None
+                task_effect = None
+            if (
+                TaskStatus(task.status).terminal
+                and task_mode is ExecutionMode.dry_run
+                and task_effect is None
+            ):
+                findings.append(f"{task.id}: terminal dry-run task has no effect result")
+            proposal_only = (
+                task_mode is ExecutionMode.dry_run
+                and task_effect in {EffectResult.not_applied, EffectResult.not_applicable}
+            )
             if (
                 TaskStatus(task.status) == TaskStatus.succeeded
                 and task.patch_path is None
+                and not proposal_only
             ):
                 findings.append(f"{task.id}: succeeded without a saved patch")
             if TaskStatus(task.status) == TaskStatus.pushed and task.patch_path is None:

@@ -30,6 +30,7 @@ from .core.models import (
     Priority,
     Risk,
     ExecutionMode,
+    EffectResult,
     TaskKind,
     TaskSpec,
     TaskStatus,
@@ -524,9 +525,27 @@ def agents() -> None:
 def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None:
     store, _ = _context()
     for task in store.list_tasks(limit=limit):
+        try:
+            mode = store.task_execution_mode(task.id)
+        except (AttributeError, KeyError, ValueError):
+            mode = None
+        try:
+            effect = store.effect_result(task.id)
+        except (AttributeError, KeyError, ValueError):
+            effect = None
+        mode_text = mode.value if isinstance(mode, ExecutionMode) else "unknown"
+        effect_text = effect.value if isinstance(effect, EffectResult) else "pending"
+        outcome = ""
+        if (
+            mode is ExecutionMode.dry_run
+            and TaskStatus(task.status).terminal
+            and effect in {EffectResult.not_applied, EffectResult.not_applicable}
+        ):
+            outcome = "\tvalidated; external operation not applied"
         typer.echo(
             f"{task.id}\t{task.status}\t{task.spec.workflow}\t"
-            f"{task.spec.kind}\t{task.spec.title}"
+            f"{task.spec.kind}\t{task.spec.title}\t"
+            f"mode={mode_text}\teffect={effect_text}{outcome}"
         )
 
 
@@ -670,6 +689,24 @@ def plan(enqueue: bool = False) -> None:
 @app.command()
 def timeline(task_id: str, limit: int = 100) -> None:
     store, _ = _context()
+    task = store.get(task_id)
+    try:
+        mode = store.task_execution_mode(task_id)
+    except (AttributeError, KeyError, ValueError):
+        mode = None
+    try:
+        effect = store.effect_result(task_id)
+    except (AttributeError, KeyError, ValueError):
+        effect = None
+    mode_text = mode.value if isinstance(mode, ExecutionMode) else "unknown"
+    effect_text = effect.value if isinstance(effect, EffectResult) else "pending"
+    typer.echo(f"execution-mode={mode_text}\teffect-result={effect_text}")
+    if (
+        mode is ExecutionMode.dry_run
+        and TaskStatus(task.status).terminal
+        and effect in {EffectResult.not_applied, EffectResult.not_applicable}
+    ):
+        typer.echo("validated; external operation not applied")
     for event in store.events(task_id, limit=limit):
         typer.echo(f"{event.created_at.isoformat()}\t{event.kind}\t{event.message}")
 

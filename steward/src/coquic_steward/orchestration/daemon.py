@@ -1545,7 +1545,10 @@ class StewardDaemon:
     def _enqueue_materialized_publications(self) -> None:
         """Compose completion evidence without crossing the publication boundary."""
 
-        if not getattr(self.config.publication, "enabled", False):
+        if (
+            not getattr(self.config.publication, "enabled", False)
+            or _global_dry_run(self.config)
+        ):
             return
         tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
         materialized: list[tuple[TaskRecord, object]] = []
@@ -1556,12 +1559,6 @@ class StewardDaemon:
                 continue
             materialized.extend((task, run) for run in runs)
         for task, run in materialized:
-            if _global_dry_run(self.config):
-                try:
-                    if self.store.task_execution_mode(task.id) is ExecutionMode.live:
-                        continue
-                except (AttributeError, KeyError, ValueError):
-                    continue
             enqueue_materialized_publication(self.config, self.store, task, run)
 
     reconcile_startup = startup_reconcile
@@ -3146,9 +3143,9 @@ class StewardDaemon:
         """Require the final durable generation and all verified receipts."""
 
         if _global_dry_run(self.config) or _task_is_dry_run(task):
-            # A dry-run publication has no exposed generation; leave the
-            # terminal archive pending rather than creating local cleanup rows.
-            return False
+            # Dry-run publication is explicitly not applicable.  No outbox row,
+            # receipt wait, transport client, or cleanup intent is created.
+            return True
         if not getattr(getattr(self.config, "publication", None), "enabled", False):
             return True
         run = self._terminal_publication_run(task.id)
@@ -3483,24 +3480,18 @@ class StewardDaemon:
             mode = self.store.task_execution_mode(task.id)
         except (AttributeError, KeyError, ValueError):
             mode = None
-        proposed_effects = [
-            event for event in events if event.kind == "effect.proposed"
-        ]
-        if mode is ExecutionMode.dry_run:
-            if not any(
-                event.kind == "cleanup_blocked"
-                and event.data.get("reason") == "dry_run_pending_finalization"
-                for event in events
-            ):
-                self.store.add_event(
-                    task.id,
-                    "cleanup_blocked",
-                    "dry-run external proposals remain pending Plan 015 finalization",
-                    {
-                        "reason": "dry_run_pending_finalization",
-                        "proposal_count": len(proposed_effects),
-                    },
-                )
+        try:
+            # The result is orthogonal to lifecycle status and is finalized
+            # before the archive becomes immutable.  A malformed or
+            # contradictory action ledger is never silently summarized.
+            self.store.finalize_effect_result(task.id)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal cleanup requires valid external effect evidence",
+                {"reason": "effect_evidence_invalid", "error": exc.__class__.__name__},
+            )
             return False
         cleanup_state = self.store.cleanup_obligation_state(task.id)
         existing_intent = self._cleanup_intent_for_task(task.id)
@@ -3593,17 +3584,49 @@ class StewardDaemon:
                         )
                         for run in runs:
                             archive.materialize_run(task.id, pipeline.id, run)
+                        archive_pipeline = pipeline
+                        if str(getattr(pipeline, "state", "")) in {"active", "interrupted"}:
+                            terminal_pipeline_state = {
+                                TaskStatus.succeeded.value: "succeeded",
+                                TaskStatus.pushed.value: "succeeded",
+                                TaskStatus.no_changes.value: "succeeded",
+                                TaskStatus.blocked.value: "blocked",
+                                TaskStatus.failed.value: "failed",
+                                TaskStatus.cancelled.value: "cancelled",
+                            }.get(str(task.status), "failed")
+                            archive_pipeline = pipeline.model_copy(
+                                update={
+                                    "state": terminal_pipeline_state,
+                                    "phase": "complete",
+                                    "completed_at": task.updated_at,
+                                },
+                                deep=True,
+                            )
                         archive.materialize_pipeline(
                             task.id,
-                            pipeline,
+                            archive_pipeline,
                             runs=runs,
                         )
-                    if getattr(
-                        getattr(self.config, "publication", None), "enabled", False
-                    ):
+                    publication_enabled_for_task = bool(
+                        getattr(getattr(self.config, "publication", None), "enabled", False)
+                    ) and mode is ExecutionMode.live
+                    if publication_enabled_for_task:
                         final_run = self._terminal_publication_run(task.id)
                         if final_run is not None:
                             self._prepare_terminal_publication_snapshot(task, final_run)
+                    try:
+                        effect_result = self.store.effect_result(task.id)
+                        effect_evidence = self.store.effect_evidence(task.id)
+                        archive.materialize_effects(
+                            task.id,
+                            effect_evidence,
+                            result=effect_result,
+                            mode=(mode.value if mode is not None else "dry-run"),
+                        )
+                    except AttributeError:
+                        # Narrow legacy test/archive adapters predate the
+                        # dedicated sidecar; their sealed bytes stay untouched.
+                        pass
                     archive.seal(
                         task.id,
                         str(task.status),
@@ -3630,7 +3653,7 @@ class StewardDaemon:
 
         publication_enabled = bool(
             getattr(getattr(self.config, "publication", None), "enabled", False)
-        )
+        ) and mode is ExecutionMode.live
         cleanup_intent = existing_intent
         cleanup_generation = None
         if publication_enabled:

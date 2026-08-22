@@ -1386,11 +1386,11 @@ class StewardExecutor:
         task: TaskRecord,
         source: TaskRecord | None,
         commit: str,
-    ) -> None:
-        """Record post-push GitHub intent without claiming a push occurred."""
+    ) -> bool:
+        """Record and verify post-push GitHub intent without claiming a push."""
 
         if source is None:
-            return
+            return False
         try:
             current = self.store.get(task.id)
             transcript = IntegrationTranscript(
@@ -1408,6 +1408,33 @@ class StewardExecutor:
             self._update_feature_issues_after_push(
                 current, source, commit, transcript
             )
+            issues = _selected_feature_issues(source)
+            if not issues or len(issues) > 1:
+                return True
+            if not isinstance(issues[0].get("issue_number"), int):
+                return True
+            number = int(issues[0]["issue_number"])
+            fingerprint = bounded_fingerprint(source.id, number, commit, limit=64)
+            expected = {
+                (
+                    EffectActionKind.github_issue_comment.value,
+                    f"github-issue-comment:{fingerprint}",
+                ),
+                (
+                    EffectActionKind.github_issue_close.value,
+                    f"github-issue-close:{fingerprint}",
+                ),
+            }
+            recorded = {
+                (event.data.get("action"), event.data.get("actionId"))
+                for event in self.store.events(task.id)
+                if event.kind == "effect.proposed"
+            }
+            if not expected.issubset(recorded):
+                raise RuntimeError(
+                    "required GitHub issue proposals were not persisted"
+                )
+            return True
         except Exception as exc:
             self.store.add_event(
                 task.id,
@@ -1415,6 +1442,7 @@ class StewardExecutor:
                 str(exc).strip()[-2_000:] or exc.__class__.__name__,
                 {"integration_task_id": task.id, "step": "proposal"},
             )
+            return False
 
     def _durable_push(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.push
@@ -1444,9 +1472,22 @@ class StewardExecutor:
                         evidence = self._record_push_proposal(
                             task, pipeline, commit, decision
                         )
-                        self._record_dry_run_feature_issue_proposals(
-                            task, source, commit
+                        issue_proposals_recorded = (
+                            self._record_dry_run_feature_issue_proposals(
+                                task, source, commit
+                            )
                         )
+                        if not issue_proposals_recorded:
+                            return self._phase_finish(
+                                task,
+                                pipeline,
+                                phase,
+                                phase,
+                                evidence={
+                                    **evidence,
+                                    "issue_proposals_recorded": False,
+                                },
+                            )
                         self.store.finish_task(
                             task.id,
                             TaskStatus.succeeded,

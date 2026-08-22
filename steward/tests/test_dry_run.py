@@ -19,6 +19,7 @@ from coquic_steward.core.models import (
     SignalItem,
     TaskKind,
     TaskSpec,
+    TaskStatus,
     WorkerKind,
 )
 from coquic_steward.execution.session import enqueue_materialized_publication
@@ -163,6 +164,46 @@ def test_daemon_allows_local_dry_run_phase(repo: Path, tmp_path: Path, monkeypat
     assert daemon.drive_selected_task(task.id) is True
     assert calls == [task.id]
     assert not any(event.kind == "effect.proposed" for event in store.events(task.id))
+
+
+def test_dry_run_finalization_waits_without_proposals(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    config = StewardConfig(repo_root=repo, dry_run=True, local_codex_test_harness=True)
+    config.ensure_dirs()
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=True)
+    task, _ = store.add_task(_spec())
+    pipeline = store.list_pipelines(task.id)[0]
+    store.add_event(
+        task.id,
+        "pipeline.ready_to_seal",
+        "no changes",
+        {"pipeline_id": pipeline.id, "terminal_status": TaskStatus.no_changes.value},
+    )
+    store.finish_task(task.id, TaskStatus.no_changes, "no changes")
+    seal_calls: list[str] = []
+
+    from coquic_steward.execution.task_archive import TaskArchiveWriter
+
+    real_seal = TaskArchiveWriter.seal
+
+    def record_seal(self, task_id, *args, **kwargs):
+        seal_calls.append(task_id)
+        return real_seal(self, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(TaskArchiveWriter, "seal", record_seal)
+    daemon = StewardDaemon(config, store)
+
+    assert daemon.finalize_terminal_task(task.id) is False
+    assert seal_calls == []
+    assert not any(event.kind == "effect.proposed" for event in store.events(task.id))
+    blocked = [event for event in store.events(task.id) if event.kind == "cleanup_blocked"]
+    assert blocked and blocked[-1].data["reason"] == "dry_run_pending_finalization"
+    assert blocked[-1].data["proposal_count"] == 0
+    assert not any(
+        event.kind in {"cleanup_pending", "cleanup_complete"}
+        for event in store.events(task.id)
+    )
 
 
 def test_publication_enqueue_rechecks_persisted_latch(tmp_path: Path) -> None:

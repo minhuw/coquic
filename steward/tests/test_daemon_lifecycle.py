@@ -4547,7 +4547,8 @@ def test_recovered_result_advances_exact_interrupted_phase_once(config):
 
 
 def test_terminal_seal_uses_canonical_utc_timestamp(config):
-    store = TaskStore.create(config.db_path)
+    config = config.__class__(**{**config.__dict__, "dry_run": False})
+    store = TaskStore.create(config.db_path, dry_run=False)
     task, pipeline = _task(store, "canonical terminal timestamp")
     _, run = store.create_session_with_run(
         task.id,
@@ -4597,7 +4598,8 @@ def test_terminal_seal_uses_canonical_utc_timestamp(config):
 
 
 def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
-    store = TaskStore.create(config.db_path)
+    config = config.__class__(**{**config.__dict__, "dry_run": False})
+    store = TaskStore.create(config.db_path, dry_run=False)
     task, pipeline = _task(store, "unresolved terminal action")
     store.add_event(
         task.id,
@@ -4633,7 +4635,8 @@ def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
 def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     config, monkeypatch
 ):
-    store = TaskStore.create(config.db_path)
+    config = config.__class__(**{**config.__dict__, "dry_run": False})
+    store = TaskStore.create(config.db_path, dry_run=False)
     task, pipeline = _task(store, "terminal cleanup")
     store.add_event(
         task.id,
@@ -4694,6 +4697,10 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
         daemon.executor,
         "clean_finished_task_worktree",
         lambda record: shutil.rmtree(record.worktree_path),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.preflight_remote_push",
+        lambda _config: True,
     )
 
     assert daemon.finalize_terminal_task(task.id) is False

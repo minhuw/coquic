@@ -3486,7 +3486,7 @@ class StewardDaemon:
         proposed_effects = [
             event for event in events if event.kind == "effect.proposed"
         ]
-        if mode is ExecutionMode.dry_run and proposed_effects:
+        if mode is ExecutionMode.dry_run:
             if not any(
                 event.kind == "cleanup_blocked"
                 and event.data.get("reason") == "dry_run_pending_finalization"

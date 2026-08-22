@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -5973,6 +5974,82 @@ def test_durable_dry_run_commit_proposes_remote_push(
     ).stdout
     assert remote_text == "hello\n"
     assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+
+def test_dry_run_feature_issue_proposals_are_persisted(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,), dry_run=True
+    )
+    commands: list[list[str]] = []
+    real_command = run_command
+
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            commands.append(command)
+            pytest.fail("dry-run issue proposals must not invoke GitHub")
+        return real_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
+    assert _drive_durable(executor, integration.id)
+
+    actions = [
+        event.data["action"]
+        for event in store.events(integration.id)
+        if event.kind == "effect.proposed"
+    ]
+    assert actions == ["git.push", "github.issue.comment", "github.issue.close"]
+    assert [
+        event.kind
+        for event in store.events(source.id)
+        if event.kind in {"github.issue_comment_proposed", "github.issue_close_proposed"}
+    ] == ["github.issue_comment_proposed", "github.issue_close_proposed"]
+    assert commands == []
+
+
+def test_dry_run_feature_issue_proposals_must_persist_before_ready_to_seal(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,), dry_run=True
+    )
+    real_command = run_command
+
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            pytest.fail("dry-run issue proposals must not invoke GitHub")
+        return real_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
+    _advance_durable(executor, integration.id, 7)
+    shutil.rmtree(config.transcripts_dir)
+    config.transcripts_dir.write_text("transcript path collision\n", encoding="utf-8")
+
+    outcome = executor.advance_once(integration.id)
+
+    assert outcome.status == "advanced"
+    assert outcome.next_phase.value == "push"
+    assert not TaskStatus(store.get(integration.id).status).terminal
+    assert not any(
+        event.kind == "pipeline.phase.finished"
+        and event.data.get("output", {}).get("next_phase") == "ready_to_seal"
+        for event in store.events(integration.id)
+    )
+    proposals = [
+        event
+        for event in store.events(integration.id)
+        if event.kind == "effect.proposed"
+    ]
+    assert [event.data["action"] for event in proposals] == ["git.push"]
+    assert not any(
+        event.kind in {"github.issue_comment_proposed", "github.issue_close_proposed"}
+        for event in store.events(source.id)
+    )
+    assert any(
+        event.kind == "github.issue_update_failed"
+        for event in store.events(integration.id)
+    )
+
 
 def test_durable_push_blocks_when_main_push_budget_is_reached(
     config: StewardConfig, tmp_path: Path, monkeypatch

@@ -200,6 +200,36 @@ def test_proposal_bookkeeping_failure_is_not_external_effect_evidence(
     assert store.finalize_effect_result(task.id) is EffectResult.not_applicable
 
 
+def test_bookkeeping_failure_does_not_poison_confirmed_push_result(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    store.record_effect_applied(
+        task.id,
+        action=EffectActionKind.git_push.value,
+        action_id="push-with-bookkeeping-diagnostic",
+    )
+    store.finish_task(task.id, TaskStatus.pushed, "pushed")
+    store.add_event(
+        task.id,
+        "github.issue_update_failed",
+        "post-push bookkeeping failed",
+        {"integration_task_id": task.id, "step": "bookkeeping"},
+    )
+
+    assert any(
+        event.kind == "github.issue_update_failed"
+        and event.data.get("step") == "bookkeeping"
+        for event in store.events(task.id)
+    )
+    evidence = store.effect_evidence(task.id)
+    assert len(evidence) == 1
+    assert evidence[0].result is EffectResult.applied
+    assert store.finalize_effect_result(task.id) is EffectResult.applied
+    assert store.finalize_effect_result(task.id) is EffectResult.applied
+
+
 def test_push_budget_legacy_evidence_uses_safe_identity(tmp_path: Path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
     task, _ = store.add_task(_spec())

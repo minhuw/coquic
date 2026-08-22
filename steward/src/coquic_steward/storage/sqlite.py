@@ -795,10 +795,10 @@ class SQLiteTaskStore:
                     result = EffectResult.not_applied
                 elif event_record.kind == "github.issue_update_failed":
                     step = str(data.get("step", "comment"))
-                    if step == "proposal":
-                        # This records a local proposal-bookkeeping failure,
-                        # not a failed external action.  A later retry may
-                        # still persist the real proposal evidence.
+                    if step in {"proposal", "bookkeeping"}:
+                        # These are local diagnostics, not failed external
+                        # actions.  A later retry may still persist the real
+                        # proposal or post-push issue evidence.
                         continue
                     if step not in {"comment", "close"}:
                         raise ValueError("unknown GitHub issue update step")

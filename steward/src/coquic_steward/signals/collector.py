@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import TypeAlias
 
 from ..core.config import StewardConfig
@@ -17,6 +18,7 @@ from .providers import (
     GitHubActionsPerfProvider,
     GitHubActionsTestProvider,
     GitHubFeatureIssuesProvider,
+    ProviderRevalidationError,
 )
 
 _SignalProvider: TypeAlias = (
@@ -60,21 +62,47 @@ def signal_providers(names: tuple[str, ...]) -> list[_SignalProvider]:
 
 
 def revalidate_signal_items(
-    config: StewardConfig, items: list[SignalItem]
+    config: StewardConfig,
+    items: list[SignalItem],
+    *,
+    strict: bool = False,
+    fail_closed: bool | None = None,
 ) -> tuple[list[SignalItem], dict[str, str]]:
+    if fail_closed is not None:
+        strict = bool(fail_closed)
     providers: dict[str, _SignalProvider] = {}
     actionable: list[SignalItem] = []
     stale_reasons: dict[str, str] = {}
     for item in items:
         provider_type = PROVIDER_TYPES.get(item.provider)
         if provider_type is None:
-            actionable.append(item)
+            if strict:
+                stale_reasons[item.id] = "provider_unavailable"
+            else:
+                actionable.append(item)
             continue
         provider = providers.setdefault(item.provider, provider_type())
         try:
-            reason = provider.stale_signal_reason(config, item)
-        except Exception:  # pragma: no cover - revalidation must fail open.
-            reason = None
+            if strict:
+                parameters = inspect.signature(
+                    provider.stale_signal_reason
+                ).parameters.values()
+                supports_strict = any(
+                    parameter.name == "strict"
+                    or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters
+                )
+                reason = (
+                    provider.stale_signal_reason(config, item, strict=True)
+                    if supports_strict
+                    else provider.stale_signal_reason(config, item)
+                )
+            else:
+                reason = provider.stale_signal_reason(config, item)
+        except ProviderRevalidationError:
+            reason = "provider_unavailable"
+        except Exception:  # pragma: no cover - ordinary planning remains fail-open.
+            reason = "provider_unavailable" if strict else None
         if reason is None:
             actionable.append(item)
         else:

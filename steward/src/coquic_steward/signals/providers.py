@@ -34,6 +34,10 @@ class ProviderSignalResult:
     has_more: bool = False
 
 
+class ProviderRevalidationError(RuntimeError):
+    """The provider could not prove that a stored signal is still current."""
+
+
 class GitHubActionsProvider:
     name = "github-actions"
     workflow_file: str | None = None
@@ -92,18 +96,24 @@ class GitHubActionsProvider:
         )
 
     def stale_signal_reason(
-        self, config: StewardConfig, item: SignalItem
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> str | None:
         selected_run_id = _str_or_none(item.payload.get("run_id"))
         if selected_run_id is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
             return None
         latest, error = self._latest_run(config)
         if error:
+            if strict:
+                raise ProviderRevalidationError(error or "provider_unavailable")
             return None
         if latest is None:
             return "workflow_run_missing"
         latest_run_id = _str_or_none(latest.get("databaseId"))
         if latest_run_id is None:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_run_id")
             return None
         if latest_run_id != selected_run_id:
             return "superseded_by_newer_run"
@@ -111,11 +121,23 @@ class GitHubActionsProvider:
         if selected_attempt is None:
             selected_attempt = 1
         latest_attempt = _int_or_none(latest.get("attempt"))
+        if latest_attempt is None and strict:
+            raise ProviderRevalidationError("provider_response_missing_attempt")
         if latest_attempt != selected_attempt:
             return "superseded_by_newer_run"
-        if _str_or_none(latest.get("status")) != "completed":
+        latest_status = _str_or_none(latest.get("status"))
+        if latest_status is None:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_status")
+            return None
+        if latest_status != "completed":
             return "workflow_run_not_completed"
-        if _str_or_none(latest.get("conclusion")) != "failure":
+        latest_conclusion = _str_or_none(latest.get("conclusion"))
+        if latest_conclusion is None:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_conclusion")
+            return None
+        if latest_conclusion != "failure":
             return "workflow_run_no_longer_failed"
         return None
 
@@ -445,10 +467,12 @@ class GitHubFeatureIssuesProvider:
         )
 
     def stale_signal_reason(
-        self, config: StewardConfig, item: SignalItem
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> str | None:
         issue_number = _int_or_none(item.payload.get("issue_number"))
         if issue_number is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
             return None
         command = [
             "gh",
@@ -464,14 +488,25 @@ class GitHubFeatureIssuesProvider:
             command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
         )
         if not result.ok:
+            if strict:
+                raise ProviderRevalidationError(result.stderr or "provider_unavailable")
             return None
         try:
             decoded = json.loads(result.stdout)
         except json.JSONDecodeError:
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_json")
             return None
         if not isinstance(decoded, dict):
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_shape")
             return None
-        if str(decoded.get("state") or "").lower() != "open":
+        state = decoded.get("state")
+        if not isinstance(state, str) or not state:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_state")
+            return None
+        if state.lower() != "open":
             return "source_closed"
         labels = set(_label_names(decoded.get("labels")))
         if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
@@ -510,10 +545,12 @@ class CodeScanningProvider:
         )
 
     def stale_signal_reason(
-        self, config: StewardConfig, item: SignalItem
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> str | None:
         alert_number = _code_scanning_alert_number(item)
         if alert_number is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
             return None
         command = [
             "gh",
@@ -526,14 +563,25 @@ class CodeScanningProvider:
             command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
         )
         if not result.ok:
+            if strict:
+                raise ProviderRevalidationError(result.stderr or "provider_unavailable")
             return None
         try:
             decoded = json.loads(result.stdout)
         except json.JSONDecodeError:
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_json")
             return None
         if not isinstance(decoded, dict):
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_shape")
             return None
-        return None if decoded.get("state") == "open" else "source_not_open"
+        state = decoded.get("state")
+        if not isinstance(state, str) or not state:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_state")
+            return None
+        return None if state == "open" else "source_not_open"
 
 
 class CodacyProvider:
@@ -638,8 +686,10 @@ class CodacyProvider:
         return ProviderSignalResult(summary=summary, has_more=True)
 
     def stale_signal_reason(
-        self, config: StewardConfig, item: SignalItem
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> str | None:
+        if strict:
+            raise ProviderRevalidationError("provider_revalidation_unsupported")
         return None
 
 

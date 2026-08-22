@@ -583,6 +583,14 @@ EXECUTION_MODE_METADATA_KEY = "execution_mode"
 TASK_EXECUTION_MODE_METADATA_KEY = EXECUTION_MODE_METADATA_KEY
 EXECUTION_MODE_KEY = EXECUTION_MODE_METADATA_KEY
 
+# Task lineage is stored in the existing metadata document so the current
+# SQLite catalog remains migration-free.  The snake-case spelling is the
+# canonical persisted form; the camel-case spelling is accepted when reading
+# early callers that serialized metadata themselves.
+DRY_RUN_OF_TASK_ID_METADATA_KEY = "dry_run_of_task_id"
+DRY_RUN_OF_TASK_ID_KEY = DRY_RUN_OF_TASK_ID_METADATA_KEY
+DRY_RUN_OF_TASK_ID_METADATA_ALIAS = "dryRunOfTaskId"
+
 
 def execution_mode_for_dry_run(dry_run: bool) -> ExecutionMode:
     """Return the Store-owned mode corresponding to startup configuration."""
@@ -880,6 +888,21 @@ class TaskSpec(BaseModel):
             return {**value, "workflow": default_workflow_for_kind(value["kind"])}
         return value
 
+    @property
+    def dry_run_of_task_id(self) -> str | None:
+        """Return the immutable dry-run source for an explicit live rerun."""
+
+        value = self.metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY)
+        if value is None:
+            value = self.metadata.get(DRY_RUN_OF_TASK_ID_METADATA_ALIAS)
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def rerun_source_task_id(self) -> str | None:
+        """Compatibility spelling for callers describing task lineage."""
+
+        return self.dry_run_of_task_id
+
 
 class TaskRecord(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
@@ -899,6 +922,16 @@ class TaskRecord(BaseModel):
     @property
     def id(self) -> str:
         return self.spec.id
+
+    @property
+    def dry_run_of_task_id(self) -> str | None:
+        """Expose rerun lineage without making metadata caller-owned."""
+
+        return self.spec.dry_run_of_task_id
+
+    @property
+    def rerun_source_task_id(self) -> str | None:
+        return self.spec.rerun_source_task_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -1159,6 +1192,21 @@ class SchedulerWakeup(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     consumed_at: datetime | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRerunAllocation:
+    """Result of the atomic live-rerun allocation boundary."""
+
+    task: TaskRecord
+    created: bool
+    wakeup: SchedulerWakeup | None = None
+
+    def __iter__(self):
+        # Preserve the familiar ``(task, created)`` allocation shape while
+        # exposing the exact wakeup for callers that need it.
+        yield self.task
+        yield self.created
 
 
 @dataclass(frozen=True, slots=True)

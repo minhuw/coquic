@@ -169,6 +169,14 @@ class ArchiveSealError(ArchiveError):
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedRerunArchive:
+    """Immutable archive evidence accepted as a live-rerun source."""
+
+    manifest_digest: str
+    effects: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveInvocation:
     """One bounded, archive-owned invocation and its optional telemetry."""
 
@@ -1900,6 +1908,91 @@ class TaskArchive:
         return _validate_effects_document(path.read_bytes(), task_id=task_id)
 
     validate_effects = effect_records
+
+    def verify_rerun_source(
+        self,
+        task_id: str,
+        *,
+        expected_status: TaskStatus | str,
+        expected_mode: str = "dry-run",
+        expected_result: EffectResult | str,
+        expected_effects: Sequence[Mapping[str, Any] | EffectEvidence] = (),
+    ) -> VerifiedRerunArchive:
+        """Verify the retained terminal bytes and effect sidecar together.
+
+        A sealed archive without an effects sidecar is not enough to authorize
+        a live rerun.  The sidecar is compared with Store-owned event evidence
+        so old proposals, commits, and payloads cannot become execution input.
+        """
+
+        self.verify_or_raise(task_id)
+        expected_mode_value = getattr(expected_mode, "value", str(expected_mode))
+        try:
+            manifest = json.loads(
+                self.task_path(task_id, "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ArchiveSealError("terminal manifest is unreadable") from exc
+        if not isinstance(manifest, Mapping) or manifest.get("terminalStatus") != str(expected_status):
+            raise ArchiveConflictError("archive terminal status disagrees with Store")
+        effects = self.effect_records(task_id)
+        if not effects:
+            raise ArchiveSealError("rerun source has no retained effect evidence")
+        selected = (
+            expected_result.value
+            if isinstance(expected_result, EffectResult)
+            else str(expected_result)
+        )
+        if selected == EffectResult.applied.value:
+            raise ArchiveSealError("rerun source has an applied external effect")
+        if any(item.get("mode") != expected_mode_value for item in effects):
+            raise ArchiveConflictError("archive effect mode disagrees with Store")
+        observed_results = {str(item.get("result")) for item in effects}
+        if selected == EffectResult.not_applicable.value:
+            if len(effects) != 1 or observed_results != {selected}:
+                raise ArchiveConflictError("archive effect aggregate disagrees with Store")
+        elif selected == EffectResult.not_applied.value:
+            if observed_results != {selected}:
+                raise ArchiveConflictError("archive effect aggregate disagrees with Store")
+        else:
+            raise ArchiveValidationError("rerun source effect result is invalid")
+
+        expected_values: list[dict[str, Any]] = []
+        for item in expected_effects:
+            if isinstance(item, EffectEvidence):
+                value = item.as_dict()
+            else:
+                value = dict(item)
+                try:
+                    value = _effect_evidence_model(value).as_dict()
+                except (TypeError, ValueError) as exc:
+                    raise ArchiveValidationError(
+                        "expected effect evidence is malformed"
+                    ) from exc
+            expected_values.append(value)
+        if selected == EffectResult.not_applicable.value:
+            if expected_values:
+                raise ArchiveConflictError("not-applicable Store evidence is not empty")
+        else:
+            actual = tuple(
+                json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                for value in effects
+            )
+            expected = tuple(
+                json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                for value in sorted(
+                    expected_values,
+                    key=lambda value: (str(value.get("at")), str(value.get("effectId"))),
+                )
+            )
+            if actual != expected:
+                raise ArchiveConflictError("archive effect evidence disagrees with Store")
+        return VerifiedRerunArchive(
+            manifest_digest=self.manifest_digest(task_id),
+            effects=effects,
+        )
+
+    verify_live_rerun_source = verify_rerun_source
 
     def _task_metadata(
         self,

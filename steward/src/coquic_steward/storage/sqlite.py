@@ -56,6 +56,8 @@ from ..core.models import (
     EffectProposal,
     EffectResult,
     EFFECT_RESULT_EVENT_KIND,
+    DRY_RUN_OF_TASK_ID_METADATA_KEY,
+    LiveRerunAllocation,
     EFFECT_RESULT_METADATA_KEY,
     LEGACY_EFFECT_RESULT_METADATA_KEY,
     derive_effect_result,
@@ -89,6 +91,7 @@ from ..core.models import (
     new_execution_id,
     new_pipeline_id,
     new_run_id,
+    new_task_id,
     new_session_id,
     WorkerKind,
     WorkerResult,
@@ -179,6 +182,67 @@ from ..publication.outbox import (
 )
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+
+# These values are execution artifacts or effect authority, not canonical task
+# specification.  A live rerun receives a new identity and starts with a
+# clean local execution envelope.
+_LIVE_RERUN_METADATA_DROP_KEYS = frozenset(
+    {
+        "dedupe_key",
+        "execution_mode",
+        "effect_result",
+        "external_effect_result",
+        "effect_proposal",
+        "effect_proposals",
+        "proposal",
+        "proposals",
+        "source_context",
+        "selected_signal_items",
+        "selected_signal_item_ids",
+        "dryRunOfTaskId",
+        "source_task_id",
+        "provider_payload",
+        "provider_result",
+        "provider_response",
+        "provider_data",
+        "signal_payload",
+        "selected_signal_payload",
+        "source_payload",
+        "payload",
+        "worker_context",
+        "old_proposal",
+        "terminal_status",
+        "terminal_state",
+        "result",
+        "validation_results",
+        "validations",
+        "patches",
+        "runs",
+        "pipelines",
+        "sessions",
+        "wakeup",
+        "worktree",
+        "worktree_path",
+        "branch",
+        "branch_name",
+        "commit",
+        "commit_sha",
+        "commit_path",
+        "patch",
+        "patch_path",
+        "transcript",
+        "transcript_path",
+        "last_message",
+        "last_message_path",
+        "archive",
+        "archive_path",
+        "execution",
+        "execution_id",
+        "terminal_effect",
+        "effect_evidence",
+        "effects",
+    }
+)
 
 _PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
 _PRIVATE_RECEIPT_KEY_RE = re.compile(
@@ -1603,6 +1667,393 @@ class SQLiteTaskStore:
             raise SQLiteStoreLifecycleError("invalid Store database") from exc
         finally:
             connection.close()
+
+    def active_live_descendants(self, source_task_id: str) -> list[TaskRecord]:
+        """Return all active live descendants recorded for one source."""
+
+        values: list[TaskRecord] = []
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                _task_query().where(
+                    TaskRow.status.in_([status.value for status in ACTIVE_STATUSES])
+                )
+            ).all()
+            for row in rows:
+                record = row_to_task(row, path_codec=self.path_codec)
+                if (
+                    record.dry_run_of_task_id == source_task_id
+                    and execution_mode_from_metadata(record.spec.metadata)
+                    is ExecutionMode.live
+                ):
+                    values.append(record)
+        values.sort(key=lambda value: (value.created_at, value.id))
+        return values
+
+    def active_live_rerun(self, source_task_id: str) -> TaskRecord | None:
+        """Return the active live descendant for one dry-run source, if any."""
+
+        values = self.active_live_descendants(source_task_id)
+        return values[0] if values else None
+
+    get_active_live_descendant = active_live_rerun
+    find_active_live_descendant = active_live_rerun
+    active_live_descendant = active_live_rerun
+    list_active_live_descendants = active_live_descendants
+
+    def signal_items_by_id(self, ids: Iterable[str]) -> list[SignalItem]:
+        """Load exactly the Store-owned signal identities named by a task."""
+
+        selected = list(dict.fromkeys(value for value in ids if isinstance(value, str)))
+        if not selected:
+            return []
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(SignalItemRow).where(SignalItemRow.id.in_(selected))
+            ).all()
+            by_id = {
+                row.id: row_to_signal_item(row, path_codec=self.path_codec)
+                for row in rows
+            }
+        if set(by_id) != set(selected):
+            missing = sorted(set(selected) - set(by_id))
+            raise KeyError(f"missing signal item(s): {', '.join(missing)}")
+        return [by_id[value] for value in selected]
+
+    get_signal_items = signal_items_by_id
+
+    def selected_signal_items_for_task(self, task_id: str) -> list[SignalItem]:
+        """Recover a task's selected signals from metadata and relations.
+
+        The two Store-owned representations must agree.  A task with neither
+        representation is genuinely manual; a partial or broken link fails
+        closed instead of silently rerunning an unrelated source.
+        """
+
+        with Session(self.engine) as session:
+            task_row = session.get(TaskRow, task_id)
+            if task_row is None:
+                raise KeyError(task_id)
+            metadata = _metadata_dict(task_row.metadata_json, self.path_codec)
+            metadata_present = "selected_signal_item_ids" in metadata
+            raw_ids = metadata.get("selected_signal_item_ids")
+            if raw_ids is None and not metadata_present:
+                metadata_ids: list[str] = []
+            elif isinstance(raw_ids, list):
+                metadata_ids = list(dict.fromkeys(
+                    value for value in raw_ids if isinstance(value, str) and value
+                ))
+                if len(metadata_ids) != len(raw_ids):
+                    raise ValueError("task selected signal metadata is malformed")
+            else:
+                raise ValueError("task selected signal metadata is malformed")
+            relation_rows = session.scalars(
+                select(SignalItemRow)
+                .where(SignalItemRow.planned_task_id == task_id)
+                .order_by(SignalItemRow.created_at, SignalItemRow.id)
+            ).all()
+            relation_ids = {row.id for row in relation_rows}
+            if not metadata_present:
+                selected_ids = [row.id for row in relation_rows]
+                if not selected_ids:
+                    return []
+                return [
+                    row_to_signal_item(row, path_codec=self.path_codec)
+                    for row in relation_rows
+                ]
+
+            # A previous live descendant may now own the one mutable coverage
+            # pointer.  That is a valid lineage transition; an absent row or
+            # an unrelated owner is still a broken source link.
+            if not relation_ids.issubset(set(metadata_ids)):
+                raise ValueError("task selected signal metadata and relation disagree")
+            rows = session.scalars(
+                select(SignalItemRow).where(SignalItemRow.id.in_(metadata_ids))
+            ).all()
+            by_id = {row.id: row for row in rows}
+            if set(by_id) != set(metadata_ids):
+                missing = sorted(set(metadata_ids) - set(by_id))
+                raise ValueError(
+                    "task selected signal link is missing: " + ", ".join(missing)
+                )
+            for row in rows:
+                if row.planned_task_id == task_id:
+                    continue
+                if not row.planned_task_id:
+                    raise ValueError("task selected signal link is missing")
+                owner = session.get(TaskRow, row.planned_task_id)
+                if owner is None:
+                    raise ValueError("task selected signal link owner is missing")
+                owner_metadata = _metadata_dict(owner.metadata_json, self.path_codec)
+                if owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY) != task_id:
+                    raise ValueError("task selected signal link owner is unrelated")
+            return [
+                row_to_signal_item(by_id[item_id], path_codec=self.path_codec)
+                for item_id in metadata_ids
+            ]
+
+    get_selected_signal_items = selected_signal_items_for_task
+    task_signal_items = selected_signal_items_for_task
+
+    def allocate_live_rerun(
+        self,
+        source_task_id: str,
+        *,
+        selected_signal_ids: Iterable[str] = (),
+        stale_signal_ids: Iterable[str] = (),
+        stale_reasons: Mapping[str, str] | None = None,
+        dedupe_key: str | None = None,
+    ) -> LiveRerunAllocation:
+        """Allocate one fresh live task and transfer current signal coverage.
+
+        Validation of archive bytes and provider state belongs to the caller;
+        this method is the final Store transaction and therefore rechecks task,
+        signal ownership, duplicate lineage, and all durable writes together.
+        """
+
+        if not isinstance(source_task_id, str) or not source_task_id:
+            raise ValueError("source task id is required")
+        selected = list(dict.fromkeys(
+            value for value in selected_signal_ids if isinstance(value, str)
+        ))
+        stale = list(dict.fromkeys(
+            value for value in stale_signal_ids if isinstance(value, str)
+        ))
+        reasons = {
+            key: value[:256]
+            for key, value in dict(stale_reasons or {}).items()
+            if isinstance(key, str) and key in stale and isinstance(value, str)
+        }
+        lineage_dedupe = dedupe_key or _live_rerun_dedupe_key(source_task_id)
+        if not lineage_dedupe:
+            raise ValueError("live rerun dedupe key is required")
+        wakeup: SchedulerWakeup | None = None
+        created = False
+        saved: TaskRecord | None = None
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                source_row = session.scalar(
+                    _task_query().where(TaskRow.id == source_task_id)
+                )
+                if source_row is None:
+                    raise KeyError(source_task_id)
+                source_metadata = _metadata_dict(
+                    source_row.metadata_json, self.path_codec
+                )
+                source_mode = execution_mode_from_metadata(source_metadata)
+                if source_mode is not ExecutionMode.dry_run:
+                    raise ValueError("live rerun source is not dry-run")
+                if source_row.status not in {
+                    TaskStatus.succeeded.value,
+                    TaskStatus.no_changes.value,
+                }:
+                    raise ValueError("live rerun source is not a successful terminal task")
+
+                active_rows = session.scalars(
+                    _task_query().where(
+                        TaskRow.status.in_([status.value for status in ACTIVE_STATUSES])
+                    )
+                ).all()
+                existing_row = None
+                for candidate in active_rows:
+                    candidate_metadata = _metadata_dict(
+                        candidate.metadata_json, self.path_codec
+                    )
+                    candidate_record = row_to_task(candidate, path_codec=self.path_codec)
+                    if (
+                        candidate_record.dry_run_of_task_id == source_task_id
+                        and execution_mode_from_metadata(candidate_metadata)
+                        is ExecutionMode.live
+                    ):
+                        existing_row = candidate
+                        break
+                    if candidate.dedupe_key == lineage_dedupe:
+                        raise ValueError("live rerun dedupe key conflicts with another task")
+                if existing_row is not None:
+                    saved = row_to_task(existing_row, path_codec=self.path_codec)
+                else:
+                    signal_rows: list[SignalItemRow] = []
+                    if selected:
+                        signal_rows = session.scalars(
+                            select(SignalItemRow).where(
+                                SignalItemRow.id.in_(selected)
+                            )
+                        ).all()
+                        if {row.id for row in signal_rows} != set(selected):
+                            raise ValueError("live rerun signal identity is missing")
+                        for row in signal_rows:
+                            if row.planned_task_id == source_task_id:
+                                continue
+                            if not row.planned_task_id:
+                                raise ValueError("live rerun signal is not covered by source task")
+                            owner = session.get(TaskRow, row.planned_task_id)
+                            if owner is None:
+                                raise ValueError("live rerun signal owner is missing")
+                            owner_metadata = _metadata_dict(
+                                owner.metadata_json, self.path_codec
+                            )
+                            if owner_metadata.get(DRY_RUN_OF_TASK_ID_METADATA_KEY) != source_task_id:
+                                raise ValueError("live rerun signal owner is unrelated")
+                    if set(selected) & set(stale):
+                        raise ValueError("live rerun signal cannot be both actionable and stale")
+
+                    metadata = {
+                        key: value
+                        for key, value in source_metadata.items()
+                        if key not in _LIVE_RERUN_METADATA_DROP_KEYS
+                    }
+                    metadata[DRY_RUN_OF_TASK_ID_METADATA_KEY] = source_task_id
+                    metadata["dedupe_key"] = lineage_dedupe
+                    metadata["selected_signal_item_ids"] = list(selected)
+                    if signal_rows:
+                        current_items = [
+                            row_to_signal_item(row, path_codec=self.path_codec)
+                            for row in signal_rows
+                        ]
+                        metadata["source_context"] = {
+                            "selected_signal_item_ids": list(selected),
+                            "selected_signal_items": [
+                                item.model_dump(mode="json") for item in current_items
+                            ],
+                        }
+                        metadata["evidence"] = list(selected)
+                    else:
+                        metadata.pop("selected_signal_item_ids", None)
+                        metadata.pop("evidence", None)
+                    metadata[EXECUTION_MODE_METADATA_KEY] = ExecutionMode.live.value
+                    task_id = new_task_id()
+                    spec = TaskSpec(
+                        id=task_id,
+                        kind=source_row.kind,
+                        workflow=source_row.workflow,
+                        worker=source_row.worker,
+                        title=source_row.title,
+                        prompt=source_row.prompt,
+                        priority=source_row.priority,
+                        risk=source_row.risk,
+                        source="rerun-live",
+                        allow_main_write=source_row.allow_main_write,
+                        metadata=metadata,
+                    )
+                    now = utc_now()
+                    record = TaskRecord(
+                        spec=spec,
+                        status=TaskStatus.queued,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    execution = TaskExecution(
+                        id=new_execution_id(),
+                        task_id=task_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    pipeline = TaskPipeline(
+                        id=new_pipeline_id(),
+                        task_id=task_id,
+                        execution_id=execution.id,
+                        ordinal=1,
+                        trigger="initial",
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    session.add(
+                        task_to_row(
+                            record,
+                            dedupe_key=lineage_dedupe,
+                            path_codec=self.path_codec,
+                        )
+                    )
+                    session.add(
+                        event_to_row(
+                            Event(
+                                task_id=task_id,
+                                kind="task.created",
+                                message=record.spec.title,
+                                data={
+                                    "source": "rerun-live",
+                                    "dry_run_of_task_id": source_task_id,
+                                },
+                            ),
+                            path_codec=self.path_codec,
+                        )
+                    )
+                    session.add(
+                        event_to_row(
+                            Event(
+                                task_id=task_id,
+                                kind="task.live_rerun",
+                                message="live task allocated from verified dry-run source",
+                                data={
+                                    "source_task_id": source_task_id,
+                                    "selected_signal_ids": list(selected),
+                                    "stale_signal_ids": list(stale),
+                                    "stale_reasons": reasons,
+                                },
+                            ),
+                            path_codec=self.path_codec,
+                        )
+                    )
+                    session.flush()
+                    execution_row = execution_to_row(
+                        execution, path_codec=self.path_codec
+                    )
+                    pipeline_row = pipeline_to_row(pipeline)
+                    session.add(execution_row)
+                    session.flush()
+                    session.add(pipeline_row)
+                    session.flush()
+                    execution_row.owning_pipeline_id = pipeline.id
+                    now_text = now.isoformat()
+                    for row in signal_rows:
+                        row.planned_task_id = task_id
+                        row.updated_at = now_text
+                    raw_connection = session.connection().connection.driver_connection
+                    raw_connection.row_factory = sqlite3.Row
+                    canonical_signal_ids: list[str] = []
+                    for row in signal_rows:
+                        canonical = raw_connection.execute(
+                            "SELECT signal_id FROM control_loop_signals "
+                            "WHERE epoch_id=? AND provider=? AND fingerprint=?",
+                            (self.control_loop.epoch_id, row.provider, row.fingerprint),
+                        ).fetchone()
+                        if canonical is None:
+                            raise ValueError("live rerun control-loop signal identity is missing")
+                        canonical_id = str(canonical[0])
+                        canonical_signal_ids.append(canonical_id)
+                        self.control_loop._edge(
+                            raw_connection, "signal_task", canonical_id, task_id
+                        )
+                    self.control_loop._edge(
+                        raw_connection, "task_rerun", source_task_id, task_id
+                    )
+                    wakeup = SchedulerWakeup(
+                        reason="task.live_rerun",
+                        data={
+                            "source_task_id": source_task_id,
+                            "task_id": task_id,
+                            "signal_ids": canonical_signal_ids,
+                            "retained_signal_count": len(selected),
+                            "stale_signal_count": len(stale),
+                        },
+                    )
+                    self._record_wakeup_in_session(session, wakeup)
+                    session.commit()
+                    saved = record
+                    created = True
+            except Exception:
+                session.rollback()
+                raise
+        if created:
+            self._notify_change()
+        assert saved is not None
+        return LiveRerunAllocation(task=saved, created=created, wakeup=wakeup)
+
+    create_live_rerun = allocate_live_rerun
+    rerun_live_task = allocate_live_rerun
+    allocate_live_task_rerun = allocate_live_rerun
+    create_live_rerun_task = allocate_live_rerun
+    enqueue_live_rerun = allocate_live_rerun
 
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
@@ -7490,6 +7941,12 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
         ),
         "run",
     )
+
+
+def _live_rerun_dedupe_key(source_task_id: str) -> str:
+    if not isinstance(source_task_id, str) or not source_task_id:
+        raise ValueError("source task id is required")
+    return f"live-rerun:{source_task_id}"
 
 
 def _metadata_dict(value: str | None, path_codec: PathCodec) -> dict[str, object]:

@@ -31,6 +31,7 @@ from ..core.models import (
     DaemonRuntime,
     DaemonRuntimeState,
     EffectActionKind,
+    EffectResult,
     ExecutionMode,
     EXECUTION_MODE_METADATA_KEY,
     OwnedDockerUsage,
@@ -61,7 +62,7 @@ from ..execution.session import (
     session_supervisor_for_config,
     planner_session_for_config,
 )
-from ..execution.task_archive import TaskArchiveWriter
+from ..execution.task_archive import TaskArchive, TaskArchiveWriter
 from ..publication.atif import AtifSource
 from ..publication.models import RunIdentity, RunLineage, RunMetadata, UsageSummary
 from ..publication.generation import (
@@ -176,6 +177,120 @@ def _task_is_dry_run(task: TaskRecord) -> bool:
     return _task_execution_mode(task) is ExecutionMode.dry_run
 
 
+def create_live_rerun(
+    config: StewardConfig,
+    store: SQLiteTaskStore,
+    source_task_id: str,
+) -> LiveRerunOutcome:
+    """Validate current inputs, then enqueue one explicit live rerun.
+
+    This helper intentionally stops at Store allocation.  It never constructs
+    a daemon or calls the task driver; the normal scheduler will reread the
+    repository and provider state when it later dispatches the new task.
+    """
+
+    if _global_dry_run(config):
+        raise LiveRerunRejected("dry_run_configured")
+    try:
+        source = store.get(source_task_id)
+    except KeyError as exc:
+        raise LiveRerunRejected("source_task_missing") from exc
+    try:
+        source_status = TaskStatus(source.status)
+    except (TypeError, ValueError) as exc:
+        raise LiveRerunRejected("source_status_invalid") from exc
+    try:
+        mode = store.task_execution_mode(source.id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("source_execution_mode_unavailable") from exc
+    if mode is not ExecutionMode.dry_run:
+        raise LiveRerunRejected("source_is_not_dry_run")
+    if source_status not in {TaskStatus.succeeded, TaskStatus.no_changes}:
+        raise LiveRerunRejected("source_not_successful_terminal")
+    try:
+        result = store.effect_result(source.id)
+        evidence = store.effect_evidence(source.id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("source_effect_evidence_invalid") from exc
+    if result not in {EffectResult.not_applied, EffectResult.not_applicable}:
+        raise LiveRerunRejected("source_effect_was_applied")
+
+    archive = TaskArchive(
+        getattr(config, "tasks_dir", Path(store.path).parent / "tasks")
+    )
+    try:
+        archive.verify_rerun_source(
+            source.id,
+            expected_status=source.status,
+            expected_mode=ExecutionMode.dry_run.value,
+            expected_result=result,
+            expected_effects=evidence,
+        )
+    except Exception as exc:
+        # Archive exceptions intentionally collapse to one bounded refusal;
+        # their class remains available to diagnostics and tests without
+        # exposing filesystem paths or old artifact content in CLI output.
+        raise LiveRerunRejected("source_archive_unverified") from exc
+
+    try:
+        linked = store.selected_signal_items_for_task(source.id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("source_signal_links_invalid") from exc
+
+    actionable: list[SignalItem] = []
+    stale_reasons: dict[str, str] = {}
+    if not linked and str(source.spec.source) != "manual":
+        raise LiveRerunRejected("source_signal_links_missing")
+    if linked:
+        actionable, stale_reasons = revalidate_signal_items(
+            config, linked, strict=True
+        )
+        if any(reason == "provider_unavailable" for reason in stale_reasons.values()):
+            raise LiveRerunRejected("signal_provider_unavailable")
+        if not actionable:
+            raise LiveRerunRejected(
+                "all_source_signals_stale",
+                retained_signal_count=0,
+                stale_signal_count=len(stale_reasons),
+                stale_reasons=stale_reasons,
+            )
+
+    try:
+        existing = store.active_live_rerun(source.id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("active_rerun_lookup_failed") from exc
+    if existing is not None:
+        return LiveRerunOutcome(
+            source_task_id=source.id,
+            task=existing,
+            created=False,
+            retained_signal_count=len(actionable),
+            stale_signal_count=len(stale_reasons),
+        )
+
+    selected_ids = [item.id for item in actionable]
+    stale_ids = list(stale_reasons)
+    try:
+        allocation = store.allocate_live_rerun(
+            source.id,
+            selected_signal_ids=selected_ids,
+            stale_signal_ids=stale_ids,
+            stale_reasons=stale_reasons,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("rerun_allocation_conflict") from exc
+    return LiveRerunOutcome(
+        source_task_id=source.id,
+        task=allocation.task,
+        created=allocation.created,
+        retained_signal_count=len(selected_ids),
+        stale_signal_count=len(stale_ids),
+    )
+
+
+rerun_live_task = create_live_rerun
+
+
 def _inspection_confirms_stopped(inspection: object) -> bool:
     """Require a positive stop result when the boundary exposes confidence."""
 
@@ -202,6 +317,33 @@ class TickResult:
     enqueued: int = 0
     dispatched: int = 0
     skipped: int = 0
+
+
+class LiveRerunRejected(ValueError):
+    """A dry-run source failed the explicit live-rerun eligibility gate."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        retained_signal_count: int = 0,
+        stale_signal_count: int = 0,
+        stale_reasons: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retained_signal_count = retained_signal_count
+        self.stale_signal_count = stale_signal_count
+        self.stale_reasons = dict(stale_reasons or {})
+
+
+@dataclass(frozen=True)
+class LiveRerunOutcome:
+    source_task_id: str
+    task: TaskRecord | None
+    created: bool
+    retained_signal_count: int
+    stale_signal_count: int
 
 
 @dataclass(frozen=True)

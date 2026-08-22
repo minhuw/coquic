@@ -18,6 +18,7 @@ from .orchestration import (
     TickResult,
     acquire_daemon_lock,
 )
+from .orchestration.daemon import LiveRerunRejected, create_live_rerun
 from .execution.executor import default_worker_for_kind
 from .execution.container import bind_deployment_identity
 from .execution.session import (
@@ -564,6 +565,41 @@ def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None
             f"{task.spec.kind}\t{task.spec.title}\t"
             f"mode={mode_text}\teffect={effect_text}{outcome}"
         )
+
+
+@app.command("rerun-live")
+def rerun_live(task_id: str) -> None:
+    """Queue a fresh live task from a verified dry-run task."""
+
+    config = load_config()
+    if _publication_mutation_blocked(config):
+        typer.echo(
+            f"blocked source={task_id} reason=dry_run_configured",
+            err=True,
+        )
+        raise typer.Exit(1)
+    # Inspection opening deliberately does not resolve missing task latches;
+    # every rejection path must be side-effect-free.  The allocation method
+    # writes only the new live task and its one atomic wakeup.
+    store, config = _context(resolve_execution_modes=False)
+    try:
+        outcome = create_live_rerun(config, store, task_id)
+    except LiveRerunRejected as exc:
+        typer.echo(
+            f"blocked source={task_id} reason={exc.reason} "
+            f"retained={exc.retained_signal_count} stale={exc.stale_signal_count}",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    if outcome.task is None:
+        typer.echo(f"blocked source={task_id} reason=allocation_failed", err=True)
+        raise typer.Exit(1)
+    state = "enqueued" if outcome.created else "duplicate"
+    typer.echo(
+        f"{state} source={outcome.source_task_id} new={outcome.task.id} "
+        f"retained={outcome.retained_signal_count} "
+        f"stale={outcome.stale_signal_count}"
+    )
 
 
 @app.command()

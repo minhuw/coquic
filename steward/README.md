@@ -52,6 +52,18 @@ success is rendered as validated with the external operation not applied. No
 outbox row or Site V2/D1/R2 publication is created. Set `dry_run = false` only
 when explicit live operation is intended.
 
+A verified dry-run is never replayed automatically. After restarting Steward with
+`dry_run = false`, use `coquic-steward rerun-live <dry-run-task-id>` to enqueue a
+new live task. The command accepts only a successful (`succeeded` or `no_changes`)
+dry-run task with finalized non-applied effect evidence and a retained, verified
+archive. It revalidates every selected provider signal first; stale signals are
+reported and omitted, while provider uncertainty or an all-stale selection is
+rejected without mutation. A task with no genuinely linked signals may be
+rerun. The source task, archive, proposal, patch, commit, and worktree remain
+immutable; the daemon later executes the fresh task from current repository and
+provider state. Repeating the command while its live descendant is active is
+idempotent and does not create another task.
+
 ## Control-loop archive
 
 The scheduler archive is private local evidence under
@@ -139,7 +151,9 @@ Tasks are queued through the CLI or planner and are admitted by the daemon.
 Each task receives a Store-owned monotonic execution latch. Dry-run tasks run
 local work and retain proposal evidence; selected signals remain preview-covered
 by their task and are not automatically replanned. Use
-`enqueue`, `run`, `timeline`, and `status` for local operations. Commits, pushes,
+`enqueue`, `rerun-live`, `run`, `timeline`, and `status` for local operations.
+`rerun-live` only enqueues; it never drives the daemon or reuses an old task's
+execution artifacts. Commits, pushes,
 issue comments, and external publication remain daemon or human
 responsibilities; Codex workers do not perform those actions directly.
 

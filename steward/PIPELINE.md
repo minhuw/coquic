@@ -35,6 +35,18 @@ archive remains private. Planner-selected signals stay atomically
 preview-covered by their task; no dry-run record enters the publication outbox
 or Site V2. Set `dry_run = false` at startup to opt into live publication.
 
+A live transition is explicit rather than an automatic replay. After restart in
+live mode, `coquic-steward rerun-live <dry-run-task-id>` verifies the source's
+terminal status, non-applied effect evidence, retained archive, and current
+signal identities before allocating a new task and initial pipeline. Linked
+signals are revalidated immediately before the transaction; stale signals are
+omitted, mixed selections retain only actionable identities, and provider
+uncertainty or an all-stale selection is side-effect-free. Manual tasks with no
+linked signals are allowed. The source task and archive remain immutable, old
+proposals and execution artifacts are never inputs, and the command only
+queues—the daemon later rereads current repository/provider state. One active
+live descendant is allowed per dry-run source.
+
 ## Review Formality
 
 The raw reviewer JSON is immutable evidence. A fresh read-only formality
@@ -59,7 +71,8 @@ Successful task-owned work stops at durable `ready_to_seal`; terminal sealing
 records an orthogonal external-effect result (`not-applicable`, `not-applied`,
 or `applied`) before lifecycle cleanup. Dry-run cleanup retains the verified
 private archive while removing disposable resources; live publication and its
-cleanup fencing remain unchanged.
+cleanup fencing remain unchanged. A live rerun gets a fresh task identity and
+lineage metadata; it is not another repair pipeline under the source task.
 
 ## Daemon lifecycle
 

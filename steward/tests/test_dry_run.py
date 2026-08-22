@@ -30,6 +30,7 @@ from coquic_steward.execution.session import enqueue_materialized_publication
 from coquic_steward.orchestration.daemon import (
     LiveRerunRejected,
     StewardDaemon,
+    TickResult,
     create_live_rerun,
 )
 from coquic_steward.publication.outbox import (
@@ -667,6 +668,195 @@ def test_live_rerun_does_not_copy_historical_signal_payload(
     assert "OLD BODY FROM DRY RUN" not in serialized
 
 
+def test_live_rerun_revalidates_before_dispatch_after_issue_closes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.signals.providers as providers
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="dispatch-issue-42",
+        title="Implement issue 42",
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+        },
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="feature",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    current_issue = {
+        "number": 42,
+        "title": "Current issue",
+        "url": "https://github.com/minhuw/coquic/issues/42",
+        "body": "Current body",
+        "labels": [{"name": "steward:enhancement"}],
+        "author": {"login": "maintainer"},
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "state": "OPEN",
+    }
+    monkeypatch.setattr(
+        providers,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True, stdout=json.dumps(current_issue), stderr=""
+        ),
+    )
+    outcome = create_live_rerun(
+        replace(config, dry_run=False), TaskStore.open(store.path), source.id
+    )
+    assert outcome.task is not None
+
+    provider_calls: list[list[str]] = []
+    closed_issue = {**current_issue, "state": "CLOSED", "labels": []}
+
+    def closed_provider(command, **kwargs):
+        provider_calls.append(command)
+        return SimpleNamespace(ok=True, stdout=json.dumps(closed_issue), stderr="")
+
+    monkeypatch.setattr(providers, "run_command", closed_provider)
+    daemon = StewardDaemon(replace(config, dry_run=False), TaskStore.open(store.path))
+    worker_calls: list[str] = []
+    daemon.executor.advance_once = lambda task_id: worker_calls.append(task_id)
+
+    result = TickResult()
+    daemon._dispatch_queued(result, plan=False, max_dispatch=1)
+    assert result.dispatched == 0
+    assert result.skipped == 1
+    assert worker_calls == []
+    assert provider_calls == [
+        [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "-R",
+            daemon.config.github_repository,
+            "--json",
+            "number,title,url,body,labels,author,createdAt,updatedAt,state",
+        ]
+    ]
+    assert TaskStore.open(store.path).get(outcome.task.id).status == TaskStatus.queued
+
+    import coquic_steward.execution.executor as executor_module
+    from coquic_steward.execution.executor import IntegrationTranscript
+
+    monkeypatch.setattr(
+        executor_module,
+        "run_command",
+        lambda *args, **kwargs: pytest.fail("stale rerun reached an external effect"),
+    )
+    with pytest.raises(RuntimeError, match="live rerun signal revalidation failed"):
+        daemon.executor._update_feature_issues_after_push(
+            outcome.task,
+            outcome.task,
+            "a" * 40,
+            IntegrationTranscript(tmp_path / "integration.txt"),
+        )
+    assert len(provider_calls) == 2
+
+
+def test_live_rerun_dispatch_uses_newly_hydrated_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.signals.providers as providers
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="dispatch-refresh-42",
+        title="Old issue title",
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+        },
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="feature",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    old_issue = {
+        "number": 42,
+        "title": "Old issue title",
+        "url": "https://github.com/minhuw/coquic/issues/42",
+        "body": "Old body",
+        "labels": [{"name": "steward:enhancement"}],
+        "author": {"login": "maintainer"},
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "state": "OPEN",
+    }
+    new_issue = {**old_issue, "title": "New issue title", "body": "New body"}
+    response_count = 0
+
+    def current_provider(*args, **kwargs):
+        nonlocal response_count
+        response_count += 1
+        response = old_issue if response_count == 1 else new_issue
+        return SimpleNamespace(ok=True, stdout=json.dumps(response), stderr="")
+
+    monkeypatch.setattr(providers, "run_command", current_provider)
+    outcome = create_live_rerun(
+        replace(config, dry_run=False), TaskStore.open(store.path), source.id
+    )
+    assert outcome.task is not None
+
+    observed: dict[str, object] = {}
+    daemon = StewardDaemon(replace(config, dry_run=False), TaskStore.open(store.path))
+
+    def observe_context(task_id: str):
+        current = TaskStore.open(store.path).get(task_id)
+        selected = current.spec.metadata["source_context"]["selected_signal_items"][0]
+        observed["title"] = selected["payload"]["issue_title"]
+        observed["body"] = selected["payload"]["body_excerpt"]
+        return SimpleNamespace(status="terminal", progressed=True, next_phase=None)
+
+    daemon.executor.advance_once = observe_context
+    result = TickResult()
+    daemon._dispatch_queued(result, plan=False, max_dispatch=1)
+
+    assert observed == {"title": "New issue title", "body": "New body"}
+    assert result.dispatched == 1
+    assert result.skipped == 0
+
+
 def test_live_rerun_hydrates_current_feature_context_for_post_push_effects(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -867,6 +1057,179 @@ def test_live_rerun_rejects_incomplete_feature_response_without_mutation(
     assert [(event.task_id, event.kind, event.data) for event in store.events(source.id)] == before_events
     assert [(wakeup.id, wakeup.reason) for wakeup in store.pending_wakeups()] == before_wakeups
     assert store.signal_items_by_id([saved.id])[0].planned_task_id == source.id
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"state": "open"},
+        {
+            "number": 43,
+            "html_url": "https://github.com/minhuw/coquic/security/code-scanning/43",
+            "state": "open",
+            "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
+            "most_recent_instance": {"location": {"path": "src/main.cpp"}},
+        },
+    ],
+)
+def test_live_rerun_rejects_incomplete_or_mismatched_codeql_response(
+    tmp_path: Path, monkeypatch, response: dict[str, object]
+) -> None:
+    import coquic_steward.signals.providers as providers
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="code-scanning",
+        kind="code-scanning.alert",
+        fingerprint="codeql-42",
+        title="CodeQL alert 42",
+        links=[
+            {
+                "label": "Open alert",
+                "url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+            }
+        ],
+        payload={"alert_number": 42},
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.code_quality,
+            worker=WorkerKind.code_quality_janitor,
+            title="CodeQL",
+            prompt="fix CodeQL",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    before_tasks = [(task.id, task.status) for task in store.list_tasks()]
+    before_wakeups = [(wakeup.id, wakeup.reason) for wakeup in store.pending_wakeups()]
+    monkeypatch.setattr(
+        providers,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True, stdout=json.dumps(response), stderr=""
+        ),
+    )
+
+    with pytest.raises(LiveRerunRejected, match="signal_provider_unavailable"):
+        create_live_rerun(replace(config, dry_run=False), TaskStore.open(store.path), source.id)
+
+    assert [(task.id, task.status) for task in store.list_tasks()] == before_tasks
+    assert [(wakeup.id, wakeup.reason) for wakeup in store.pending_wakeups()] == before_wakeups
+    assert store.signal_items_by_id([saved.id])[0].planned_task_id == source.id
+
+
+def test_strict_codeql_hydration_accepts_matching_alert(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.signals.collector import revalidate_signal_items_with_context
+    import coquic_steward.signals.providers as providers
+
+    item = SignalItem(
+        id="codeql-42",
+        provider="code-scanning",
+        kind="code-scanning.alert",
+        fingerprint="codeql-42",
+        title="CodeQL alert 42",
+        links=[
+            {
+                "label": "Open alert",
+                "url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+            }
+        ],
+        payload={"alert_number": 42},
+    )
+    response = {
+        "number": 42,
+        "html_url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+        "url": "https://api.github.com/repos/minhuw/coquic/code-scanning/alerts/42",
+        "state": "open",
+        "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
+        "most_recent_instance": {
+            "location": {"path": "src/main.cpp", "region": {"start_line": 12}}
+        },
+    }
+    monkeypatch.setattr(
+        providers,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True, stdout=json.dumps(response), stderr=""
+        ),
+    )
+
+    result = revalidate_signal_items_with_context(config, [item], strict=True)
+
+    assert result.stale_reasons == {}
+    assert [current.id for current in result.actionable] == [item.id]
+    assert result.refreshed[item.id].payload["alert_number"] == 42
+    assert result.refreshed[item.id].payload["rule_id"] == "cpp/use-after-free"
+
+
+def test_live_rerun_drops_source_artifact_aliases_from_metadata_and_prompt(
+    tmp_path: Path,
+) -> None:
+    from coquic_steward.agents import render_worker_prompt
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="artifact source",
+            prompt="use only the canonical specification",
+            metadata={
+                "source_patch_path": "/old/source.patch",
+                "source_worktree_path": "/old/source-worktree",
+                "source_commit": "old-commit",
+                "source_commit_sha": "old-sha",
+                "source_commit_path": "/old/commit",
+                "patch_path": "/old/patch",
+                "worktree_path": "/old/worktree",
+                "commit": "old-commit",
+                "benign_metadata": "retain me",
+            },
+        ),
+    )
+
+    outcome = create_live_rerun(
+        replace(config, dry_run=False), TaskStore.open(store.path), source.id
+    )
+    assert outcome.task is not None
+    descendant = TaskStore.open(store.path).get(outcome.task.id)
+    metadata = descendant.spec.metadata
+    for key in (
+        "source_patch_path",
+        "source_worktree_path",
+        "source_commit",
+        "source_commit_sha",
+        "source_commit_path",
+        "patch_path",
+        "worktree_path",
+        "commit",
+    ):
+        assert key not in metadata
+    assert metadata["benign_metadata"] == "retain me"
+    prompt = render_worker_prompt(descendant, replace(config, dry_run=False))
+    assert "/old/source.patch" not in prompt
+    assert "/old/source-worktree" not in prompt
+    assert "old-commit" not in prompt
+    assert "old-sha" not in prompt
 
 
 def test_live_rerun_rejects_forged_signal_owner_lineage(

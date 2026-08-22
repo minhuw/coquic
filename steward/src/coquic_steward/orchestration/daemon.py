@@ -468,6 +468,7 @@ class StewardDaemon:
             store,
             session_supervisor=self.session_supervisor,
         )
+        self._install_live_rerun_effect_guard()
         self.runtime = DaemonRuntime(
             heartbeat_interval_seconds=DAEMON_HEARTBEAT_INTERVAL_SECONDS
         )
@@ -703,14 +704,105 @@ class StewardDaemon:
             pass
         return True
 
+    def _install_live_rerun_effect_guard(self) -> None:
+        """Revalidate rerun signals immediately before provider-backed effects."""
+
+        original = self.executor._update_feature_issues_after_push
+
+        def guarded(
+            task: TaskRecord,
+            source: TaskRecord,
+            sha: str,
+            transcript: Any,
+        ) -> None:
+            if self._is_live_rerun_task(source):
+                if not self._refresh_live_rerun_context(source):
+                    raise RuntimeError("live rerun signal revalidation failed")
+                try:
+                    source = self.store.get(source.id)
+                except KeyError as exc:
+                    raise RuntimeError("live rerun source disappeared") from exc
+            original(task, source, sha, transcript)
+
+        self.executor._update_feature_issues_after_push = guarded
+
+    @staticmethod
+    def _is_live_rerun_task(task: TaskRecord) -> bool:
+        return (
+            str(task.spec.source) == "rerun-live"
+            and task.dry_run_of_task_id is not None
+        )
+
+    def _rerun_task_for_admission(self, task: TaskRecord) -> TaskRecord | None:
+        if self._is_live_rerun_task(task):
+            return task
+        if not _is_integration_manager_task(task):
+            return None
+        source_task_id = task.spec.metadata.get("source_task_id")
+        if not isinstance(source_task_id, str) or not source_task_id:
+            return None
+        try:
+            source = self.store.get(source_task_id)
+        except KeyError:
+            return None
+        return source if self._is_live_rerun_task(source) else None
+
+    def _refresh_live_rerun_context(self, task: TaskRecord) -> bool:
+        """Reject stale reruns and persist only an all-current context."""
+
+        if not self._is_live_rerun_task(task):
+            return True
+        try:
+            if self.store.task_execution_mode(task.id) is not ExecutionMode.live:
+                return False
+            linked = self.store.selected_signal_items_for_task(task.id)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        if not linked:
+            return True
+        try:
+            revalidation = revalidate_signal_items_with_context(
+                self.config, linked, strict=True
+            )
+        except Exception:
+            return False
+        selected_ids = [item.id for item in linked]
+        actionable_ids = [item.id for item in revalidation.actionable]
+        if (
+            revalidation.stale_reasons
+            or actionable_ids != selected_ids
+            or set(revalidation.refreshed) != set(selected_ids)
+        ):
+            return False
+        current_items = [revalidation.refreshed[item_id] for item_id in selected_ids]
+        context = {
+            "selected_signal_item_ids": selected_ids,
+            "selected_signal_items": [
+                item.model_dump(mode="json") for item in current_items
+            ],
+        }
+        if task.spec.metadata.get("source_context") == context:
+            return True
+        try:
+            self.store.refresh_live_rerun_context(
+                task.id, selected_signal_items=current_items
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        task.spec.metadata["source_context"] = context
+        return True
+
     def _task_admission_allowed(self, task: TaskRecord) -> bool:
-        """Allow local work in either mode; effects are checked at their seams."""
+        """Allow local work only after live reruns prove current inputs."""
 
         try:
             mode = self.store.task_execution_mode(task.id)
         except (AttributeError, KeyError, ValueError):
             return False
-        return mode in {ExecutionMode.live, ExecutionMode.dry_run}
+        if mode not in {ExecutionMode.live, ExecutionMode.dry_run}:
+            return False
+        rerun = self._rerun_task_for_admission(task)
+        return rerun is None or self._refresh_live_rerun_context(rerun)
 
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Validate and recover durable ownership before dispatch is allowed."""
@@ -4548,6 +4640,9 @@ class StewardDaemon:
                 # become dry-run while the previous phase was completing.
                 current = self.store.get(task_id)
                 if not self._task_admission_allowed(current):
+                    return False
+                rerun = self._rerun_task_for_admission(current)
+                if rerun is not None and not self._refresh_live_rerun_context(rerun):
                     return False
                 with self.store.phase_admission(task_id):
                     with use_subprocess_owner(self._subprocess_owner):

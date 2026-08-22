@@ -224,13 +224,22 @@ _LIVE_RERUN_METADATA_DROP_KEYS = frozenset(
         "wakeup",
         "worktree",
         "worktree_path",
+        "source_worktree",
+        "source_worktree_path",
         "branch",
         "branch_name",
+        "source_branch",
+        "source_branch_name",
         "commit",
         "commit_sha",
         "commit_path",
+        "source_commit",
+        "source_commit_sha",
+        "source_commit_path",
         "patch",
         "patch_path",
+        "source_patch",
+        "source_patch_path",
         "transcript",
         "transcript_path",
         "last_message",
@@ -1831,6 +1840,76 @@ class SQLiteTaskStore:
 
     get_selected_signal_items = selected_signal_items_for_task
     task_signal_items = selected_signal_items_for_task
+
+    def refresh_live_rerun_context(
+        self,
+        task_id: str,
+        *,
+        selected_signal_items: Iterable[SignalItem],
+    ) -> TaskRecord:
+        """Replace only a live rerun's provider context with current items."""
+
+        current_items = list(selected_signal_items)
+        if not current_items or any(
+            not isinstance(item, SignalItem) or not item.id for item in current_items
+        ):
+            raise ValueError("live rerun signal context is required")
+        current_ids = [item.id for item in current_items]
+        if len(current_ids) != len(set(current_ids)):
+            raise ValueError("live rerun signal context contains duplicate identities")
+
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.scalar(_task_query().where(TaskRow.id == task_id))
+                    if row is None:
+                        raise KeyError(task_id)
+                    if row.source != "rerun-live":
+                        raise ValueError("task is not a live rerun")
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    if execution_mode_from_metadata(metadata) is not ExecutionMode.live:
+                        raise ValueError("task is not live")
+                    raw_selected = metadata.get("selected_signal_item_ids")
+                    if not isinstance(raw_selected, list) or any(
+                        not isinstance(value, str) or not value for value in raw_selected
+                    ):
+                        raise ValueError("live rerun signal identities are missing")
+                    if not set(current_ids).issubset(set(raw_selected)):
+                        raise ValueError("live rerun signal context identity is not selected")
+                    signal_rows = session.scalars(
+                        select(SignalItemRow).where(SignalItemRow.id.in_(current_ids))
+                    ).all()
+                    by_id = {signal.id: signal for signal in signal_rows}
+                    if set(by_id) != set(current_ids):
+                        raise ValueError("live rerun signal identity is missing")
+                    for item in current_items:
+                        stored = by_id[item.id]
+                        if (
+                            item.provider != stored.provider
+                            or item.kind != stored.kind
+                            or item.fingerprint != stored.fingerprint
+                        ):
+                            raise ValueError("live rerun signal context identity disagrees")
+                    metadata["source_context"] = {
+                        "selected_signal_item_ids": list(current_ids),
+                        "selected_signal_items": [
+                            item.model_dump(mode="json") for item in current_items
+                        ],
+                    }
+                    metadata["evidence"] = list(current_ids)
+                    row.metadata_json = _dump_metadata(metadata, self.path_codec)
+                    row.updated_at = utc_now().isoformat()
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+        self._notify_change()
+        return self.get(task_id)
+
+    update_live_rerun_context = refresh_live_rerun_context
+    refresh_live_signal_context = refresh_live_rerun_context
 
     def allocate_live_rerun(
         self,

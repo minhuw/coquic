@@ -774,6 +774,7 @@ class CodeScanningProvider:
         if state != "open":
             return "source_not_open"
         if strict:
+            _validate_code_scanning_response(decoded, alert_number)
             current = _code_scanning_item(decoded)
             _remember_revalidated_signal_item(self, item, current)
         return None
@@ -809,8 +810,19 @@ class CodeScanningProvider:
             if strict:
                 raise ProviderRevalidationError("provider_response_invalid_json")
             return None
-        if not isinstance(decoded, dict) or decoded.get("state") != "open":
+        if not isinstance(decoded, dict):
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_shape")
             return None
+        state = decoded.get("state")
+        if not isinstance(state, str) or not state:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_state")
+            return None
+        if state != "open":
+            return None
+        if strict:
+            _validate_code_scanning_response(decoded, alert_number)
         return _remember_revalidated_signal_item(self, item, _code_scanning_item(decoded))
 
 
@@ -1046,7 +1058,7 @@ def _code_scanning_item(item: object) -> SignalItem:
     location = location.get("location") if isinstance(location.get("location"), dict) else {}
     region = location.get("region") if isinstance(location.get("region"), dict) else {}
     path = _str_or_none(location.get("path"))
-    line = _int_or_none(region.get("start_line"))
+    line = _int_or_none(region.get("start_line") or location.get("start_line"))
     rule_id = _str_or_none(rule.get("id"))
     rule_name = _str_or_none(rule.get("name") or rule.get("description"))
     severity = _str_or_none(
@@ -1055,6 +1067,7 @@ def _code_scanning_item(item: object) -> SignalItem:
         or rule.get("severity")
     )
     payload = {
+        "alert_number": _int_or_none(data.get("number")),
         "rule_id": rule_id,
         "rule_name": rule_name,
         "state": data.get("state"),
@@ -1084,6 +1097,70 @@ def _code_scanning_alert_number(item: SignalItem) -> int | None:
         if number is not None:
             return number
     return None
+
+
+def _code_scanning_url_alert_number(value: object, *, html: bool) -> int | None:
+    url = _str_or_none(value)
+    if url is None:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    parts = [part for part in parsed.path.rstrip("/").split("/") if part]
+    if not parts:
+        return None
+    if html:
+        if len(parts) < 3 or parts[-3:-1] != ["security", "code-scanning"]:
+            return None
+    elif len(parts) < 2 or parts[-2] != "alerts":
+        return None
+    return _int_or_none(parts[-1])
+
+
+def _validate_code_scanning_response(
+    response: dict[str, Any], requested_alert_number: int
+) -> None:
+    """Require a complete response whose identity is the requested alert."""
+
+    if (
+        isinstance(requested_alert_number, bool)
+        or not isinstance(requested_alert_number, int)
+        or requested_alert_number <= 0
+    ):
+        raise ProviderRevalidationError("signal_identity_missing")
+    returned_number = _int_or_none(response.get("number"))
+    if (
+        returned_number is None
+        or isinstance(response.get("number"), bool)
+        or returned_number <= 0
+    ):
+        raise ProviderRevalidationError("provider_response_missing_alert_number")
+    if returned_number != requested_alert_number:
+        raise ProviderRevalidationError("provider_response_alert_identity_mismatch")
+
+    html_url = response.get("html_url")
+    if _code_scanning_url_alert_number(html_url, html=True) != requested_alert_number:
+        raise ProviderRevalidationError("provider_response_alert_url_mismatch")
+    api_url = response.get("url")
+    if api_url is not None and _code_scanning_url_alert_number(api_url, html=False) != requested_alert_number:
+        raise ProviderRevalidationError("provider_response_api_url_mismatch")
+
+    rule = response.get("rule")
+    if not isinstance(rule, dict):
+        raise ProviderRevalidationError("provider_response_missing_rule")
+    if not (
+        _str_or_none(rule.get("id"))
+        or _str_or_none(rule.get("name"))
+        or _str_or_none(rule.get("description"))
+    ):
+        raise ProviderRevalidationError("provider_response_missing_rule_identity")
+
+    instance = response.get("most_recent_instance")
+    if not isinstance(instance, dict):
+        raise ProviderRevalidationError("provider_response_missing_instance")
+    location = instance.get("location")
+    if not isinstance(location, dict) or not _str_or_none(location.get("path")):
+        raise ProviderRevalidationError("provider_response_missing_location")
 
 
 def _codacy_item(item: object) -> SignalItem:

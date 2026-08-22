@@ -909,9 +909,9 @@ def health() -> None:
     persisted_pressure: dict[str, object] | None = None
     container_counts = {"owned": 0, "active": 0, "cleanupPending": 0, "unknown": 0}
     try:
-        store = TaskStore.open(
-            config.db_path, dry_run=_publication_mutation_blocked(config)
-        )
+        # Health inspects existing state; it must not become a startup boundary
+        # that resolves or tightens task execution-mode admission latches.
+        store = TaskStore.open(config.db_path)
         active_tasks = int(store.active_count())
         for task in store.list_tasks(limit=10_000):
             events = store.events(task.id, limit=200)

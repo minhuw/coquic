@@ -563,7 +563,12 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
             )
         raise RuntimeError(f"unknown child boundary mode {mode}")
     if oversized["stdout"] or oversized["stderr"] or process.returncode != 0 or len(output) > MAX_CHILD_STDOUT_BYTES or not output.endswith(b"\n") or output.count(b"\n") != 1:
-        raise RuntimeError(f"Site contract case {case} failed")
+        raise RuntimeError(
+            f"Site contract case {case} failed: returncode={process.returncode}; "
+            f"stdout_bytes={observed['stdout']}; stderr_bytes={observed['stderr']}; "
+            f"stdout_overflow={oversized['stdout']}; stderr_overflow={oversized['stderr']}; "
+            f"stdout_lines={output.count(b'\n')}; stderr_excerpt={stderr_excerpt()!r}"
+        )
     try:
         payload = json.loads(output.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

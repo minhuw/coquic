@@ -569,6 +569,11 @@ def test_live_rerun_mixed_signals_rebinds_only_actionable(tmp_path: Path, monkey
         "stale_signal_reason",
         lambda self, config, item: "source_closed" if item.payload["issue_number"] == 1 else None,
     )
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "revalidated_signal_item",
+        lambda self, config, item, **kwargs: item,
+    )
 
     outcome = create_live_rerun(replace(config, dry_run=False), TaskStore.open(store.path), source.id)
     assert outcome.created is True
@@ -632,18 +637,183 @@ def test_live_rerun_does_not_copy_historical_signal_payload(
         "stale_signal_reason",
         lambda self, config, item: None,
     )
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "revalidated_signal_item",
+        lambda self, config, item, **kwargs: item.model_copy(
+            update={
+                "title": "CURRENT TITLE",
+                "summary": "CURRENT SUMMARY",
+                "payload": {
+                    **item.payload,
+                    "issue_title": "CURRENT TITLE",
+                    "body_excerpt": "CURRENT BODY",
+                },
+            },
+            deep=True,
+        ),
+    )
 
     outcome = create_live_rerun(
         replace(config, dry_run=False), TaskStore.open(store.path), source.id
     )
 
     assert outcome.task is not None
-    assert outcome.task.spec.metadata["source_context"] == {
-        "selected_signal_item_ids": [saved.id]
-    }
+    selected = outcome.task.spec.metadata["source_context"]["selected_signal_items"][0]
+    assert selected["payload"]["issue_title"] == "CURRENT TITLE"
+    assert selected["payload"]["body_excerpt"] == "CURRENT BODY"
     serialized = json.dumps(outcome.task.spec.metadata, sort_keys=True)
     assert "OLD TITLE FROM DRY RUN" not in serialized
     assert "OLD BODY FROM DRY RUN" not in serialized
+
+
+def test_live_rerun_hydrates_current_feature_context_for_post_push_effects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.execution.executor as executor_module
+    import coquic_steward.signals.providers as providers
+    from coquic_steward.execution.executor import IntegrationTranscript, StewardExecutor
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="issue-42-identity",
+        title="OLD TITLE",
+        summary="OLD SUMMARY",
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+            "issue_title": "OLD TITLE",
+            "body_excerpt": "OLD BODY",
+        },
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="feature",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    current_issue = {
+        "number": 42,
+        "title": "CURRENT TITLE",
+        "url": "https://github.com/minhuw/coquic/issues/42",
+        "body": "CURRENT BODY",
+        "labels": [{"name": "steward:enhancement"}],
+        "author": {"login": "maintainer"},
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "state": "OPEN",
+    }
+    monkeypatch.setattr(
+        providers,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True, stdout=json.dumps(current_issue), stderr=""
+        ),
+    )
+
+    outcome = create_live_rerun(
+        replace(config, dry_run=False), TaskStore.open(store.path), source.id
+    )
+    assert outcome.task is not None
+    selected = outcome.task.spec.metadata["source_context"]["selected_signal_items"][0]
+    assert selected["payload"]["issue_title"] == "CURRENT TITLE"
+    assert selected["payload"]["body_excerpt"] == "CURRENT BODY"
+    serialized = json.dumps(outcome.task.spec.metadata, sort_keys=True)
+    assert "OLD TITLE" not in serialized
+    assert "OLD BODY" not in serialized
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        executor_module,
+        "run_command",
+        lambda command, **kwargs: commands.append(command)
+        or SimpleNamespace(ok=True, stdout="", stderr=""),
+    )
+    executor = StewardExecutor(replace(config, dry_run=False), TaskStore.open(store.path))
+    transcript = IntegrationTranscript(tmp_path / "integration.txt")
+    executor._update_feature_issues_after_push(
+        outcome.task, outcome.task, "a" * 40, transcript
+    )
+    assert [command[:4] for command in commands] == [
+        ["gh", "issue", "comment", "42"],
+        ["gh", "issue", "close", "42"],
+    ]
+    assert any(
+        event.kind == "github.issue_closed"
+        for event in TaskStore.open(store.path).events(outcome.task.id)
+    )
+
+
+def test_live_rerun_rejects_partial_hydration_without_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.signals.providers as providers
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo", dry_run=True, local_codex_test_harness=True
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="partial-hydration",
+        title="feature",
+        payload={"issue_number": 42},
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="feature",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    before_tasks = [(task.id, task.status) for task in store.list_tasks()]
+    before_events = [(event.kind, event.data) for event in store.events(source.id)]
+    before_wakeups = [(item.id, item.reason) for item in store.pending_wakeups()]
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "stale_signal_reason",
+        lambda self, config, item: None,
+    )
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "revalidated_signal_item",
+        lambda self, config, item, **kwargs: None,
+    )
+
+    with pytest.raises(LiveRerunRejected, match="signal_provider_unavailable"):
+        create_live_rerun(replace(config, dry_run=False), TaskStore.open(store.path), source.id)
+
+    assert [(task.id, task.status) for task in store.list_tasks()] == before_tasks
+    assert [(event.kind, event.data) for event in store.events(source.id)] == before_events
+    assert [(item.id, item.reason) for item in store.pending_wakeups()] == before_wakeups
+    assert store.signal_items_by_id([saved.id])[0].planned_task_id == source.id
 
 
 def test_live_rerun_rejects_incomplete_feature_response_without_mutation(

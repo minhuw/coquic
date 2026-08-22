@@ -38,6 +38,31 @@ class ProviderRevalidationError(RuntimeError):
     """The provider could not prove that a stored signal is still current."""
 
 
+def _remember_revalidated_signal_item(
+    provider: object, source: SignalItem, current: SignalItem
+) -> SignalItem:
+    """Keep current provider data while retaining the Store-owned identity."""
+
+    value = current.model_copy(
+        update={"id": source.id, "fingerprint": source.fingerprint},
+        deep=True,
+    )
+    cache = getattr(provider, "_revalidated_signal_items", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(provider, "_revalidated_signal_items", cache)
+    cache[source.id] = value
+    return value
+
+
+def _cached_revalidated_signal_item(
+    provider: object, item: SignalItem
+) -> SignalItem | None:
+    cache = getattr(provider, "_revalidated_signal_items", None)
+    value = cache.get(item.id) if isinstance(cache, dict) else None
+    return value.model_copy(deep=True) if isinstance(value, SignalItem) else None
+
+
 class GitHubActionsProvider:
     name = "github-actions"
     workflow_file: str | None = None
@@ -139,7 +164,75 @@ class GitHubActionsProvider:
             return None
         if latest_conclusion != "failure":
             return "workflow_run_no_longer_failed"
+        if strict:
+            workflow_name = _str_or_none(latest.get("workflowName"))
+            if workflow_name is None:
+                raise ProviderRevalidationError("provider_response_missing_workflow_name")
+            current = _workflow_item(
+                provider=self.name,
+                repository=config.github_repository,
+                workflow_name=workflow_name,
+                run_id=latest_run_id,
+                run_attempt=latest_attempt,
+                kind=self._signal_kind(workflow_name),
+                workflow_file=self.workflow_file,
+                worker_context=self._worker_context(),
+            )
+            _remember_revalidated_signal_item(self, item, current)
         return None
+
+    def revalidated_signal_item(
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
+    ) -> SignalItem | None:
+        """Return the current failed run after strict identity validation."""
+
+        cached = _cached_revalidated_signal_item(self, item)
+        if cached is not None:
+            return cached
+        selected_run_id = _str_or_none(item.payload.get("run_id"))
+        if selected_run_id is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
+            return None
+        latest, error = self._latest_run(config)
+        if error:
+            if strict:
+                raise ProviderRevalidationError(error or "provider_unavailable")
+            return None
+        if latest is None:
+            return None
+        latest_run_id = _str_or_none(latest.get("databaseId"))
+        selected_attempt = _int_or_none(item.payload.get("run_attempt")) or 1
+        latest_attempt = _int_or_none(latest.get("attempt"))
+        latest_status = _str_or_none(latest.get("status"))
+        latest_conclusion = _str_or_none(latest.get("conclusion"))
+        if latest_run_id is None or latest_attempt is None or latest_status is None or latest_conclusion is None:
+            if strict:
+                raise ProviderRevalidationError("provider_response_incomplete")
+            return None
+        if (
+            latest_run_id != selected_run_id
+            or latest_attempt != selected_attempt
+            or latest_status != "completed"
+            or latest_conclusion != "failure"
+        ):
+            return None
+        workflow_name = _str_or_none(latest.get("workflowName"))
+        if workflow_name is None:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_workflow_name")
+            return None
+        current = _workflow_item(
+            provider=self.name,
+            repository=config.github_repository,
+            workflow_name=workflow_name,
+            run_id=latest_run_id,
+            run_attempt=latest_attempt,
+            kind=self._signal_kind(workflow_name),
+            workflow_file=self.workflow_file,
+            worker_context=self._worker_context(),
+        )
+        return _remember_revalidated_signal_item(self, item, current)
 
     def _latest_run(
         self, config: StewardConfig
@@ -482,7 +575,7 @@ class GitHubFeatureIssuesProvider:
             "-R",
             config.github_repository,
             "--json",
-            "state,labels",
+            "number,title,url,body,labels,author,createdAt,updatedAt,state",
         ]
         result = run_command(
             command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
@@ -519,10 +612,96 @@ class GitHubFeatureIssuesProvider:
                 for label in raw_labels
             ):
                 raise ProviderRevalidationError("provider_response_invalid_labels")
+            current_number = _int_or_none(decoded.get("number"))
+            if current_number != issue_number:
+                raise ProviderRevalidationError("provider_response_missing_issue_number")
         labels = set(_label_names(raw_labels))
         if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
             return "required_label_removed"
+        if strict:
+            current = _github_feature_issue_item(
+                decoded,
+                provider=self.name,
+                kind=item.kind,
+                worker_context=self._worker_context(),
+            )
+            _remember_revalidated_signal_item(self, item, current)
         return None
+
+    def revalidated_signal_item(
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
+    ) -> SignalItem | None:
+        """Fetch the selected issue again and retain only current fields."""
+
+        cached = _cached_revalidated_signal_item(self, item)
+        if cached is not None:
+            return cached
+        issue_number = _int_or_none(item.payload.get("issue_number"))
+        if issue_number is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
+            return None
+        command = [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "-R",
+            config.github_repository,
+            "--json",
+            "number,title,url,body,labels,author,createdAt,updatedAt,state",
+        ]
+        result = run_command(
+            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+        )
+        if not result.ok:
+            if strict:
+                raise ProviderRevalidationError(result.stderr or "provider_unavailable")
+            return None
+        try:
+            decoded = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_json")
+            return None
+        if not isinstance(decoded, dict):
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_shape")
+            return None
+        state = decoded.get("state")
+        raw_labels = decoded.get("labels")
+        if not isinstance(state, str) or not state:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_state")
+            return None
+        if "labels" not in decoded or not isinstance(raw_labels, list) or any(
+            not isinstance(label, dict)
+            or not isinstance(label.get("name"), str)
+            or not label["name"].strip()
+            for label in raw_labels
+        ):
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_labels")
+            return None
+        current_number = _int_or_none(decoded.get("number"))
+        if current_number != issue_number:
+            if strict:
+                raise ProviderRevalidationError("provider_response_missing_issue_number")
+            return None
+        if state.lower() != "open":
+            return None
+        labels = set(_label_names(raw_labels))
+        if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
+            return None
+        current_payload = dict(decoded)
+        current_payload.setdefault("number", issue_number)
+        current = _github_feature_issue_item(
+            current_payload,
+            provider=self.name,
+            kind=item.kind,
+            worker_context=self._worker_context(),
+        )
+        return _remember_revalidated_signal_item(self, item, current)
 
 
 class CodeScanningProvider:
@@ -592,7 +771,47 @@ class CodeScanningProvider:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_state")
             return None
-        return None if state == "open" else "source_not_open"
+        if state != "open":
+            return "source_not_open"
+        if strict:
+            current = _code_scanning_item(decoded)
+            _remember_revalidated_signal_item(self, item, current)
+        return None
+
+    def revalidated_signal_item(
+        self, config: StewardConfig, item: SignalItem, *, strict: bool = False
+    ) -> SignalItem | None:
+        cached = _cached_revalidated_signal_item(self, item)
+        if cached is not None:
+            return cached
+        alert_number = _code_scanning_alert_number(item)
+        if alert_number is None:
+            if strict:
+                raise ProviderRevalidationError("signal_identity_missing")
+            return None
+        command = [
+            "gh",
+            "api",
+            "-X",
+            "GET",
+            f"repos/{config.github_repository}/code-scanning/alerts/{alert_number}",
+        ]
+        result = run_command(
+            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+        )
+        if not result.ok:
+            if strict:
+                raise ProviderRevalidationError(result.stderr or "provider_unavailable")
+            return None
+        try:
+            decoded = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            if strict:
+                raise ProviderRevalidationError("provider_response_invalid_json")
+            return None
+        if not isinstance(decoded, dict) or decoded.get("state") != "open":
+            return None
+        return _remember_revalidated_signal_item(self, item, _code_scanning_item(decoded))
 
 
 class CodacyProvider:

@@ -1837,6 +1837,7 @@ class SQLiteTaskStore:
         source_task_id: str,
         *,
         selected_signal_ids: Iterable[str] = (),
+        selected_signal_items: Iterable[SignalItem] = (),
         stale_signal_ids: Iterable[str] = (),
         stale_reasons: Mapping[str, str] | None = None,
         dedupe_key: str | None = None,
@@ -1853,6 +1854,11 @@ class SQLiteTaskStore:
         selected = list(dict.fromkeys(
             value for value in selected_signal_ids if isinstance(value, str)
         ))
+        current_items = {
+            item.id: item
+            for item in selected_signal_items
+            if isinstance(item, SignalItem) and item.id in selected
+        }
         stale = list(dict.fromkeys(
             value for value in stale_signal_ids if isinstance(value, str)
         ))
@@ -1913,7 +1919,12 @@ class SQLiteTaskStore:
                         ).all()
                         if {row.id for row in signal_rows} != set(selected):
                             raise ValueError("live rerun signal identity is missing")
+                        if set(current_items) != set(selected):
+                            raise ValueError("live rerun signal context is missing")
                         for row in signal_rows:
+                            current = current_items[row.id]
+                            if current.provider != row.provider or current.kind != row.kind:
+                                raise ValueError("live rerun signal context identity disagrees")
                             if row.planned_task_id == source_task_id:
                                 continue
                             if not row.planned_task_id:
@@ -1937,13 +1948,16 @@ class SQLiteTaskStore:
                     metadata["dedupe_key"] = lineage_dedupe
                     metadata["selected_signal_item_ids"] = list(selected)
                     if signal_rows:
-                        # Signal rows retain historical provider payloads.  A live
-                        # rerun must carry only canonical identities so stale
-                        # titles, bodies, and provider instructions cannot become
-                        # worker input before the scheduler refreshes state.
+                        # Signal rows retain historical provider payloads.  Only
+                        # items freshly returned by strict provider revalidation
+                        # may become live worker context.
                         metadata["source_context"] = {
                             "selected_signal_item_ids": list(selected),
                         }
+                        metadata["source_context"]["selected_signal_items"] = [
+                            current_items[item_id].model_dump(mode="json")
+                            for item_id in selected
+                        ]
                         metadata["evidence"] = list(selected)
                     else:
                         metadata.pop("selected_signal_item_ids", None)

@@ -133,6 +133,7 @@ from ..signals import (
     project_signals_from_items,
     revalidate_signal_items,
 )
+from ..signals.collector import revalidate_signal_items_with_context
 from .contracts import DaemonCancellation, PublicationTransportSetupError
 from .transport import (
     BotocoreR2TransportAdapter,
@@ -239,12 +240,16 @@ def create_live_rerun(
 
     actionable: list[SignalItem] = []
     stale_reasons: dict[str, str] = {}
+    refreshed_signal_items: dict[str, SignalItem] = {}
     if not linked and str(source.spec.source) != "manual":
         raise LiveRerunRejected("source_signal_links_missing")
     if linked:
-        actionable, stale_reasons = revalidate_signal_items(
+        revalidation = revalidate_signal_items_with_context(
             config, linked, strict=True
         )
+        actionable = revalidation.actionable
+        stale_reasons = revalidation.stale_reasons
+        refreshed_signal_items = revalidation.refreshed
         if any(reason == "provider_unavailable" for reason in stale_reasons.values()):
             raise LiveRerunRejected("signal_provider_unavailable")
         if not actionable:
@@ -270,10 +275,14 @@ def create_live_rerun(
 
     selected_ids = [item.id for item in actionable]
     stale_ids = list(stale_reasons)
+    if set(refreshed_signal_items) != set(selected_ids):
+        raise LiveRerunRejected("signal_provider_unavailable")
+    current_items = [refreshed_signal_items[item_id] for item_id in selected_ids]
     try:
         allocation = store.allocate_live_rerun(
             source.id,
             selected_signal_ids=selected_ids,
+            selected_signal_items=current_items,
             stale_signal_ids=stale_ids,
             stale_reasons=stale_reasons,
         )

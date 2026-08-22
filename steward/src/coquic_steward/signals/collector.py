@@ -48,6 +48,13 @@ class SignalCollection:
     items: list[SignalItem]
 
 
+@dataclass(frozen=True)
+class SignalRevalidation:
+    actionable: list[SignalItem]
+    stale_reasons: dict[str, str]
+    refreshed: dict[str, SignalItem]
+
+
 def signal_providers(names: tuple[str, ...]) -> list[_SignalProvider]:
     providers: list[_SignalProvider] = []
     for name in names:
@@ -61,18 +68,17 @@ def signal_providers(names: tuple[str, ...]) -> list[_SignalProvider]:
     return providers
 
 
-def revalidate_signal_items(
+def _revalidate_signal_items(
     config: StewardConfig,
     items: list[SignalItem],
     *,
-    strict: bool = False,
-    fail_closed: bool | None = None,
-) -> tuple[list[SignalItem], dict[str, str]]:
-    if fail_closed is not None:
-        strict = bool(fail_closed)
+    strict: bool,
+    include_refreshed: bool,
+) -> SignalRevalidation:
     providers: dict[str, _SignalProvider] = {}
     actionable: list[SignalItem] = []
     stale_reasons: dict[str, str] = {}
+    refreshed: dict[str, SignalItem] = {}
     for item in items:
         provider_type = PROVIDER_TYPES.get(item.provider)
         if provider_type is None:
@@ -104,10 +110,71 @@ def revalidate_signal_items(
         except Exception:  # pragma: no cover - ordinary planning remains fail-open.
             reason = "provider_unavailable" if strict else None
         if reason is None:
-            actionable.append(item)
+            current = item
+            if include_refreshed:
+                try:
+                    candidate = provider.revalidated_signal_item(
+                        config, item, strict=strict
+                    )
+                except ProviderRevalidationError:
+                    candidate = None
+                except AttributeError:
+                    candidate = None
+                except Exception:  # pragma: no cover - provider boundary guard.
+                    candidate = None
+                if (
+                    isinstance(candidate, SignalItem)
+                    and candidate.provider == item.provider
+                    and candidate.kind == item.kind
+                ):
+                    # The Store relation remains the canonical task identity;
+                    # only the provider-owned descriptive fields are refreshed.
+                    if candidate.id != item.id or candidate.fingerprint != item.fingerprint:
+                        candidate = candidate.model_copy(
+                            update={
+                                "id": item.id,
+                                "fingerprint": item.fingerprint,
+                            },
+                            deep=True,
+                        )
+                    current = candidate
+                    refreshed[item.id] = candidate
+                elif strict:
+                    stale_reasons[item.id] = "provider_unavailable"
+                    continue
+            actionable.append(current)
         else:
             stale_reasons[item.id] = reason
-    return actionable, stale_reasons
+    return SignalRevalidation(actionable, stale_reasons, refreshed)
+
+
+def revalidate_signal_items(
+    config: StewardConfig,
+    items: list[SignalItem],
+    *,
+    strict: bool = False,
+    fail_closed: bool | None = None,
+) -> tuple[list[SignalItem], dict[str, str]]:
+    if fail_closed is not None:
+        strict = bool(fail_closed)
+    result = _revalidate_signal_items(
+        config, items, strict=strict, include_refreshed=False
+    )
+    return result.actionable, result.stale_reasons
+
+
+def revalidate_signal_items_with_context(
+    config: StewardConfig,
+    items: list[SignalItem],
+    *,
+    strict: bool = False,
+    fail_closed: bool | None = None,
+) -> SignalRevalidation:
+    if fail_closed is not None:
+        strict = bool(fail_closed)
+    return _revalidate_signal_items(
+        config, items, strict=strict, include_refreshed=True
+    )
 
 
 def collect_signal_items(

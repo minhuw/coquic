@@ -530,6 +530,7 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
         if any(item.is_alive() for item in threads):
             raise RuntimeError(f"Site contract case {case} did not finish draining child output")
     output = b"".join(stdout)
+    stdout_lines = output.count(b"\n")
 
     def stderr_excerpt() -> str:
         text = b"".join(stderr).decode("utf-8", errors="replace")
@@ -567,7 +568,7 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
             f"Site contract case {case} failed: returncode={process.returncode}; "
             f"stdout_bytes={observed['stdout']}; stderr_bytes={observed['stderr']}; "
             f"stdout_overflow={oversized['stdout']}; stderr_overflow={oversized['stderr']}; "
-            f"stdout_lines={output.count(b'\n')}; stderr_excerpt={stderr_excerpt()!r}"
+            f"stdout_lines={stdout_lines}; stderr_excerpt={stderr_excerpt()!r}"
         )
     try:
         payload = json.loads(output.decode("utf-8"))

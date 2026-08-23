@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 
+from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.publication import AtifSource, RunIdentity, RunMetadata
 from coquic_steward.publication.d1 import D1PublicationClient
 from coquic_steward.publication.generation import PublicationComposer, PublicationGeneration, compose_publication_generation
@@ -735,6 +736,15 @@ def main() -> int:
             if needs_publication:
                 store_path = temporary_root / "tasks.sqlite"
                 store = SQLiteTaskStore.create(store_path)
+                store.add_task(
+                    TaskSpec(
+                        id=TASK_ID,
+                        kind=TaskKind.custom,
+                        worker=WorkerKind.custom,
+                        title="Greenfield publication",
+                        prompt="Publish the synthetic greenfield fixture.",
+                    )
+                )
                 publication = require_generation(compose_for_transport(graph(), scanner_runner=clean_scanner))
                 queued = store.enqueue_publication(publication.to_outbox())
                 if queued.status.value not in {"enqueued", "existing"}: raise RuntimeError("publication was not queued")

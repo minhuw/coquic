@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 
 from coquic_steward.core.models import (
+    EFFECT_RESULT_METADATA_KEY,
+    EXECUTION_MODE_METADATA_KEY,
+    LEGACY_EFFECT_RESULT_METADATA_KEY,
     Priority,
     ProjectSignals,
     Risk,
@@ -116,6 +119,34 @@ def test_remote_write_authority_map_starts_with_zero_entries() -> None:
     assert all(
         not AGENTS[key.worker].remote_writes for key in REMOTE_WRITE_AUTHORITY
     )
+
+
+@pytest.mark.parametrize(
+    "reserved_key",
+    [
+        EXECUTION_MODE_METADATA_KEY,
+        EFFECT_RESULT_METADATA_KEY,
+        LEGACY_EFFECT_RESULT_METADATA_KEY,
+    ],
+)
+def test_verifier_rejects_store_owned_allocation_metadata(reserved_key: str) -> None:
+    item = _feature_item()
+    proposal = json.loads(_feature_proposal())
+    proposal["tasks"][0]["metadata"][reserved_key] = {
+        EXECUTION_MODE_METADATA_KEY: "live",
+        EFFECT_RESULT_METADATA_KEY: "not-applicable",
+        LEGACY_EFFECT_RESULT_METADATA_KEY: "applied",
+    }[reserved_key]
+
+    verified = PlanVerifier().verify_plan(
+        json.dumps(proposal),
+        _signals(item),
+        [],
+    )
+
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+    assert verified.dispositions[0].reason_code == "policy_reserved_metadata"
 
 
 def test_planner_dispatch_policy_drives_all_planner_surfaces() -> None:
@@ -382,7 +413,10 @@ def test_non_feature_proposal_keeps_planner_authored_fields() -> None:
                         "priority": "medium",
                         "risk": "medium",
                         "evidence": [item.id],
-                        "metadata": {"selected_signal_item_ids": [item.id]},
+                        "metadata": {
+                            "selected_signal_item_ids": [item.id],
+                            "ordinary_metadata": "preserve me",
+                        },
                     }
                 ],
             }
@@ -395,5 +429,6 @@ def test_non_feature_proposal_keeps_planner_authored_fields() -> None:
     spec, _ = verified.planned[0]
     assert spec.title == title
     assert spec.prompt == prompt
+    assert spec.metadata["ordinary_metadata"] == "preserve me"
     selected = spec.metadata["source_context"]["selected_signal_items"][0]
     assert selected["payload"]["issue_url"] == ISSUE_URL

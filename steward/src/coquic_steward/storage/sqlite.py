@@ -184,15 +184,38 @@ from ..publication.outbox import (
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 
+# These fields are Store-owned at every allocation boundary.  The legacy
+# effect spelling remains reserved so an old caller cannot seed the aggregate.
+_STORE_OWNED_ALLOCATION_METADATA_KEYS = frozenset(
+    {
+        EXECUTION_MODE_METADATA_KEY,
+        EFFECT_RESULT_METADATA_KEY,
+        LEGACY_EFFECT_RESULT_METADATA_KEY,
+    }
+)
+
+
+def _normalize_allocation_metadata(
+    metadata: Mapping[str, object], *, execution_mode: ExecutionMode | str
+) -> dict[str, object]:
+    """Strip caller authority and attach the Store-resolved execution mode."""
+
+    normalized = dict(metadata)
+    for key in _STORE_OWNED_ALLOCATION_METADATA_KEYS:
+        normalized.pop(key, None)
+    resolved = coerce_execution_mode(execution_mode)
+    if resolved is None:
+        raise ValueError("task execution mode is required")
+    normalized[EXECUTION_MODE_METADATA_KEY] = resolved.value
+    return normalized
+
+
 # These values are execution artifacts or effect authority, not canonical task
 # specification.  A live rerun receives a new identity and starts with a
 # clean local execution envelope.
 _LIVE_RERUN_METADATA_DROP_KEYS = frozenset(
     {
         "dedupe_key",
-        "execution_mode",
-        "effect_result",
-        "external_effect_result",
         "effect_proposal",
         "effect_proposals",
         "proposal",
@@ -252,6 +275,7 @@ _LIVE_RERUN_METADATA_DROP_KEYS = frozenset(
         "effect_evidence",
         "effects",
     }
+    | _STORE_OWNED_ALLOCATION_METADATA_KEYS
 )
 
 _PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
@@ -2047,7 +2071,9 @@ class SQLiteTaskStore:
                     else:
                         metadata.pop("selected_signal_item_ids", None)
                         metadata.pop("evidence", None)
-                    metadata[EXECUTION_MODE_METADATA_KEY] = ExecutionMode.live.value
+                    metadata = _normalize_allocation_metadata(
+                        metadata, execution_mode=ExecutionMode.live
+                    )
                     task_id = new_task_id()
                     spec = TaskSpec(
                         id=task_id,
@@ -2186,18 +2212,15 @@ class SQLiteTaskStore:
         self, spec: TaskSpec, *, dedupe_key: str | None = None
     ) -> tuple[TaskRecord, bool]:
         self._ensure_archive_epoch()
-        metadata = dict(spec.metadata)
-        # The aggregate is Store-owned and cannot be pre-seeded by a caller.
-        metadata.pop(EFFECT_RESULT_METADATA_KEY, None)
-        metadata.pop(LEGACY_EFFECT_RESULT_METADATA_KEY, None)
+        metadata = _normalize_allocation_metadata(
+            spec.metadata,
+            execution_mode=execution_mode_for_dry_run(self._startup_dry_run),
+        )
         if dedupe_key is not None:
             existing = self.find_active_dedupe(dedupe_key)
             if existing is not None:
                 return existing, False
             metadata["dedupe_key"] = dedupe_key
-        metadata[EXECUTION_MODE_METADATA_KEY] = execution_mode_for_dry_run(
-            self._startup_dry_run
-        ).value
         spec = spec.model_copy(update={"metadata": metadata}, deep=True)
         record = TaskRecord(spec=spec)
         row = task_to_row(record, dedupe_key=dedupe_key, path_codec=self.path_codec)
@@ -4071,13 +4094,15 @@ class SQLiteTaskStore:
                         selected_records.append((existing, False))
                         task_ids_by_dedupe[dedupe_key] = existing.id
                         continue
-                    metadata = dict(spec.metadata)
+                    metadata = _normalize_allocation_metadata(
+                        spec.metadata,
+                        execution_mode=execution_mode_for_dry_run(
+                            self._startup_dry_run
+                        ),
+                    )
                     metadata["dedupe_key"] = dedupe_key
                     if selected_ids:
                         metadata["selected_signal_item_ids"] = selected_ids
-                    metadata[EXECUTION_MODE_METADATA_KEY] = execution_mode_for_dry_run(
-                        self._startup_dry_run
-                    ).value
                     stored_spec = spec.model_copy(update={"metadata": metadata}, deep=True)
                     record = TaskRecord(spec=stored_spec)
                     now = utc_now()

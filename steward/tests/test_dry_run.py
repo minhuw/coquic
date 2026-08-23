@@ -16,7 +16,9 @@ from coquic_steward.core.models import (
     EffectProposal,
     EffectResult,
     DRY_RUN_OF_TASK_ID_METADATA_KEY,
+    EFFECT_RESULT_METADATA_KEY,
     EXECUTION_MODE_METADATA_KEY,
+    LEGACY_EFFECT_RESULT_METADATA_KEY,
     ExecutionMode,
     TaskKind,
     TaskSpec,
@@ -78,6 +80,101 @@ def test_store_latch_is_owned_and_monotonic(tmp_path: Path) -> None:
 
     reopened = TaskStore.open(database, dry_run=False)
     assert reopened.task_execution_mode(task.id) is ExecutionMode.dry_run
+
+
+@pytest.mark.parametrize(
+    "reserved_key",
+    [
+        EXECUTION_MODE_METADATA_KEY,
+        EFFECT_RESULT_METADATA_KEY,
+        LEGACY_EFFECT_RESULT_METADATA_KEY,
+    ],
+)
+def test_manual_allocation_drops_store_owned_metadata(
+    tmp_path: Path, reserved_key: str
+) -> None:
+    store = TaskStore.create(tmp_path / "manual-allocation.sqlite", dry_run=True)
+    task, created = store.add_task(
+        _spec(**{reserved_key: "live" if reserved_key == EXECUTION_MODE_METADATA_KEY else "applied"})
+    )
+
+    assert created
+    assert task.spec.metadata[EXECUTION_MODE_METADATA_KEY] == ExecutionMode.dry_run.value
+    assert EFFECT_RESULT_METADATA_KEY not in task.spec.metadata
+    assert LEGACY_EFFECT_RESULT_METADATA_KEY not in task.spec.metadata
+    assert store.effect_result(task.id) is None
+    store.engine.dispose()
+
+
+def test_planner_allocation_drops_reserved_metadata_and_preserves_dedupe(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore.create(tmp_path / "planner-allocation.sqlite", dry_run=False)
+    dedupe_key = "planner-owned-allocation"
+
+    def allocate(run_id: str, spec: TaskSpec):
+        store.control_loop.claim_planner_run(run_id, [])
+        committed = store.commit_planner_decision(
+            run_id,
+            planned=[(spec, dedupe_key)],
+            planner_dispositions=[
+                SimpleNamespace(
+                    outcome="accepted",
+                    reason_code="accepted",
+                    dedupe_key=dedupe_key,
+                    signal_ids=[],
+                    proposal={"title": spec.title},
+                )
+            ],
+            consumed_item_ids=[],
+            selected_item_ids_by_dedupe={},
+            canonical_signal_by_item={},
+            state="succeeded",
+            result={},
+            diagnostics={},
+            retry_after=None,
+            artifact_sources={},
+        )
+        return committed["records"][0][0]
+
+    first = allocate(
+        "planner-allocation-first",
+        _spec(
+            **{
+                EXECUTION_MODE_METADATA_KEY: ExecutionMode.dry_run.value,
+                EFFECT_RESULT_METADATA_KEY: EffectResult.not_applicable.value,
+                LEGACY_EFFECT_RESULT_METADATA_KEY: EffectResult.applied.value,
+                "ordinary_metadata": "first",
+            }
+        ),
+    )
+    stored_first = store.get(first.id)
+    assert store.task_execution_mode(first.id) is ExecutionMode.live
+    assert store.effect_result(first.id) is None
+    assert stored_first.spec.metadata["ordinary_metadata"] == "first"
+    assert EFFECT_RESULT_METADATA_KEY not in stored_first.spec.metadata
+    assert LEGACY_EFFECT_RESULT_METADATA_KEY not in stored_first.spec.metadata
+
+    store.record_effect_applied(
+        first.id,
+        action=EffectActionKind.git_push.value,
+        action_id="planner-allocation-applied",
+    )
+    assert store.finalize_effect_result(first.id) is EffectResult.applied
+
+    duplicate = allocate(
+        "planner-allocation-duplicate",
+        _spec(
+            **{
+                EFFECT_RESULT_METADATA_KEY: EffectResult.not_applicable.value,
+                "ordinary_metadata": "duplicate must not rewrite",
+            }
+        ),
+    )
+    assert duplicate.id == first.id
+    persisted = store.get(first.id)
+    assert persisted.spec.metadata["ordinary_metadata"] == "first"
+    assert store.effect_result(first.id) is EffectResult.applied
 
 
 def test_missing_latch_adopts_startup_and_tightens(tmp_path: Path) -> None:

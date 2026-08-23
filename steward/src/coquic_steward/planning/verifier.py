@@ -17,6 +17,9 @@ from ..agents.catalog import (
 )
 from ..core.models import EffectActionKind, EffectProposal
 from ..core.models import (
+    EFFECT_RESULT_METADATA_KEY,
+    EXECUTION_MODE_METADATA_KEY,
+    LEGACY_EFFECT_RESULT_METADATA_KEY,
     Priority,
     ProjectSignals,
     Risk,
@@ -48,6 +51,15 @@ class ProposedTask(BaseModel):
     risk: Risk = Risk.medium
     evidence: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+_RESERVED_ALLOCATION_METADATA_KEYS = frozenset(
+    {
+        EXECUTION_MODE_METADATA_KEY,
+        EFFECT_RESULT_METADATA_KEY,
+        LEGACY_EFFECT_RESULT_METADATA_KEY,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -373,6 +385,8 @@ def _verified_proposal_with_reason(
         return None, "invalid_evidence_id"
     if not _metadata_is_bounded(proposed.metadata):
         return None, "policy_metadata_too_large"
+    if any(key in proposed.metadata for key in _RESERVED_ALLOCATION_METADATA_KEYS):
+        return None, "policy_reserved_metadata"
     policy_kind = proposed.kind in PLANNER_DISPATCH_POLICY.kinds
     policy_worker = proposed.worker in PLANNER_DISPATCH_POLICY.workers
     policy_priority = proposed.priority in PLANNER_DISPATCH_POLICY.priorities

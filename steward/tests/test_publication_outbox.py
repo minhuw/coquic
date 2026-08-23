@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.publication.models import ReasonCode
 from coquic_steward.publication.outbox import (
     CleanupIntent,
@@ -105,6 +106,27 @@ EXPECTED_LEGAL_EDGES = frozenset(
 )
 
 
+def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
+    try:
+        store.get(generation.task_id)
+    except KeyError:
+        callback = store.on_change
+        store.on_change = None
+        try:
+            store.add_task(
+                TaskSpec(
+                    id=generation.task_id,
+                    kind=TaskKind.custom,
+                    worker=WorkerKind.custom,
+                    title="publication fixture",
+                    prompt="publication fixture",
+                )
+            )
+        finally:
+            store.on_change = callback
+    return store.enqueue_publication(generation)
+
+
 def _generation(**overrides: object) -> PublicationGeneration:
     identity = GenerationIdentity("task-1", "boundary-1")
     values: dict[str, object] = {
@@ -127,7 +149,7 @@ def test_store_uses_configured_policy_for_normal_attempts(
 ) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     now = NOW
 
     for attempt in range(1, retry_policy.max_attempts + 1):
@@ -170,7 +192,7 @@ def test_store_uses_configured_policy_for_normal_attempts(
 def test_lowered_policy_blocks_existing_attempts_without_resetting_them(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE publication_generations SET state='retry_wait',attempt=4,"
@@ -201,7 +223,7 @@ def test_hide_retry_remains_claimable_at_normal_ceiling(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     policy = PublicationRetryPolicy(0)
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     claimed = store.claim_publication(
         "worker-1",
         retry_policy=policy,
@@ -992,7 +1014,7 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
     )
 
     precise_now = NOW + timedelta(microseconds=123456)
-    created = store.enqueue_publication(
+    created = _enqueue_publication(store,
         _generation(created_at=precise_now, updated_at=precise_now)
     )
     assert created.status is PublicationOperationStatus.enqueued
@@ -1000,7 +1022,7 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
     assert created.generation.created_at.microsecond == 123000
     assert observed == [PublicationState.queued]
 
-    replay = store.enqueue_publication(
+    replay = _enqueue_publication(store,
         _generation(
             created_at=NOW + timedelta(seconds=1),
             updated_at=NOW + timedelta(seconds=1),
@@ -1009,13 +1031,13 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
     assert replay.status is PublicationOperationStatus.existing
     assert observed == [PublicationState.queued]
 
-    conflict = store.enqueue_publication(_generation(objects=1))
+    conflict = _enqueue_publication(store, _generation(objects=1))
     assert conflict.status is PublicationOperationStatus.conflict
     assert conflict.reason == "integrity"
     assert observed == [PublicationState.queued]
 
     other_identity = GenerationIdentity("task-1", "boundary-2")
-    run_conflict = store.enqueue_publication(
+    run_conflict = _enqueue_publication(store,
         PublicationGeneration(
             publication_id=other_identity.publication_id,
             task_id="task-1",
@@ -1034,7 +1056,7 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
 def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+    assert _enqueue_publication(store, generation).status is PublicationOperationStatus.enqueued
 
     implicit = store.block_publication(
         generation.publication_id,
@@ -1086,7 +1108,7 @@ def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -
 def _blocked_generation_store(path):
     store = TaskStore.create(path)
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     blocked = store.block_publication(
         generation.publication_id,
@@ -1179,7 +1201,7 @@ def test_store_replace_blocked_publication_refuses_proof_and_identity_guards(tmp
         # block it afterward and ensure the proof still prevents replacement.
         store2 = TaskStore.create(tmp_path / "receipt-source.sqlite")
         receipt_old = _generation()
-        store2.enqueue_publication(receipt_old)
+        _enqueue_publication(store2, receipt_old)
         store2.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
         store2.advance_publication(
             receipt_old.publication_id,
@@ -1250,7 +1272,7 @@ def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None
     first_store = TaskStore.create(path)
     second_store = TaskStore.open(path)
     generation = _generation()
-    first_store.enqueue_publication(generation)
+    _enqueue_publication(first_store, generation)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
@@ -1339,7 +1361,7 @@ def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -
         "task-2", "run-1", "boundary-1", created_at=NOW + timedelta(seconds=2)
     )
     for item in (first_generation, later_generation, other_task_generation):
-        store.enqueue_publication(item)
+        _enqueue_publication(store, item)
 
     claim_at = NOW + timedelta(seconds=3)
     first = store.claim_publication(
@@ -1364,7 +1386,7 @@ def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -
 def test_store_claim_edges_cannot_bypass_attempt_accounting(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
 
     bypass = store.advance_publication(
         generation.publication_id,
@@ -1391,7 +1413,7 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
     store = TaskStore.create(path)
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     first = store.claim_publication(
         "worker-1", retry_policy=POLICY, now=NOW
     )
@@ -1478,7 +1500,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
     started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     generation = _generation(created_at=started_at, updated_at=started_at)
     store = TaskStore.create(path)
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     claimed = store.claim_publication(
         "worker-1", retry_policy=POLICY, now=started_at, lease_seconds=1
     )
@@ -1517,7 +1539,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
 def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
 
     queued_receipt = PublicationReceipt.public_receipt(
         DIGEST,
@@ -1618,7 +1640,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
 def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication(
         "worker-1", retry_policy=POLICY, now=NOW, lease_seconds=1
     )
@@ -1661,7 +1683,7 @@ def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_pat
 def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
@@ -1708,7 +1730,7 @@ def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
 def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication(
         "worker-1", retry_policy=POLICY, now=NOW, lease_seconds=1
     )
@@ -1756,7 +1778,7 @@ def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) ->
 def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation(run_id="run-2")
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
@@ -1795,7 +1817,7 @@ def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_pa
 def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     owner = "worker-1"
     store.claim_publication(owner, retry_policy=POLICY, now=NOW)
     assert store.advance_publication(
@@ -1923,7 +1945,7 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
 def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
@@ -2007,7 +2029,7 @@ def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
     store = TaskStore.create(path)
     started_at = datetime.now(timezone.utc)
     generation = _generation(created_at=started_at, updated_at=started_at)
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     initial = store.get_publication_health(now=started_at + timedelta(seconds=10))
     assert initial.queued_count == 1
     assert initial.oldest_queued_age_seconds == 10
@@ -2048,7 +2070,7 @@ def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
 def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
@@ -2078,7 +2100,7 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
 def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
@@ -2209,7 +2231,7 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
     path = tmp_path / "steward.sqlite"
     store = TaskStore.create(path)
     original = _generation()
-    store.enqueue_publication(original)
+    _enqueue_publication(store, original)
     started = store.begin_publication_hide(
         original.task_id, "unsafe_content", now=NOW + timedelta(seconds=1)
     )
@@ -2278,7 +2300,7 @@ def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_e
 ) -> None:
     store = TaskStore.create(tmp_path / "enqueue-repair.sqlite")
     original = _generation()
-    store.enqueue_publication(original)
+    _enqueue_publication(store, original)
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     for source, target, offset in (
         (PublicationState.claimed, PublicationState.building, 1),
@@ -2310,7 +2332,7 @@ def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_e
     )
 
     repaired = replace(_repaired_generation(), run_id="run-2")
-    ordinary = store.enqueue_publication(repaired)
+    ordinary = _enqueue_publication(store, repaired)
     assert ordinary.status is PublicationOperationStatus.precondition
     assert ordinary.fence is not None
     assert ordinary.fence.state is PublicationHideState.confirmed
@@ -2331,7 +2353,7 @@ def test_store_confirmed_hide_replaces_exposed_generation_without_deleting_evide
 ) -> None:
     store = TaskStore.create(tmp_path / "replace-repair.sqlite")
     original = _generation()
-    store.enqueue_publication(original)
+    _enqueue_publication(store, original)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE publication_generations SET state='exposed',exposed_at=:exposed_at,"

@@ -1134,6 +1134,8 @@ class SQLiteTaskStore:
                         raise KeyError(task_id)
                     metadata = _metadata_dict(row.metadata_json, self.path_codec)
                     mode = execution_mode_from_metadata(metadata)
+                    if mode is None:
+                        raise ValueError("task execution mode is required")
                     startup_mode = execution_mode_for_dry_run(self._startup_dry_run)
                     resolved = resolve_execution_mode(mode, startup_mode)
                     if resolved is not mode:
@@ -1261,6 +1263,110 @@ class SQLiteTaskStore:
                     raise
         self._notify_change()
         return evidence
+
+    def record_publication_exposure_reconciled(
+        self,
+        task_id: str,
+        *,
+        publication_id: str,
+    ) -> EffectEvidence:
+        """Recover one durable live exposure after a tightened restart.
+
+        The publication state machine records the successful D1 exposure before
+        terminal cleanup can finish.  If the next process starts in dry-run,
+        that local fact still describes a live action and must not be replaced
+        by ``not-applicable``.  This method only reads Store-owned outbox state
+        and appends the corresponding local evidence; it never authorizes a
+        provider call.
+        """
+
+        _publication_identifier(publication_id, prefix="pub-")
+        action = EffectActionKind.publication_transport
+        action_id = f"publication-d1-expose:{publication_id}"
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(TaskRow, task_id)
+                    if row is None:
+                        raise KeyError(task_id)
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    mode = execution_mode_from_metadata(metadata)
+                    if mode is None:
+                        raise ValueError("task execution mode is required")
+                    generation_row = session.execute(
+                        text(
+                            "SELECT state,exposed_at FROM publication_generations "
+                            "WHERE publication_id=:publication_id AND task_id=:task_id"
+                        ),
+                        {"publication_id": publication_id, "task_id": task_id},
+                    ).mappings().first()
+                    if generation_row is None:
+                        raise KeyError(publication_id)
+                    if (
+                        generation_row["state"]
+                        not in {
+                            PublicationState.exposed.value,
+                            PublicationState.terminal_cleaned.value,
+                        }
+                        or generation_row["exposed_at"] is None
+                    ):
+                        raise ValueError("publication exposure is not durably recorded")
+
+                    evidence = EffectEvidence(
+                        task_id=task_id,
+                        action=action,
+                        action_id=action_id,
+                        mode=ExecutionMode.live,
+                        decision=EffectDecisionKind.allow,
+                        result=EffectResult.applied,
+                    )
+                    assert evidence.effect_id is not None
+                    matching: list[dict[str, object]] = []
+                    for data_json in session.scalars(
+                        select(EventRow.data_json).where(
+                            EventRow.task_id == task_id,
+                            EventRow.kind == "effect.applied",
+                        )
+                    ).all():
+                        try:
+                            existing = json.loads(data_json or "{}")
+                        except (TypeError, json.JSONDecodeError) as exc:
+                            raise ValueError("malformed applied effect evidence") from exc
+                        if isinstance(existing, dict) and existing.get("effectId") == evidence.effect_id:
+                            matching.append(existing)
+                    if matching:
+                        existing_evidence = EffectEvidence.model_validate(matching[0])
+                        if (
+                            existing_evidence.action is not action
+                            or existing_evidence.result is not EffectResult.applied
+                            or existing_evidence.mode is not ExecutionMode.live
+                        ):
+                            raise ValueError("contradictory applied effect evidence")
+                        session.commit()
+                        return existing_evidence
+                    if effect_result_from_metadata(metadata) is not None:
+                        raise ValueError("external effect result is already finalized")
+                    session.add(
+                        event_to_row(
+                            Event(
+                                task_id=task_id,
+                                kind="effect.applied",
+                                message=action.value,
+                                data=evidence.as_dict(),
+                            ),
+                            path_codec=self.path_codec,
+                        )
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+        self._notify_change()
+        return evidence
+
+    reconcile_publication_exposure = record_publication_exposure_reconciled
 
     confirm_effect = record_effect_applied
     record_applied_effect = record_effect_applied
@@ -4685,21 +4791,29 @@ class SQLiteTaskStore:
                 "SELECT metadata_json FROM tasks WHERE id=:task_id",
                 {"task_id": value.task_id},
             ).mappings().first()
-            if task_row is not None:
-                try:
-                    metadata = json.loads(task_row["metadata_json"] or "{}")
-                    mode = (
-                        execution_mode_from_metadata(metadata)
-                        if isinstance(metadata, dict)
-                        else None
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    mode = None
-                if mode is not ExecutionMode.live:
-                    connection.commit()
-                    return PublicationOperationResult(
-                        PublicationOperationStatus.precondition,
-                    )
+            if task_row is None:
+                # Publication generations are effects of a durable task, not
+                # standalone work items.  Commit the read-only transaction so
+                # no generation, health row, or notification can escape this
+                # failed admission.
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                )
+            try:
+                metadata = json.loads(task_row["metadata_json"] or "{}")
+                mode = (
+                    execution_mode_from_metadata(metadata)
+                    if isinstance(metadata, dict)
+                    else None
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                mode = None
+            if mode is not ExecutionMode.live:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                )
             fence = _publication_hide_fence_from_connection(connection, value.task_id)
             if fence is not None:
                 # A confirmed remote hide remains a local fence until the

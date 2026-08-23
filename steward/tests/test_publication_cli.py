@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,13 @@ from typer.testing import CliRunner
 
 from coquic_steward import cli
 from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.models import (
+    EffectDecision,
+    EffectDecisionKind,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+)
 from coquic_steward.cli import app
 from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
@@ -38,6 +46,22 @@ from coquic_steward.storage import TaskStore
 
 NOW = datetime(2026, 8, 1, tzinfo=timezone.utc)
 POLICY = PublicationRetryPolicy()
+
+
+def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
+    try:
+        store.get(generation.task_id)
+    except KeyError:
+        store.add_task(
+            TaskSpec(
+                id=generation.task_id,
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title="publication fixture",
+                prompt="publication fixture",
+            )
+        )
+    return store.enqueue_publication(generation)
 
 
 def _generation(*, state: str = "blocked") -> PublicationGeneration:
@@ -150,7 +174,7 @@ def _blocked_store(tmp_path):
         created_at=NOW,
         updated_at=NOW,
     )
-    assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+    assert _enqueue_publication(store, generation).status is PublicationOperationStatus.enqueued
     assert store.claim_publication(
         "worker-1",
         retry_policy=POLICY,
@@ -462,7 +486,7 @@ def test_retry_without_provider_fences_all_same_task_generations(tmp_path) -> No
             created_at=NOW + timedelta(seconds=index),
             updated_at=NOW + timedelta(seconds=index),
         )
-        assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+        assert _enqueue_publication(store, generation).status is PublicationOperationStatus.enqueued
         generations.append(generation)
 
     assert store.claim_publication(
@@ -516,7 +540,7 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
         created_at=NOW,
         updated_at=NOW,
     )
-    assert store.enqueue_publication(old).status is PublicationOperationStatus.enqueued
+    assert _enqueue_publication(store, old).status is PublicationOperationStatus.enqueued
     assert store.claim_publication(
         "worker-1",
         retry_policy=POLICY,
@@ -567,7 +591,7 @@ def test_hide_real_store_blocks_101_queued_generations_and_replays(tmp_path) -> 
             created_at=NOW,
             updated_at=NOW,
         )
-        assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+        assert _enqueue_publication(store, generation).status is PublicationOperationStatus.enqueued
         generations.append(generation)
 
     class D1:
@@ -617,6 +641,10 @@ def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:
     current = _generation()
 
     class Store:
+        @contextmanager
+        def effect_admission(self, *_args, **_kwargs):
+            yield EffectDecision(EffectDecisionKind.allow)
+
         def get_publication_generation(self, _publication_id):
             return current
 

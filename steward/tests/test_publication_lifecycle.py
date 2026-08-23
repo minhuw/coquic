@@ -11,6 +11,7 @@ import pytest
 
 from coquic_steward.agents.invocation import InvocationOutcome
 from coquic_steward.core.config import StewardPublicationConfig
+from coquic_steward.core.models import EffectActionKind, TaskKind, TaskSpec, WorkerKind
 import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import LocalSessionInvoker, load_publication_snapshot
@@ -34,6 +35,46 @@ from coquic_steward.publication.publisher import (
 )
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.storage import TaskStore
+
+
+def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
+    try:
+        store.get(generation.task_id)
+    except KeyError:
+        store.add_task(
+            TaskSpec(
+                id=generation.task_id,
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title="publication fixture",
+                prompt="publication fixture",
+            )
+        )
+    return store.enqueue_publication(generation)
+
+
+def test_missing_task_publication_effect_never_reaches_provider(tmp_path: Path) -> None:
+    store = TaskStore.create(tmp_path / "missing-task.sqlite", dry_run=False)
+    provider_calls: list[str] = []
+    publisher = CloudPublisher(
+        store,
+        object(),
+        object(),
+        retry_policy=PublicationRetryPolicy(),
+    )
+
+    allowed, result = publisher._effect_call(
+        "missing-task",
+        action=EffectActionKind.publication_transport,
+        action_id="publication-missing-task",
+        target="publication",
+        operation=lambda: provider_calls.append("provider") or object(),
+    )
+
+    assert allowed is False
+    assert result is None
+    assert provider_calls == []
+
 
 class _EventStore:
     def __init__(self) -> None:
@@ -404,7 +445,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     assert free.publication_id != aware.publication_id
 
     store = TaskStore.create(tmp_path / "publication.sqlite")
-    store.enqueue_publication(free.to_outbox())
+    _enqueue_publication(store, free.to_outbox())
 
     class R2:
         def put_object(
@@ -571,7 +612,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     database = tmp_path / "publication-restart-ordering.sqlite"
     store = TaskStore.create(database)
     first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    store.enqueue_publication(
+    _enqueue_publication(store,
         replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
     )
     store.block_publication(
@@ -581,7 +622,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
         now=first_created,
     )
     later_created = first_created.replace(second=1)
-    store.enqueue_publication(
+    _enqueue_publication(store,
         replace(
             later_free.to_outbox(),
             created_at=later_created,
@@ -751,7 +792,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
     database = tmp_path / "publication-restart-provider.sqlite"
     store = TaskStore.create(database)
     first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    store.enqueue_publication(
+    _enqueue_publication(store,
         replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
     )
     store.block_publication(
@@ -761,7 +802,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
         now=first_created,
     )
     later_created = first_created.replace(second=1)
-    store.enqueue_publication(
+    _enqueue_publication(store,
         replace(
             later_free.to_outbox(),
             created_at=later_created,

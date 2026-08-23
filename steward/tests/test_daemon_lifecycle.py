@@ -4625,6 +4625,7 @@ def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
     daemon = StewardDaemon(config, store)
 
     assert daemon.finalize_terminal_task(task.id) is False
+    assert store.effect_result(task.id) is None
     assert archive_calls == []
     kinds = [event.kind for event in store.events(task.id)]
     assert "cleanup_blocked" in kinds

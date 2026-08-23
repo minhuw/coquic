@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import threading
@@ -8,6 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from coquic_steward.core.models import (
+    EffectDecision,
+    EffectDecisionKind,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+)
 from coquic_steward.publication import (
     FailClosed,
     ReasonCode,
@@ -150,6 +158,10 @@ class _FakeStore:
         self.renew_lost = False
         self.block_lost = False
         self.hide_fence = SimpleNamespace(state="pending", reason=None)
+
+    @contextmanager
+    def effect_admission(self, *_args, **_kwargs):
+        yield EffectDecision(EffectDecisionKind.allow)
 
     def get_publication_generation(self, publication_id: str):
         return self.generation if publication_id == self.generation.publication_id else None
@@ -631,6 +643,34 @@ def test_partial_composer_is_rejected_at_canonical_boundary() -> None:
     assert calls == 0
 
 
+def _sqlite_store(path) -> TaskStore:
+    store = TaskStore.create(path, dry_run=False)
+    store.add_task(
+        TaskSpec(
+            id="task-1",
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="publication fixture",
+            prompt="publication fixture",
+        )
+    )
+    return store
+
+
+def test_missing_task_identity_blocks_before_provider_request() -> None:
+    store = _FakeStore()
+    store.generation.task_id = None
+    provider = _FakeProvider(store)
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id,
+        source={"stable": True},
+    )
+
+    assert result.status is PublicationStatus.blocked
+    assert provider.calls == []
+
+
 def _sqlite_generation() -> PublicationGeneration:
     return PublicationGeneration(
         publication_id=IDENTITY.publication_id,
@@ -1026,7 +1066,7 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
 
 
 def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> None:
-    store = TaskStore.create(tmp_path / "steward.sqlite")
+    store = _sqlite_store(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _SQLitePublicationProvider(hide_failures=MAX_ATTEMPTS)
     clock = [NOW]
@@ -1071,7 +1111,7 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
 
 
 def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
-    store = TaskStore.create(tmp_path / "steward.sqlite")
+    store = _sqlite_store(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _SQLitePublicationProvider(
         put_failure=R2Error(R2ErrorCategory.precondition),
@@ -1117,7 +1157,7 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
 
 
 def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
-    store = TaskStore.create(tmp_path / "steward.sqlite")
+    store = _sqlite_store(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _StageBarrierProvider()
     publisher = CloudPublisher(
@@ -1155,7 +1195,7 @@ def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
 
 def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore.create(path)
+    store = _sqlite_store(path)
     store.enqueue_publication(_sqlite_generation())
     failing = _SQLitePublicationProvider(hide_failures=1)
     first = CloudPublisher(
@@ -1188,7 +1228,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
 
 
 def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:
-    store = TaskStore.create(tmp_path / "steward.sqlite")
+    store = _sqlite_store(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     assert store.advance_publication(

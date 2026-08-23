@@ -621,25 +621,44 @@ class CloudPublisher:
         target: str,
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
+        taskless_aggregate: bool = False,
     ) -> Iterator[EffectDecision]:
         """Hold task admission across the complete guarded mutation."""
 
         from ..storage import TaskStore
 
         if not isinstance(task_id, str) or not task_id:
-            kind = (
-                EffectDecisionKind.proposal_required
-                if bool(getattr(self.store, "_startup_dry_run", False))
-                else EffectDecisionKind.allow
-            )
-            yield EffectDecision(kind)
+            if taskless_aggregate and action in {
+                EffectActionKind.publication_overhead,
+                EffectActionKind.publication_usage_backfill,
+            }:
+                # Aggregate usage is Store-owned control-loop work and has no
+                # task row by design.  Keep this explicit exception separate
+                # from task-backed publication generations.
+                kind = (
+                    EffectDecisionKind.proposal_required
+                    if bool(getattr(self.store, "_startup_dry_run", False))
+                    else EffectDecisionKind.allow
+                )
+                yield EffectDecision(kind)
+                return
+            # Every task-backed publication effect must name the durable task
+            # which owns it.  A missing identity is never implicit authority.
+            yield EffectDecision(EffectDecisionKind.proposal_required)
             return
         if not isinstance(self.store, TaskStore):
-            # Narrow fakes used by read-only publication tests predate the
-            # Store-owned effect seam and are treated as live test doubles.
-            yield EffectDecision(EffectDecisionKind.allow)
-            return
-
+            # Provider-capable test doubles must opt into the same explicit
+            # boundary.  Plain read-only adapters may still exercise local
+            # outbox bookkeeping, but they cannot authorize an R2/D1 call.
+            provider_actions = {
+                EffectActionKind.publication_hide,
+                EffectActionKind.publication_transport,
+                EffectActionKind.publication_overhead,
+                EffectActionKind.publication_usage_backfill,
+            }
+            if action not in provider_actions:
+                yield EffectDecision(EffectDecisionKind.allow)
+                return
         with ExitStack() as stack:
             try:
                 decision = stack.enter_context(
@@ -653,12 +672,12 @@ class CloudPublisher:
                     )
                 )
             except KeyError:
-                # Synthetic publication rows without a task cannot be reached
-                # from a daemon completion boundary; retain test-double/live
-                # compatibility for those legacy fixtures.
-                yield EffectDecision(EffectDecisionKind.allow)
+                # A generation row without its durable task authority is
+                # corrupt or stale.  Do not let it reach local or provider
+                # mutation merely because the row predates task admission.
+                yield EffectDecision(EffectDecisionKind.proposal_required)
                 return
-            except (ValueError, TypeError):
+            except (AttributeError, ValueError, TypeError):
                 yield EffectDecision(EffectDecisionKind.proposal_required)
                 return
             yield decision
@@ -673,6 +692,7 @@ class CloudPublisher:
         operation: Callable[[], object],
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
+        taskless_aggregate: bool = False,
     ) -> tuple[bool, object | None]:
         """Run one Store/provider mutation while its effect admission is held."""
 
@@ -683,6 +703,7 @@ class CloudPublisher:
             target=target,
             payload=payload,
             reason=reason,
+            taskless_aggregate=taskless_aggregate,
         ) as decision:
             if not decision.allowed:
                 return False, None
@@ -697,6 +718,7 @@ class CloudPublisher:
         target: str,
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
+        taskless_aggregate: bool = False,
     ) -> bool:
         """Ask the Store immediately before a read-only decision."""
 
@@ -707,6 +729,7 @@ class CloudPublisher:
             target=target,
             payload=payload,
             reason=reason,
+            taskless_aggregate=taskless_aggregate,
         ) as decision:
             return decision.allowed
 
@@ -785,6 +808,7 @@ class CloudPublisher:
             action_id=f"publication-overhead:{digest or 'current'}",
             target="cloudflare-d1",
             payload={"digest": digest or "current"},
+            taskless_aggregate=True,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)
@@ -806,6 +830,7 @@ class CloudPublisher:
             action_id=f"publication-usage-backfill:{cursor or 'start'}",
             target="cloudflare-d1",
             payload={"cursor": cursor or "start", "limit": limit},
+            taskless_aggregate=True,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)

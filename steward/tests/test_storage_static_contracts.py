@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 
 import coquic_steward.storage.schema as schema_module
+from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     OutboxValidationError,
@@ -27,7 +28,16 @@ def _enqueue_counts(
     counts: PublicationCounts | dict[str, object] | None,
     **fallbacks: int,
 ) -> PublicationOperationResult:
-    store = TaskStore.create(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    store.add_task(
+        TaskSpec(
+            id="task-counts",
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="publication fixture",
+            prompt="publication fixture",
+        )
+    )
     try:
         return store.enqueue_publication(
             task_id="task-counts",

@@ -3698,6 +3698,50 @@ class StewardDaemon:
                     pass
             return False
 
+    def _durable_publication_exposure(
+        self, task: TaskRecord
+    ) -> tuple[bool, PublicationGeneration | None]:
+        """Return Store-owned exposure state without starting work."""
+
+        try:
+            generations = list(
+                self.store.list_publication_generations(
+                    task_id=task.id,
+                    limit=None,
+                )
+            )
+        except AttributeError:
+            # Narrow legacy adapters predate the publication outbox query.
+            return True, None
+        except Exception:
+            return False, None
+        candidates = [
+            generation
+            for generation in generations
+            if isinstance(generation, PublicationGeneration)
+            and generation.task_id == task.id
+            and generation.state
+            in {PublicationState.exposed, PublicationState.terminal_cleaned}
+            and generation.exposed_at is not None
+        ]
+        if not candidates:
+            return True, None
+        generation = max(
+            candidates,
+            key=lambda item: (
+                str(item.exposed_at),
+                str(item.updated_at),
+                item.publication_id,
+            ),
+        )
+        try:
+            self.store.list_publication_receipts(generation.publication_id)
+        except AttributeError:
+            pass
+        except Exception:
+            return False, None
+        return True, generation
+
     def _record_terminal_publication_effect(
         self,
         task: TaskRecord,
@@ -3709,11 +3753,19 @@ class StewardDaemon:
         if not isinstance(publication_id, str) or not publication_id:
             return False
         try:
-            self.store.record_effect_applied(
-                task.id,
-                action=EffectActionKind.publication_transport.value,
-                action_id=f"publication-d1-expose:{publication_id}",
-            )
+            try:
+                self.store.record_publication_exposure_reconciled(
+                    task.id,
+                    publication_id=publication_id,
+                )
+            except AttributeError:
+                # Narrow legacy Store adapters have the older live-only seam;
+                # production TaskStore always provides the reconciliation path.
+                self.store.record_effect_applied(
+                    task.id,
+                    action=EffectActionKind.publication_transport.value,
+                    action_id=f"publication-d1-expose:{publication_id}",
+                )
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             self.store.add_event(
                 task.id,
@@ -3723,6 +3775,30 @@ class StewardDaemon:
             )
             return False
         return True
+
+    def _reconcile_durable_publication_exposure(self, task: TaskRecord) -> bool:
+        """Recover local applied evidence before dry-run terminal handling."""
+
+        try:
+            if self.store.task_execution_mode(task.id) is not ExecutionMode.dry_run:
+                return True
+        except (AttributeError, KeyError, ValueError):
+            return True
+        readable, generation = self._durable_publication_exposure(task)
+        if not readable:
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal cleanup requires readable publication exposure evidence",
+                {"reason": "publication_exposure_unavailable"},
+            )
+            return False
+        if generation is None:
+            return True
+        # This path is deliberately Store-only.  In particular it does not
+        # enqueue, claim, retry, hide, expose, or otherwise contact a cloud
+        # provider when startup has tightened the task to dry-run.
+        return self._record_terminal_publication_effect(task, generation)
 
     def finalize_terminal_task(self, task_id: str) -> bool:
         """Seal immutable evidence, then converge terminal-only cleanup."""
@@ -3753,7 +3829,19 @@ class StewardDaemon:
         cleanup_state = self.store.cleanup_obligation_state(task.id)
         existing_intent = self._cleanup_intent_for_task(task.id)
         existing_state = existing_intent.state if existing_intent is not None else None
+        if not self._reconcile_durable_publication_exposure(task):
+            return False
         if cleanup_state is CleanupStatus.complete or existing_state is CleanupState.completed:
+            try:
+                self.store.finalize_effect_result(task.id)
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "terminal cleanup requires valid external effect evidence",
+                    {"reason": "effect_evidence_invalid", "error": exc.__class__.__name__},
+                )
+                return False
             return True
         if existing_state is CleanupState.blocked:
             return False
@@ -3761,50 +3849,6 @@ class StewardDaemon:
             getattr(getattr(self.config, "publication", None), "enabled", False)
         ) and mode is ExecutionMode.live
         publication_generation: PublicationGeneration | None = None
-        if publication_enabled:
-            final_run = self._terminal_publication_run(task.id)
-            if final_run is None:
-                return self._terminal_publication_block(task.id, "final_run_missing")
-            if not self._prepare_terminal_publication_snapshot(task, final_run):
-                return self._terminal_publication_block(
-                    task.id, "terminal_snapshot_invalid"
-                )
-            if not self._terminal_publication_gate(task):
-                return False
-            publication_generation = self._terminal_publication_generation_for_cleanup(task)
-            if publication_generation is None:
-                return self._terminal_publication_block(
-                    task.id, "final_generation_unavailable"
-                )
-            if not self._record_terminal_publication_effect(
-                task, publication_generation
-            ):
-                return False
-        try:
-            # The result is orthogonal to lifecycle status and is finalized
-            # only after any live terminal publication effect is durable.  A
-            # malformed or contradictory action ledger is never summarized.
-            self.store.finalize_effect_result(task.id)
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            self.store.add_event(
-                task.id,
-                "cleanup_blocked",
-                "terminal cleanup requires valid external effect evidence",
-                {"reason": "effect_evidence_invalid", "error": exc.__class__.__name__},
-            )
-            return False
-        if existing_state is CleanupState.completed:
-            if cleanup_state is not CleanupStatus.complete:
-                self.store.add_event(
-                    task.id,
-                    "cleanup_complete",
-                    "terminal archive deletion completed",
-                )
-            return True
-        if cleanup_state is CleanupStatus.complete:
-            return True
-        if existing_state is CleanupState.blocked:
-            return False
         pipelines = self.store.list_pipelines(task.id)
         for pipeline in pipelines:
             active = self._unfinished_phase_event(task.id, pipeline.id)
@@ -3837,6 +3881,21 @@ class StewardDaemon:
                 "terminal cleanup requires all runs to stop",
             )
             return False
+        if publication_enabled:
+            final_run = self._terminal_publication_run(task.id)
+            if final_run is None:
+                return self._terminal_publication_block(task.id, "final_run_missing")
+            if not self._prepare_terminal_publication_snapshot(task, final_run):
+                return self._terminal_publication_block(
+                    task.id, "terminal_snapshot_invalid"
+                )
+            if not self._terminal_publication_gate(task):
+                return False
+            publication_generation = self._terminal_publication_generation_for_cleanup(task)
+            if publication_generation is None:
+                return self._terminal_publication_block(
+                    task.id, "final_generation_unavailable"
+                )
 
         if self.session_supervisor is not None:
             try:
@@ -3849,6 +3908,10 @@ class StewardDaemon:
                     {"step": "container-stop", "error": exc.__class__.__name__},
                 )
                 return False
+        if publication_generation is not None and not self._record_terminal_publication_effect(
+            task, publication_generation
+        ):
+            return False
         archive = TaskArchiveWriter(self.config)
         manifest = archive.task_dir(task.id) / "manifest.json"
         archive_absent_after_intent = False
@@ -3906,6 +3969,8 @@ class StewardDaemon:
                         )
                     try:
                         effect_result = self.store.effect_result(task.id)
+                        if effect_result is None:
+                            effect_result = self.store.derive_effect_result(task.id)
                         effect_evidence = self.store.effect_evidence(task.id)
                         archive.materialize_effects(
                             task.id,
@@ -3988,6 +4053,21 @@ class StewardDaemon:
                 )
                 if cleanup_intent is None:
                     return False
+
+        try:
+            # The result is orthogonal to lifecycle status and is finalized
+            # only after the archive and any durable publication cleanup intent
+            # are ready alongside every other terminal prerequisite.  A
+            # malformed or contradictory action ledger is never summarized.
+            self.store.finalize_effect_result(task.id)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal cleanup requires valid external effect evidence",
+                {"reason": "effect_evidence_invalid", "error": exc.__class__.__name__},
+            )
+            return False
 
         if not any(event.kind == "cleanup.container_removed" for event in events):
             try:

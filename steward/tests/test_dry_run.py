@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import replace
@@ -9,7 +10,11 @@ import pytest
 from typer.testing import CliRunner
 
 from coquic_steward.cli import app
-from coquic_steward.core.config import StewardConfig, load_config
+from coquic_steward.core.config import (
+    StewardConfig,
+    StewardDeploymentConfig,
+    load_config,
+)
 from coquic_steward.core.models import (
     EffectActionKind,
     EffectDecisionKind,
@@ -39,6 +44,7 @@ from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
     PublicationOperationStatus,
+    PublicationState,
 )
 from coquic_steward.storage import TaskStore
 
@@ -480,6 +486,99 @@ def test_publication_enqueue_rechecks_persisted_latch(tmp_path: Path) -> None:
     result = store.enqueue_publication(generation)
     assert result.status is PublicationOperationStatus.precondition
     assert store.get_publication_generation(generation.publication_id) is None
+
+
+def test_exposed_publication_reconciles_after_dry_run_restart(
+    repo: Path, tmp_path: Path
+) -> None:
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=True,
+        local_codex_test_harness=True,
+        deployment=StewardDeploymentConfig(home=tmp_path / "coquic-home"),
+    )
+    config.ensure_dirs()
+    database = tmp_path / "exposed.sqlite"
+    live = TaskStore.create(database, dry_run=False)
+    task, _ = live.add_task(_spec())
+    pipeline = live.list_pipelines(task.id)[0]
+    live.add_event(
+        task.id,
+        "pipeline.ready_to_seal",
+        "terminal publication",
+        {"pipeline_id": pipeline.id, "terminal_status": TaskStatus.failed.value},
+    )
+    live.transition_pipeline(pipeline.id, TaskStatus.failed.value, phase="complete")
+    live.finish_task(task.id, TaskStatus.failed, "terminal publication")
+    identity = GenerationIdentity(task.id, "terminal-publication")
+    generation = PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id=task.id,
+        run_id="run-terminal-publication",
+        generation_boundary=identity.generation_boundary,
+        metadata_digest="a" * 64,
+        idempotency_key=identity.idempotency_key,
+    )
+    assert live.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+    exposed_at = (
+        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+    )
+    with live.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_generations SET state='exposed',"
+            "exposed_at=:exposed_at,updated_at=:exposed_at "
+            "WHERE publication_id=:publication_id",
+            {
+                "exposed_at": exposed_at,
+                "publication_id": generation.publication_id,
+            },
+        )
+    live._finalize_exact_store()
+
+    restarted = TaskStore.open(database, dry_run=True)
+    daemon = StewardDaemon(config, restarted)
+
+    assert restarted.task_execution_mode(task.id) is ExecutionMode.dry_run
+    assert restarted.effect_result(task.id) is None
+    assert daemon.finalize_terminal_task(task.id) is True
+    assert restarted.effect_result(task.id) is EffectResult.applied
+    assert restarted.get_publication_generation(generation.publication_id).state is PublicationState.exposed
+    assert [
+        event.data.get("actionId")
+        for event in restarted.events(task.id)
+        if event.kind == "effect.applied"
+    ] == [f"publication-d1-expose:{generation.publication_id}"]
+
+
+@pytest.mark.parametrize("startup_dry_run", [False, True])
+def test_taskless_publication_enqueue_is_side_effect_free(
+    tmp_path: Path, startup_dry_run: bool
+) -> None:
+    store = TaskStore.create(
+        tmp_path / f"taskless-{startup_dry_run}.sqlite",
+        dry_run=startup_dry_run,
+    )
+    identity = GenerationIdentity("missing-task", "boundary-taskless")
+    generation = PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id=identity.task_id,
+        run_id="run-taskless",
+        generation_boundary=identity.generation_boundary,
+        metadata_digest="a" * 64,
+        idempotency_key=identity.idempotency_key,
+    )
+    changes: list[object] = []
+    store.on_change = lambda: changes.append(object())
+
+    result = store.enqueue_publication(generation)
+
+    assert result.status is PublicationOperationStatus.precondition
+    assert store.get_publication_generation(generation.publication_id) is None
+    assert store.list_publication_generations() == []
+    assert store.get_publication_health().queued_count == 0
+    assert changes == []
 
 
 def test_session_publication_uses_current_store_latch(tmp_path: Path) -> None:

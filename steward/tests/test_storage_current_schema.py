@@ -35,6 +35,22 @@ from coquic_steward.storage.sqlite import (
 )
 
 
+def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
+    try:
+        store.get(generation.task_id)
+    except KeyError:
+        store.add_task(
+            TaskSpec(
+                id=generation.task_id,
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title="publication fixture",
+                prompt="publication fixture",
+            )
+        )
+    return store.enqueue_publication(generation)
+
+
 def _catalog_digest(connection: sqlite3.Connection) -> str:
     rows = connection.execute(
         """
@@ -796,7 +812,7 @@ def test_open_defers_stale_lease_recovery_to_explicit_recover(tmp_path: Path) ->
     database = tmp_path / "steward.sqlite"
     store = TaskStore.create(database)
     generation, now = _stale_publication_generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication(
         "recovery-worker", retry_policy=PublicationRetryPolicy(), now=now
     )
@@ -876,7 +892,7 @@ def test_recover_rolls_back_lease_and_health_changes_on_failure(
     database = tmp_path / "steward.sqlite"
     store = TaskStore.create(database)
     generation, now = _stale_publication_generation()
-    store.enqueue_publication(generation)
+    _enqueue_publication(store, generation)
     store.claim_publication(
         "recovery-worker", retry_policy=PublicationRetryPolicy(), now=now
     )

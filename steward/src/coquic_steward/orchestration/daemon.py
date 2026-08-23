@@ -3842,6 +3842,12 @@ class StewardDaemon:
                     {"reason": "effect_evidence_invalid", "error": exc.__class__.__name__},
                 )
                 return False
+            if cleanup_state is not CleanupStatus.complete:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_complete",
+                    "terminal archive deletion completed",
+                )
             return True
         if existing_state is CleanupState.blocked:
             return False

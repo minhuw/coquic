@@ -542,9 +542,22 @@ def test_exposed_publication_reconciles_after_dry_run_restart(
 
     assert restarted.task_execution_mode(task.id) is ExecutionMode.dry_run
     assert restarted.effect_result(task.id) is None
+    with restarted.effect_admission(
+        task.id,
+        action=EffectActionKind.publication_enqueue.value,
+        action_id="publication-enqueue:later-run",
+        target=task.id,
+        payload={"run_id": "later-run"},
+    ) as decision:
+        assert decision.proposal_required
     assert daemon.finalize_terminal_task(task.id) is True
     assert restarted.effect_result(task.id) is EffectResult.applied
     assert restarted.get_publication_generation(generation.publication_id).state is PublicationState.exposed
+    assert [event.kind for event in restarted.events(task.id) if event.kind.startswith("effect.")] == [
+        "effect.proposed",
+        "effect.applied",
+        "effect.result.finalized",
+    ]
     assert [
         event.data.get("actionId")
         for event in restarted.events(task.id)

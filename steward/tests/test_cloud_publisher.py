@@ -18,6 +18,7 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.publication import (
     FailClosed,
+    PublicationError,
     ReasonCode,
     RepairRequired,
 )
@@ -557,12 +558,37 @@ def test_usage_delegates_use_canonical_d1_operations() -> None:
     publisher = CloudPublisher(
         _FakeStore(), object(), D1(), retry_policy=POLICY
     )
-    assert publisher.reconcile_overhead({"model": "model"}, digest="row-digest") is overhead
-    assert publisher.backfill_usage("catalog", cursor="cursor", limit=8) is backfill
+    assert publisher.reconcile_overhead(
+        {"model": "model"}, digest="row-digest", task_id="task-1"
+    ) is overhead
+    assert publisher.backfill_usage(
+        "catalog", cursor="cursor", limit=8, task_id="task-1"
+    ) is backfill
     assert calls == [
         ("overhead", {"model": "model"}, "row-digest"),
         ("backfill", "catalog", "cursor"),
     ]
+
+
+def test_taskless_aggregate_effects_never_reach_provider(tmp_path) -> None:
+    store = TaskStore.create(tmp_path / "taskless-aggregate.sqlite", dry_run=False)
+    calls: list[str] = []
+
+    class D1:
+        def upsert_overhead(self, *_args, **_kwargs):
+            calls.append("overhead")
+            raise AssertionError("taskless overhead reached D1")
+
+        def backfill_na_costs(self, *_args, **_kwargs):
+            calls.append("backfill")
+            raise AssertionError("taskless backfill reached D1")
+
+    publisher = CloudPublisher(store, object(), D1(), retry_policy=POLICY)
+    with pytest.raises(PublicationError):
+        publisher.reconcile_overhead({"model": "model"}, digest="row-digest")
+    with pytest.raises(PublicationError):
+        publisher.backfill_usage("catalog", cursor="cursor", limit=8)
+    assert calls == []
 
 
 def _returning_composer(result: object):

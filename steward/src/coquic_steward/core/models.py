@@ -526,8 +526,9 @@ def derive_effect_result(evidence: object) -> EffectResult:
             by_identity[item.effect_id] = item
     unique = tuple(by_identity.values())
     if any(item.result is EffectResult.applied for item in unique):
-        if any(item.mode is ExecutionMode.dry_run for item in unique):
-            raise ValueError("dry-run effect evidence contradicts an applied result")
+        # A task may have crossed the live boundary before a restart tightens
+        # its mode to dry-run.  Proposals recorded after that tightening are
+        # local evidence and do not contradict the already-applied action.
         return EffectResult.applied
     if unique:
         return EffectResult.not_applied

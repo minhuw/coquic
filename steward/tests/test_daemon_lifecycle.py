@@ -28,6 +28,7 @@ from coquic_steward.agents.runner import CodexRunner
 from coquic_steward.control_loop.models import StewardOverheadUsage
 from coquic_steward.core.models import (
     CodexRunState,
+    CleanupStatus,
     DaemonLifecycleState,
     CodexStage,
     PipelineCursorPhase,
@@ -88,6 +89,7 @@ from coquic_steward.publication.d1 import (
 from coquic_steward.publication.models import RunIdentity, RunMetadata
 from coquic_steward.publication.generation import compose_publication_generation
 from coquic_steward.publication.outbox import (
+    CleanupState,
     GenerationIdentity,
     PublicationGeneration,
     PublicationHideFence,
@@ -4595,6 +4597,41 @@ def test_terminal_seal_uses_canonical_utc_timestamp(config):
     )
     assert manifest["completedAt"].endswith("Z")
     assert "+00:00" not in manifest["completedAt"]
+
+
+def test_completed_cleanup_intent_reconciles_missing_completion_event(config):
+    config = config.__class__(**{**config.__dict__, "dry_run": False})
+    store = TaskStore.create(config.db_path, dry_run=False)
+    task, pipeline = _task(store, "completed cleanup intent")
+    store.add_event(
+        task.id,
+        "pipeline.ready_to_seal",
+        "failed",
+        {"pipeline_id": pipeline.id, "terminal_status": "failed"},
+    )
+    store.transition_pipeline(pipeline.id, "failed", phase="complete")
+    store.finish_task(task.id, TaskStatus.failed, "terminal")
+    store.add_event(task.id, "cleanup_pending", "terminal manifest verified")
+
+    daemon = StewardDaemon(config, store)
+    daemon._cleanup_intent_for_task = lambda _task_id: SimpleNamespace(
+        state=CleanupState.completed
+    )
+
+    assert daemon.finalize_terminal_task(task.id) is True
+    assert store.cleanup_obligation_state(task.id) is CleanupStatus.complete
+    assert [
+        event.kind
+        for event in store.events(task.id)
+        if event.kind in {"cleanup_pending", "cleanup_complete"}
+    ] == ["cleanup_pending", "cleanup_complete"]
+
+    assert daemon.finalize_terminal_task(task.id) is True
+    assert [
+        event.kind
+        for event in store.events(task.id)
+        if event.kind == "cleanup_complete"
+    ] == ["cleanup_complete"]
 
 
 def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):

@@ -621,29 +621,15 @@ class CloudPublisher:
         target: str,
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
-        taskless_aggregate: bool = False,
     ) -> Iterator[EffectDecision]:
         """Hold task admission across the complete guarded mutation."""
 
         from ..storage import TaskStore
 
         if not isinstance(task_id, str) or not task_id:
-            if taskless_aggregate and action in {
-                EffectActionKind.publication_overhead,
-                EffectActionKind.publication_usage_backfill,
-            }:
-                # Aggregate usage is Store-owned control-loop work and has no
-                # task row by design.  Keep this explicit exception separate
-                # from task-backed publication generations.
-                kind = (
-                    EffectDecisionKind.proposal_required
-                    if bool(getattr(self.store, "_startup_dry_run", False))
-                    else EffectDecisionKind.allow
-                )
-                yield EffectDecision(kind)
-                return
-            # Every task-backed publication effect must name the durable task
-            # which owns it.  A missing identity is never implicit authority.
+            # Every publication effect must name the durable task which owns
+            # it.  A missing identity is never implicit authority, including
+            # aggregate control-loop writes.
             yield EffectDecision(EffectDecisionKind.proposal_required)
             return
         if not isinstance(self.store, TaskStore):
@@ -692,7 +678,6 @@ class CloudPublisher:
         operation: Callable[[], object],
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
-        taskless_aggregate: bool = False,
     ) -> tuple[bool, object | None]:
         """Run one Store/provider mutation while its effect admission is held."""
 
@@ -703,7 +688,6 @@ class CloudPublisher:
             target=target,
             payload=payload,
             reason=reason,
-            taskless_aggregate=taskless_aggregate,
         ) as decision:
             if not decision.allowed:
                 return False, None
@@ -718,7 +702,6 @@ class CloudPublisher:
         target: str,
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
-        taskless_aggregate: bool = False,
     ) -> bool:
         """Ask the Store immediately before a read-only decision."""
 
@@ -729,7 +712,6 @@ class CloudPublisher:
             target=target,
             payload=payload,
             reason=reason,
-            taskless_aggregate=taskless_aggregate,
         ) as decision:
             return decision.allowed
 
@@ -798,17 +780,18 @@ class CloudPublisher:
         source: object,
         *,
         digest: str | None = None,
+        task_id: str | None = None,
     ) -> OverheadReceipt:
         """Reconcile one aggregate-only Steward overhead row in D1."""
 
-        task_id = source.get("taskId") if isinstance(source, Mapping) else None
+        if task_id is None and isinstance(source, Mapping):
+            task_id = source.get("taskId")
         with self._effect_admission(
             task_id,
             action=EffectActionKind.publication_overhead,
             action_id=f"publication-overhead:{digest or 'current'}",
             target="cloudflare-d1",
             payload={"digest": digest or "current"},
-            taskless_aggregate=True,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)
@@ -830,7 +813,6 @@ class CloudPublisher:
             action_id=f"publication-usage-backfill:{cursor or 'start'}",
             target="cloudflare-d1",
             payload={"cursor": cursor or "start", "limit": limit},
-            taskless_aggregate=True,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)

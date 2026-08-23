@@ -561,6 +561,43 @@ def test_concurrent_pipeline_ordinals_are_unique(config: StewardConfig) -> None:
     assert sorted(ordinals) == list(range(2, 10))
 
 
+def test_concurrent_live_rerun_allocations_have_one_owner_and_wakeup(
+    config: StewardConfig,
+) -> None:
+    dry_store = TaskStore.create(config.db_path, dry_run=True)
+    source, _ = dry_store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="planned source",
+            prompt="implement",
+        )
+    )
+    dry_store.finish_task(source.id, TaskStatus.no_changes, "no changes")
+    store = TaskStore.open(config.db_path, dry_run=False)
+
+    def allocate(_: int):
+        return store.allocate_live_rerun(source.id)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        allocations = list(executor.map(allocate, range(8)))
+
+    assert sum(allocation.created for allocation in allocations) == 1
+    task_ids = {allocation.task.id for allocation in allocations}
+    assert len(task_ids) == 1
+    descendants = [task for task in store.list_tasks() if task.id != source.id]
+    assert [task.id for task in descendants] == list(task_ids)
+    assert [
+        wakeup for wakeup in store.pending_wakeups() if wakeup.reason == "task.live_rerun"
+    ]
+    with sqlite3.connect(config.db_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM control_loop_edges "
+            "WHERE edge_type = ? AND source_id = ?",
+            ("task_rerun", source.id),
+        ).fetchone() == (1,)
+
+
 def test_pipeline_creation_requires_persisted_execution_owner(
     config: StewardConfig,
 ) -> None:

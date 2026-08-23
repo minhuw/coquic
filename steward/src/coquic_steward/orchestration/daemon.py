@@ -178,6 +178,29 @@ def _task_is_dry_run(task: TaskRecord) -> bool:
     return _task_execution_mode(task) is ExecutionMode.dry_run
 
 
+def _live_rerun_allocation_counts(
+    store: SQLiteTaskStore, task: TaskRecord
+) -> tuple[int, int]:
+    """Read retained and stale counts from the durable allocation event."""
+
+    try:
+        events = store.events(task.id)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return 0, 0
+    for event in reversed(events):
+        if event.kind != "task.live_rerun":
+            continue
+        if not isinstance(event.data, Mapping):
+            return 0, 0
+        selected = event.data.get("selected_signal_ids", [])
+        stale = event.data.get("stale_signal_ids", [])
+        return (
+            len(selected) if isinstance(selected, list) else 0,
+            len(stale) if isinstance(stale, list) else 0,
+        )
+    return 0, 0
+
+
 def create_live_rerun(
     config: StewardConfig,
     store: SQLiteTaskStore,
@@ -234,6 +257,20 @@ def create_live_rerun(
         raise LiveRerunRejected("source_archive_unverified") from exc
 
     try:
+        existing = store.active_live_rerun(source.id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveRerunRejected("active_rerun_lookup_failed") from exc
+    if existing is not None:
+        retained_count, stale_count = _live_rerun_allocation_counts(store, existing)
+        return LiveRerunOutcome(
+            source_task_id=source.id,
+            task=existing,
+            created=False,
+            retained_signal_count=retained_count,
+            stale_signal_count=stale_count,
+        )
+
+    try:
         linked = store.selected_signal_items_for_task(source.id)
     except (KeyError, TypeError, ValueError) as exc:
         raise LiveRerunRejected("source_signal_links_invalid") from exc
@@ -259,19 +296,6 @@ def create_live_rerun(
                 stale_signal_count=len(stale_reasons),
                 stale_reasons=stale_reasons,
             )
-
-    try:
-        existing = store.active_live_rerun(source.id)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise LiveRerunRejected("active_rerun_lookup_failed") from exc
-    if existing is not None:
-        return LiveRerunOutcome(
-            source_task_id=source.id,
-            task=existing,
-            created=False,
-            retained_signal_count=len(actionable),
-            stale_signal_count=len(stale_reasons),
-        )
 
     selected_ids = [item.id for item in actionable]
     stale_ids = list(stale_reasons)

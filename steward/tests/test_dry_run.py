@@ -692,6 +692,192 @@ def test_live_rerun_manual_source_is_fresh_idempotent_and_archive_immutable(tmp_
     assert len([item for item in store.pending_wakeups() if item.reason == "task.live_rerun"]) == 1
 
 
+def test_live_rerun_preserves_integration_source_task_id(tmp_path: Path) -> None:
+    from coquic_steward.execution.executor import StewardExecutor
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo",
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    integration_source, _ = store.add_task(_spec(title="integration source"))
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="integration rerun source",
+            prompt="integrate the source task",
+            metadata={"source_task_id": integration_source.id},
+        ),
+    )
+
+    live_config = replace(config, dry_run=False)
+    outcome = create_live_rerun(live_config, TaskStore.open(store.path), source.id)
+
+    assert outcome.task is not None
+    assert outcome.task.spec.metadata["source_task_id"] == integration_source.id
+    executor = StewardExecutor(
+        live_config,
+        TaskStore.open(store.path, dry_run=False),
+        runner=SimpleNamespace(),
+    )
+    resolved = executor._source_task_for_integration(outcome.task)
+    assert resolved is not None
+    assert resolved.id == integration_source.id
+
+
+def test_store_rejects_signal_less_non_manual_live_rerun_without_mutation(
+    tmp_path: Path,
+) -> None:
+    config = StewardConfig(
+        repo_root=tmp_path / "repo",
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="planner source",
+            prompt="implement the planned feature",
+            source="planner",
+        ),
+    )
+    live_store = TaskStore.open(store.path, dry_run=False)
+    before_tasks = [(task.id, task.status) for task in live_store.list_tasks()]
+    before_events = [
+        (event.task_id, event.kind, event.data)
+        for task in live_store.list_tasks()
+        for event in live_store.events(task.id)
+    ]
+    before_wakeups = [(item.id, item.reason) for item in live_store.pending_wakeups()]
+    with live_store.engine.connect() as connection:
+        before_edges = connection.exec_driver_sql(
+            "SELECT edge_type, source_id, target_id FROM control_loop_edges "
+            "ORDER BY edge_id"
+        ).fetchall()
+
+    with pytest.raises(ValueError, match="selected signals"):
+        live_store.allocate_live_rerun(source.id)
+
+    assert [(task.id, task.status) for task in live_store.list_tasks()] == before_tasks
+    assert [
+        (event.task_id, event.kind, event.data)
+        for task in live_store.list_tasks()
+        for event in live_store.events(task.id)
+    ] == before_events
+    assert [(item.id, item.reason) for item in live_store.pending_wakeups()] == before_wakeups
+    with live_store.engine.connect() as connection:
+        after_edges = connection.exec_driver_sql(
+            "SELECT edge_type, source_id, target_id FROM control_loop_edges "
+            "ORDER BY edge_id"
+        ).fetchall()
+    assert after_edges == before_edges
+
+
+def test_store_allows_manual_signal_less_live_rerun(tmp_path: Path) -> None:
+    config = StewardConfig(
+        repo_root=tmp_path / "repo",
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    source = _sealed_dry_run_source(config, store)
+    live_store = TaskStore.open(store.path, dry_run=False)
+
+    allocation = live_store.allocate_live_rerun(source.id)
+
+    assert allocation.created is True
+    assert allocation.task.spec.metadata.get("selected_signal_item_ids") is None
+    assert allocation.wakeup is not None
+    assert allocation.wakeup.data["retained_signal_count"] == 0
+    assert allocation.wakeup.data["stale_signal_count"] == 0
+
+
+def test_live_rerun_duplicate_skips_provider_revalidation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.signals.providers as providers
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo",
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    item = SignalItem(
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="duplicate-provider",
+        title="feature",
+        payload={"issue_number": 17},
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item]
+    )
+    saved = store.list_signal_items()[0]
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="feature",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [saved.id]},
+        ),
+    )
+    store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+    provider_calls: list[str] = []
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "stale_signal_reason",
+        lambda self, config, item: provider_calls.append("stale") or None,
+    )
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "revalidated_signal_item",
+        lambda self, config, item, **kwargs: provider_calls.append("refresh") or item,
+    )
+
+    live_config = replace(config, dry_run=False)
+    first = create_live_rerun(live_config, TaskStore.open(store.path), source.id)
+    assert first.created is True
+    assert provider_calls == ["stale", "refresh"]
+
+    provider_calls.clear()
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "stale_signal_reason",
+        lambda self, config, item: provider_calls.append("unavailable")
+        or "provider_unavailable",
+    )
+    monkeypatch.setattr(
+        providers.GitHubFeatureIssuesProvider,
+        "revalidated_signal_item",
+        lambda *args, **kwargs: pytest.fail("duplicate contacted the provider"),
+    )
+
+    second = create_live_rerun(live_config, TaskStore.open(store.path), source.id)
+
+    assert second.created is False
+    assert second.task is not None and first.task is not None
+    assert second.task.id == first.task.id
+    assert second.retained_signal_count == first.retained_signal_count == 1
+    assert second.stale_signal_count == first.stale_signal_count == 0
+    assert provider_calls == []
+
+
 def test_live_rerun_rejects_all_stale_without_mutation(tmp_path: Path, monkeypatch) -> None:
     import coquic_steward.signals.providers as providers
 

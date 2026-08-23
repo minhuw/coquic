@@ -224,7 +224,6 @@ _LIVE_RERUN_METADATA_DROP_KEYS = frozenset(
         "selected_signal_items",
         "selected_signal_item_ids",
         "dryRunOfTaskId",
-        "source_task_id",
         "provider_payload",
         "provider_result",
         "provider_response",
@@ -2103,6 +2102,10 @@ class SQLiteTaskStore:
                     TaskStatus.no_changes.value,
                 }:
                     raise ValueError("live rerun source is not a successful terminal task")
+                if source_row.source != "manual" and not selected:
+                    raise ValueError(
+                        "live rerun requires selected signals for non-manual source"
+                    )
 
                 active_rows = session.scalars(
                     _task_query().where(

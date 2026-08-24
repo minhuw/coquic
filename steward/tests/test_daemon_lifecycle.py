@@ -2041,7 +2041,27 @@ def test_httpx_transport_adapter_fences_existing_established_connection(
     try:
         stream = connection._connection._network_stream
         assert isinstance(stream, _HttpxD1HandoffStream)
+        read_started = threading.Event()
+        read_done = threading.Event()
+        read_errors: list[BaseException] = []
+
+        def read() -> None:
+            read_started.set()
+            try:
+                stream.read(1)
+            except BaseException as error:
+                read_errors.append(error)
+            finally:
+                read_done.set()
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        assert read_started.wait(timeout=1.0)
         adapter.cancel()
+        assert read_done.wait(timeout=1.0)
+        reader.join(timeout=1.0)
+        assert not reader.is_alive()
+        assert read_errors
         with pytest.raises(OSError):
             stream.write(b"GET /after-revocation HTTP/1.1\r\n\r\n")
         right.settimeout(1.0)
@@ -2247,6 +2267,106 @@ def test_httpx_transport_adapter_fences_selected_proxy_before_connect(
         assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
     finally:
         release.set()
+        adapter.close()
+        d1.close()
+
+
+def test_httpx_transport_adapter_fences_active_proxy_write_before_cancel_returns(
+    monkeypatch,
+):
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    stream_closed = threading.Event()
+    cancel_returned = threading.Event()
+    writes: list[bytes] = []
+    request_errors: list[BaseException] = []
+    cancel_errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            write_entered.set()
+            release_write.wait(timeout=2.0)
+            writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    proxy._pool._network_backend = Backend()
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    d1 = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=http_client,
+    )
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            request_errors.append(error)
+
+    def cancel() -> None:
+        try:
+            adapter.cancel()
+        except BaseException as error:
+            cancel_errors.append(error)
+        finally:
+            cancel_returned.set()
+
+    worker = threading.Thread(target=request, daemon=True)
+    cancellation = threading.Thread(target=cancel, daemon=True)
+    worker.start()
+    assert write_entered.wait(timeout=1.0)
+    cancellation.start()
+
+    try:
+        assert stream_closed.wait(timeout=1.0)
+        assert not cancel_returned.is_set()
+        assert writes == []
+        release_write.set()
+        assert cancel_returned.wait(timeout=1.0)
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
+        assert not cancellation.is_alive()
+        assert not worker.is_alive()
+        assert cancel_errors == []
+        assert len(writes) == 1
+        assert writes[0].startswith(b"CONNECT ")
+        assert request_errors
+        assert isinstance(request_errors[0], D1Error)
+        assert request_errors[0].code.value == "network"
+    finally:
+        release_write.set()
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
         adapter.close()
         d1.close()
 

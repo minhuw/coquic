@@ -265,6 +265,9 @@ class _HttpxD1HandoffStream:
         self._closed = False
         self._write_started = False
         self._active_operations = 0
+        self._active_writes = 0
+        self._writes_complete = threading.Event()
+        self._writes_complete.set()
 
     def _raise_if_cancelled(self) -> None:
         with self._adapter._lock:
@@ -294,12 +297,21 @@ class _HttpxD1HandoffStream:
                     # established socket shutdown path instead of racing the
                     # handoff fence.
                     self._write_started = True
+                    self._active_writes += 1
+                    self._writes_complete.clear()
         if cancelled:
             self._raise_if_cancelled()
 
-    def _end_operation(self) -> None:
+    def _end_operation(self, *, writes: bool = False) -> None:
         with self._adapter._lock:
             self._active_operations = max(0, self._active_operations - 1)
+            if writes:
+                self._active_writes = max(0, self._active_writes - 1)
+                if self._active_writes == 0:
+                    self._writes_complete.set()
+
+    def _wait_for_writes(self) -> None:
+        self._writes_complete.wait()
 
     def close(self) -> None:
         with self._adapter._lock:
@@ -338,7 +350,7 @@ class _HttpxD1HandoffStream:
             self._stream.write(buffer, timeout=timeout)
             self._raise_if_cancelled()
         finally:
-            self._end_operation()
+            self._end_operation(writes=True)
 
     def start_tls(self, *args: object, **kwargs: object) -> object:
         self._begin_operation()
@@ -525,8 +537,28 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             return None
         raise PublicationTransportSetupError()
 
-    @classmethod
-    def _connection_socket(cls, connection: object) -> socket.socket | None:
+    def _stream_socket(self, stream: object) -> socket.socket | None:
+        allow_missing = isinstance(stream, _HttpxD1HandoffStream)
+        if allow_missing:
+            with self._lock:
+                if stream._adapter is not self:
+                    raise PublicationTransportSetupError()
+                stream = stream._stream
+        try:
+            raw_socket = stream._sock
+        except AttributeError:
+            if allow_missing:
+                # Socketless test and handoff streams are still closed through
+                # their stream owner.  A pinned SyncStream exposes _sock here.
+                return None
+            raise PublicationTransportSetupError() from None
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if not isinstance(raw_socket, socket.socket):
+            raise PublicationTransportSetupError()
+        return raw_socket
+
+    def _connection_socket(self, connection: object) -> socket.socket | None:
         """Return an established socket, or None for a valid connecting state."""
 
         if type(connection) is HTTPConnection:
@@ -540,20 +572,12 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             http_connection = connection
         else:
             raise PublicationTransportSetupError()
-        cls._validate_protocol(http_connection)
+        self._validate_protocol(http_connection)
         try:
             stream = http_connection._network_stream
         except Exception:
             raise PublicationTransportSetupError() from None
-        if isinstance(stream, _HttpxD1HandoffStream):
-            return None
-        try:
-            raw_socket = stream._sock
-        except Exception:
-            raise PublicationTransportSetupError() from None
-        if not isinstance(raw_socket, socket.socket):
-            raise PublicationTransportSetupError()
-        return raw_socket
+        return self._stream_socket(stream)
 
     def _connection_parts(self, connection: object) -> tuple[object, ...]:
         if type(connection) is HTTPConnection:
@@ -783,23 +807,42 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             nested = self._proxy_connections.get(id(connection))
             if nested is not None:
                 pending_ids.append(id(nested))
-        for connection_id in pending_ids:
-            with self._lock:
-                pending = self._pending_streams.get(connection_id)
-            if pending is not None:
-                pending.close()
+            pending_streams = tuple(
+                pending
+                for connection_id in pending_ids
+                if (pending := self._pending_streams.get(connection_id)) is not None
+            )
 
-        parts = self._connection_parts(connection)
-        sockets: list[socket.socket] = []
-        for part in parts:
-            raw_socket = self._connection_socket(part)
-            if raw_socket is not None and all(id(raw_socket) != id(existing) for existing in sockets):
-                sockets.append(raw_socket)
+        try:
+            parts = self._connection_parts(connection)
+            sockets: list[socket.socket] = []
+            for stream in pending_streams:
+                raw_socket = self._stream_socket(stream)
+                if raw_socket is not None and all(
+                    id(raw_socket) != id(existing) for existing in sockets
+                ):
+                    sockets.append(raw_socket)
+            for part in parts:
+                raw_socket = self._connection_socket(part)
+                if raw_socket is not None and all(
+                    id(raw_socket) != id(existing) for existing in sockets
+                ):
+                    sockets.append(raw_socket)
+        except PublicationTransportSetupError:
+            for pending in pending_streams:
+                pending.close()
+            raise
+
+        # Shutdown must precede stream close: closing a socket from another
+        # thread does not reliably interrupt a blocked recv/send.
         for raw_socket in sockets:
             try:
                 raw_socket.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
+        for pending in pending_streams:
+            pending.close()
+        for raw_socket in sockets:
             try:
                 raw_socket.close()
             except Exception:
@@ -819,9 +862,6 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             self._cancelled = True
             connections = tuple(self._connections.values())
             pending_streams = tuple(self._pending_streams.values())
-        for stream in pending_streams:
-            stream.close()
-
         pool_error = False
         try:
             pool_connections = tuple(self._pool.connections)
@@ -840,6 +880,10 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 self._abort_connection(connection)
             except PublicationTransportSetupError:
                 setup_error = True
+        for stream in pending_streams:
+            stream.close()
+        for stream in pending_streams:
+            stream._wait_for_writes()
         if setup_error:
             raise PublicationTransportSetupError()
 

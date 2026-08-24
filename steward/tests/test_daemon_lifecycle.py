@@ -86,7 +86,7 @@ from coquic_steward.publication.d1 import (
     OverheadReceipt,
     UsageBackfillReceipt,
 )
-from coquic_steward.publication.models import RunIdentity, RunMetadata
+from coquic_steward.publication.models import PublicationError, RunIdentity, RunMetadata
 from coquic_steward.publication.generation import compose_publication_generation
 from coquic_steward.publication.outbox import (
     CleanupState,
@@ -95,9 +95,11 @@ from coquic_steward.publication.outbox import (
     PublicationHideFence,
     PublicationOperationResult,
     PublicationOperationStatus,
+    PublicationRetryPolicy,
     PublicationState,
 )
 from coquic_steward.publication.publisher import (
+    CloudPublisher,
     PublicationHideResult,
     PublicationHideStatus,
     PublicationResult,
@@ -657,6 +659,80 @@ def test_shutdown_keeps_stopping_while_publication_worker_is_live(config, tmp_pa
     assert store.on_change is None
 
 
+def test_shutdown_revokes_publication_authority_before_worker_join(config):
+    object.__setattr__(config, "dry_run", False)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    store.claim_daemon_instance(
+        daemon.runtime.instance_id,
+        lifecycle=DaemonLifecycleState.running.value,
+    )
+    authority = store.get_daemon_publication_authority(daemon.runtime.instance_id)
+    assert authority is not None
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def stubborn_worker() -> None:
+        started.set()
+        release.wait()
+
+    worker = threading.Thread(target=stubborn_worker, daemon=True)
+    daemon._publication_thread = worker
+    worker.start()
+    assert started.wait(timeout=1.0)
+
+    provider_calls: list[object] = []
+
+    class D1:
+        def upsert_overhead(self, source: object, *, digest: str | None = None):
+            provider_calls.append((source, digest))
+            return OverheadReceipt()
+
+    publisher = CloudPublisher(
+        store,
+        object(),
+        D1(),
+        retry_policy=PublicationRetryPolicy(),
+    )
+    shutdown_done = threading.Event()
+
+    def shutdown() -> None:
+        daemon.shutdown()
+        shutdown_done.set()
+
+    shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+    shutdown_thread.start()
+    try:
+        assert daemon._publication_stop.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            state = store.get_daemon_state()
+            if (
+                state is not None
+                and state["lifecycle"] == DaemonLifecycleState.stopping.value
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("shutdown did not revoke durable publication authority")
+
+        assert worker.is_alive()
+        assert not shutdown_done.is_set()
+        with pytest.raises(PublicationError):
+            publisher.reconcile_overhead(
+                {},
+                digest="row-digest",
+                authority=authority,
+            )
+        assert provider_calls == []
+    finally:
+        release.set()
+        assert shutdown_done.wait(timeout=2.0)
+        shutdown_thread.join(timeout=1.0)
+        worker.join(timeout=1.0)
+
+
 def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
@@ -664,18 +740,23 @@ def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkey
 
     monkeypatch.setattr(
         daemon,
-        "_stop_publication_worker",
-        lambda **_kwargs: events.append("publication-cancel") or True,
+        "_request_publication_worker_stop",
+        lambda **_kwargs: events.append("publication-cancel"),
     )
     monkeypatch.setattr(
         daemon,
         "_enter_stopping",
         lambda **_kwargs: events.append("lifecycle") or None,
     )
+    monkeypatch.setattr(
+        daemon,
+        "_join_publication_worker",
+        lambda **_kwargs: events.append("publication-join") or True,
+    )
 
     daemon.shutdown(force=True)
 
-    assert events[:2] == ["publication-cancel", "lifecycle"]
+    assert events[:3] == ["publication-cancel", "lifecycle", "publication-join"]
 
 
 def test_shutdown_after_ownership_loss_completes_local_cleanup(config, monkeypatch):
@@ -690,7 +771,7 @@ def test_shutdown_after_ownership_loss_completes_local_cleanup(config, monkeypat
     cleanup: list[str] = []
     monkeypatch.setattr(
         daemon,
-        "_stop_publication_worker",
+        "_join_publication_worker",
         lambda **_kwargs: cleanup.append("publication") or True,
     )
 

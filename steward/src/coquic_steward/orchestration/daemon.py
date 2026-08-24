@@ -1796,8 +1796,10 @@ class StewardDaemon:
             )
             self._publication_thread.start()
 
-    def _stop_publication_worker(self, *, deadline: float | None = None) -> bool:
-        """Request bounded worker teardown and acknowledge released ownership."""
+    def _request_publication_worker_stop(
+        self, *, deadline: float | None = None
+    ) -> None:
+        """Initiate provider cancellation without waiting for worker teardown."""
 
         self._publication_stop.set()
         self._publication_wakeup.set()
@@ -1810,6 +1812,10 @@ class StewardDaemon:
                 cancel.cancel()
             except Exception:
                 pass
+
+    def _join_publication_worker(self, *, deadline: float | None = None) -> bool:
+        """Join a cancelled publication worker within the shutdown deadline."""
+
         thread = self._publication_thread
         if thread is None:
             self._publication_cancel = None
@@ -1831,6 +1837,12 @@ class StewardDaemon:
             self._publication_thread = None
             self._publication_cancel = None
         return self._uninstall_publication_change_callback()
+
+    def _stop_publication_worker(self, *, deadline: float | None = None) -> bool:
+        """Request bounded worker teardown and acknowledge released ownership."""
+
+        self._request_publication_worker_stop(deadline=deadline)
+        return self._join_publication_worker(deadline=deadline)
 
     start_publication_worker = _start_publication_worker
     stop_publication_worker = _stop_publication_worker
@@ -4274,8 +4286,15 @@ class StewardDaemon:
         # Cancel provider I/O before the lifecycle transition waits on the same
         # Store admission boundary held by an in-flight aggregate operation.
         self._publication_authority = None
-        publication_worker_stopped = self._stop_publication_worker(deadline=deadline)
-        self._enter_stopping(force=force)
+        self._request_publication_worker_stop(deadline=deadline)
+        # Revoke the durable claim before waiting for a worker that may still be
+        # blocked outside the Store admission boundary.
+        try:
+            self._enter_stopping(force=force)
+        finally:
+            publication_worker_stopped = self._join_publication_worker(
+                deadline=deadline
+            )
         self._stop_control_loop_writer()
         self._drain_control_loop_once()
         running_runs = [

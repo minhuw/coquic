@@ -4999,8 +4999,64 @@ def test_publication_usage_mapping_rejects_overhead_subtypes_without_execution()
     assert executed is False
 
 
+def test_reconcile_publication_usage_passes_store_authority_to_publisher(
+    tmp_path,
+) -> None:
+    store = TaskStore.create(tmp_path / "daemon-authority.sqlite", dry_run=False)
+    store.claim_daemon_instance("daemon-authority", lifecycle="running")
+    authority = store.get_daemon_publication_authority()
+    assert authority is not None
+    daemon = object.__new__(StewardDaemon)
+    row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
+    daemon._control_loop_ledger = SimpleNamespace(
+        list_overhead_usage=lambda: [row]
+    )
+    daemon._control_loop_usage = SimpleNamespace(
+        catalog=SimpleNamespace(digest="catalog-digest")
+    )
+    daemon._publication_authority = authority
+    daemon._publication_overhead_digest = None
+    daemon._publication_overhead_position = 0
+    daemon._publication_backfill_catalog_digest = "catalog-digest"
+    daemon._publication_backfill_cursor = "cursor-before"
+    daemon._publication_backfill_blocked = False
+    daemon._log = lambda *_args, **_kwargs: None
+    received: list[tuple[str, object]] = []
+
+    class Publisher:
+        def reconcile_overhead(
+            self,
+            source: object,
+            *,
+            digest: str | None = None,
+            authority: object | None = None,
+        ):
+            del source, digest
+            received.append(("overhead", authority))
+            return OverheadReceipt()
+
+        def backfill_usage(
+            self,
+            catalog: object,
+            *,
+            cursor: str | None,
+            limit: int,
+            authority: object | None = None,
+        ):
+            del catalog, cursor, limit
+            received.append(("backfill", authority))
+            return UsageBackfillReceipt()
+
+    publisher = Publisher()
+    assert daemon._reconcile_publication_usage(publisher) is True
+    daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [])
+    assert daemon._reconcile_publication_usage(publisher) is False
+    assert received == [("overhead", authority), ("backfill", authority)]
+
+
 def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> None:
     daemon = object.__new__(StewardDaemon)
+    daemon._publication_authority = object()
     row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
     daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [row])
     daemon._publication_overhead_digest = None
@@ -5009,7 +5065,14 @@ def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> N
     received: list[object] = []
 
     class Publisher:
-        def reconcile_overhead(self, source: object, *, digest: str | None = None):
+        def reconcile_overhead(
+            self,
+            source: object,
+            *,
+            digest: str | None = None,
+            authority: object | None = None,
+        ):
+            assert authority is daemon._publication_authority
             received.append(source)
             return OverheadReceipt()
 
@@ -5020,6 +5083,7 @@ def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> N
 
 def test_reconcile_publication_usage_waits_after_overhead_provider_failure() -> None:
     daemon = object.__new__(StewardDaemon)
+    daemon._publication_authority = object()
     row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
     daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [row])
     daemon._publication_overhead_digest = None
@@ -5028,8 +5092,13 @@ def test_reconcile_publication_usage_waits_after_overhead_provider_failure() -> 
 
     class Publisher:
         def reconcile_overhead(
-            self, source: object, *, digest: str | None = None
+            self,
+            source: object,
+            *,
+            digest: str | None = None,
+            authority: object | None = None,
         ) -> OverheadReceipt:
+            assert authority is daemon._publication_authority
             del source, digest
             raise D1Error("network")
 
@@ -5040,6 +5109,7 @@ def test_reconcile_publication_usage_waits_after_overhead_provider_failure() -> 
 
 def test_reconcile_publication_usage_waits_after_backfill_provider_failure() -> None:
     daemon = object.__new__(StewardDaemon)
+    daemon._publication_authority = object()
     daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [])
     daemon._control_loop_usage = SimpleNamespace(
         catalog=SimpleNamespace(digest="catalog-digest")
@@ -5056,7 +5126,9 @@ def test_reconcile_publication_usage_waits_after_backfill_provider_failure() -> 
             *,
             cursor: str | None,
             limit: int,
+            authority: object | None = None,
         ) -> UsageBackfillReceipt:
+            assert authority is daemon._publication_authority
             del catalog, cursor, limit
             raise D1Error("network")
 

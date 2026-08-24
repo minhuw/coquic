@@ -12,6 +12,7 @@ import pytest
 from coquic_steward.core.models import (
     EffectDecision,
     EffectDecisionKind,
+    ExecutionMode,
     TaskKind,
     TaskSpec,
     WorkerKind,
@@ -63,6 +64,7 @@ from coquic_steward.publication.r2 import (
     R2PutStatus,
 )
 from coquic_steward.storage import TaskStore
+from coquic_steward.storage.sqlite import DaemonPublicationAuthority
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
@@ -162,6 +164,10 @@ class _FakeStore:
 
     @contextmanager
     def effect_admission(self, *_args, **_kwargs):
+        yield EffectDecision(EffectDecisionKind.allow)
+
+    @contextmanager
+    def daemon_publication_admission(self, *_args, **_kwargs):
         yield EffectDecision(EffectDecisionKind.allow)
 
     def get_publication_generation(self, publication_id: str):
@@ -558,16 +564,109 @@ def test_usage_delegates_use_canonical_d1_operations() -> None:
     publisher = CloudPublisher(
         _FakeStore(), object(), D1(), retry_policy=POLICY
     )
+    authority = object()
     assert publisher.reconcile_overhead(
-        {"model": "model"}, digest="row-digest", task_id="task-1"
+        {"model": "model"}, digest="row-digest", authority=authority
     ) is overhead
     assert publisher.backfill_usage(
-        "catalog", cursor="cursor", limit=8, task_id="task-1"
+        "catalog", cursor="cursor", limit=8, authority=authority
     ) is backfill
     assert calls == [
         ("overhead", {"model": "model"}, "row-digest"),
         ("backfill", "catalog", "cursor"),
     ]
+
+
+def test_live_daemon_authority_reaches_d1_without_task_attribution(tmp_path) -> None:
+    store = TaskStore.create(tmp_path / "live-aggregate.sqlite", dry_run=False)
+    store.claim_daemon_instance(
+        "daemon-live",
+        lifecycle="running",
+        state={"execution_mode": ExecutionMode.dry_run.value},
+    )
+    state = store.get_daemon_state()
+    assert state is not None
+    assert state.get("execution_mode") is None
+    assert state["publication_execution_mode"] == ExecutionMode.live.value
+    authority = store.get_daemon_publication_authority("daemon-live")
+    assert authority is not None
+
+    calls: list[tuple[str, object, object]] = []
+    overhead = OverheadReceipt(date="2026-07-28", model="model", digest="digest")
+    backfill = UsageBackfillReceipt(
+        processed_turns=2,
+        changed=True,
+        next_cursor="cursor-next",
+    )
+
+    class D1:
+        def upsert_overhead(self, source: object, *, digest: str | None = None, **_kwargs):
+            calls.append(("overhead", source, digest))
+            return overhead
+
+        def backfill_na_costs(
+            self,
+            catalog: object,
+            *,
+            cursor: str | None = None,
+            limit: int = 64,
+        ):
+            calls.append(("backfill", catalog, cursor))
+            assert limit == 64
+            return backfill
+
+    publisher = CloudPublisher(store, object(), D1(), retry_policy=POLICY)
+    aggregate = {"model": "model", "ownershipClass": "steward-overhead"}
+    assert publisher.reconcile_overhead(
+        aggregate, digest="row-digest", authority=authority
+    ) is overhead
+    assert publisher.backfill_usage(
+        "catalog", cursor="cursor", authority=authority
+    ) is backfill
+    assert calls == [
+        ("overhead", aggregate, "row-digest"),
+        ("backfill", "catalog", "cursor"),
+    ]
+
+
+def test_stale_foreign_stopped_and_dry_run_authority_never_reaches_provider(
+    tmp_path,
+) -> None:
+    store = TaskStore.create(tmp_path / "authority-revocation.sqlite", dry_run=False)
+    store.claim_daemon_instance("daemon-one", lifecycle="running")
+    authority = store.get_daemon_publication_authority()
+    assert authority is not None
+    foreign = DaemonPublicationAuthority("foreign", authority.claim_id, authority.mode)
+    calls: list[str] = []
+
+    class D1:
+        def upsert_overhead(self, *_args, **_kwargs):
+            calls.append("overhead")
+            raise AssertionError("revoked overhead reached D1")
+
+        def backfill_na_costs(self, *_args, **_kwargs):
+            calls.append("backfill")
+            raise AssertionError("revoked backfill reached D1")
+
+    publisher = CloudPublisher(store, object(), D1(), retry_policy=POLICY)
+    successor = TaskStore.open(store.path, dry_run=False)
+    successor.claim_daemon_instance("daemon-two", lifecycle="running")
+    for candidate in (authority, foreign):
+        with pytest.raises(PublicationError):
+            publisher.reconcile_overhead({}, authority=candidate)
+    successor_authority = successor.get_daemon_publication_authority()
+    assert successor_authority is not None
+    successor.set_daemon_lifecycle("stopped", instance_id="daemon-two")
+    with pytest.raises(PublicationError):
+        publisher.backfill_usage("catalog", authority=successor_authority)
+    assert calls == []
+
+    dry_store = TaskStore.open(store.path, dry_run=True)
+    assert dry_store.get_daemon_publication_authority() is None
+    assert dry_store.get_daemon_state()["publication_execution_mode"] == ExecutionMode.dry_run.value
+    with pytest.raises(PublicationError):
+        publisher.reconcile_overhead({}, authority=authority)
+    assert calls == []
 
 
 def test_taskless_aggregate_effects_never_reach_provider(tmp_path) -> None:

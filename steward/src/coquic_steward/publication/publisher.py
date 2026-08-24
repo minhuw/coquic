@@ -621,11 +621,45 @@ class CloudPublisher:
         target: str,
         payload: Mapping[str, object] | None = None,
         reason: str = "dry-run publication effect is proposed locally",
+        authority: object | None = None,
     ) -> Iterator[EffectDecision]:
-        """Hold task admission across the complete guarded mutation."""
+        """Hold task or explicit daemon admission across the mutation."""
 
         from ..storage import TaskStore
 
+        aggregate_actions = {
+            EffectActionKind.publication_overhead,
+            EffectActionKind.publication_usage_backfill,
+        }
+        if action in aggregate_actions and authority is None:
+            # Aggregate rows have no task owner.  A caller-provided task ID is
+            # never an alternative to Store-issued daemon authority.
+            yield EffectDecision(EffectDecisionKind.proposal_required)
+            return
+        if authority is not None:
+            if action not in aggregate_actions:
+                yield EffectDecision(EffectDecisionKind.proposal_required)
+                return
+            with ExitStack() as stack:
+                try:
+                    decision = stack.enter_context(
+                        self.store.daemon_publication_admission(
+                            authority,
+                            action=action.value,
+                            action_id=action_id,
+                            target=target,
+                            payload=payload or {},
+                            reason=reason,
+                        )
+                    )
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    yield EffectDecision(EffectDecisionKind.proposal_required)
+                    return
+                if not isinstance(decision, EffectDecision):
+                    yield EffectDecision(EffectDecisionKind.proposal_required)
+                else:
+                    yield decision
+            return
         if not isinstance(task_id, str) or not task_id:
             # Every publication effect must name the durable task which owns
             # it.  A missing identity is never implicit authority, including
@@ -781,17 +815,19 @@ class CloudPublisher:
         *,
         digest: str | None = None,
         task_id: str | None = None,
+        authority: object | None = None,
+        aggregate_authority: object | None = None,
     ) -> OverheadReceipt:
         """Reconcile one aggregate-only Steward overhead row in D1."""
 
-        if task_id is None and isinstance(source, Mapping):
-            task_id = source.get("taskId")
+        selected_authority = authority if authority is not None else aggregate_authority
         with self._effect_admission(
             task_id,
             action=EffectActionKind.publication_overhead,
             action_id=f"publication-overhead:{digest or 'current'}",
             target="cloudflare-d1",
             payload={"digest": digest or "current"},
+            authority=selected_authority,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)
@@ -804,15 +840,19 @@ class CloudPublisher:
         cursor: str | None = None,
         limit: int = 64,
         task_id: str | None = None,
+        authority: object | None = None,
+        aggregate_authority: object | None = None,
     ) -> UsageBackfillReceipt:
         """Fill newly priceable cached-D1 usage turns through D1."""
 
+        selected_authority = authority if authority is not None else aggregate_authority
         with self._effect_admission(
             task_id,
             action=EffectActionKind.publication_usage_backfill,
             action_id=f"publication-usage-backfill:{cursor or 'start'}",
             target="cloudflare-d1",
             payload={"cursor": cursor or "start", "limit": limit},
+            authority=selected_authority,
         ) as decision:
             if not decision.allowed:
                 raise PublicationError(ReasonCode.invalid_metadata)

@@ -48,7 +48,7 @@ from ..core.models import (
     coerce_execution_mode,
 )
 from ..execution.executor import StewardExecutor
-from ..storage.sqlite import TaskLedgerOwnershipError
+from ..storage.sqlite import DaemonPublicationAuthority, TaskLedgerOwnershipError
 from ..execution.container import bind_deployment_identity
 from ..execution.session import (
     FreshPlannerSession,
@@ -431,6 +431,7 @@ class StewardDaemon:
         self._publication_callback: Callable[[], None] | None = None
         self._publication_cancel: DaemonCancellation | None = None
         self._publication_deadline: float | None = None
+        self._publication_authority: DaemonPublicationAuthority | None = None
         self._publication_overhead_position = 0
         self._publication_overhead_digest: str | None = None
         self._publication_backfill_cursor: str | None = None
@@ -913,6 +914,11 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                     state={"reconciliation_complete": True},
                 )
+                self._publication_authority = (
+                    self.store.get_daemon_publication_authority()
+                )
+                if self._publication_authority is None:
+                    self._log("daemon publication authority unavailable")
                 try:
                     self._control_loop_ledger.record_runtime(
                         "running", {"instanceId": self.runtime.instance_id}
@@ -1444,6 +1450,10 @@ class StewardDaemon:
     def _reconcile_publication_usage(self, publisher: CloudPublisher) -> bool:
         """Process one bounded overhead or cached-D1 backfill obligation."""
 
+        authority = getattr(self, "_publication_authority", None)
+        if authority is None:
+            self._log("publication aggregate authority unavailable")
+            return False
         rows = self._publication_overhead_rows()
         if rows:
             serialized = [self._publication_usage_mapping(row) for row in rows]
@@ -1483,6 +1493,7 @@ class StewardDaemon:
                         receipt = publisher.reconcile_overhead(
                             row_mapping,
                             digest=row_digest,
+                            authority=authority,
                         )
                     except Exception as exc:
                         self._log(
@@ -1506,7 +1517,12 @@ class StewardDaemon:
         catalog_digest = catalog.digest
         if not isinstance(catalog_digest, str) or not catalog_digest:
             return False
-        if catalog_digest != getattr(self, "_publication_backfill_catalog_digest", None):
+        previous_catalog_digest = getattr(
+            self, "_publication_backfill_catalog_digest", None
+        )
+        previous_cursor = getattr(self, "_publication_backfill_cursor", None)
+        previous_blocked = getattr(self, "_publication_backfill_blocked", False)
+        if catalog_digest != previous_catalog_digest:
             self._publication_backfill_catalog_digest = catalog_digest
             self._publication_backfill_cursor = None
             self._publication_backfill_blocked = False
@@ -1517,13 +1533,20 @@ class StewardDaemon:
                 catalog,
                 cursor=getattr(self, "_publication_backfill_cursor", None),
                 limit=64,
+                authority=authority,
             )
         except Exception as exc:
+            self._publication_backfill_catalog_digest = previous_catalog_digest
+            self._publication_backfill_cursor = previous_cursor
+            self._publication_backfill_blocked = previous_blocked
             self._log(f"publication usage backfill failed error={exc.__class__.__name__}")
             return False
         if not isinstance(receipt, UsageBackfillReceipt):
+            self._publication_backfill_catalog_digest = previous_catalog_digest
+            self._publication_backfill_cursor = previous_cursor
+            self._publication_backfill_blocked = previous_blocked
             self._log("publication usage backfill returned an invalid receipt")
-            return True
+            return False
         if receipt.blocked_reason:
             self._publication_backfill_blocked = True
             self._log(
@@ -4207,6 +4230,10 @@ class StewardDaemon:
     def _enter_stopping(self, *, force: bool) -> None:
         """Persist stopping state after control has left any signal handler."""
 
+        # Drop the local handle before the durable lifecycle transition.  The
+        # Store lock then makes any in-flight provider admission finish before
+        # the claim becomes ineligible for further mutations.
+        self._publication_authority = None
         with self._runtime_lock:
             self.runtime.lifecycle = DaemonLifecycleState.stopping
             self.runtime.state = DaemonRuntimeState.stopping

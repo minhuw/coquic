@@ -47,6 +47,7 @@ from coquic_steward.publication.outbox import (
     PublicationState,
 )
 from coquic_steward.storage import TaskStore
+from coquic_steward.storage.sqlite import DaemonPublicationAuthority
 
 
 def _spec(**metadata: object) -> TaskSpec:
@@ -68,6 +69,74 @@ def test_config_defaults_to_dry_run_and_validates_boolean(repo: Path, tmp_path: 
     path.write_text('[steward]\ndry_run = "false"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="dry_run must be a boolean"):
         load_config(repo_root=repo, config_path=path)
+
+
+def test_daemon_publication_authority_is_durable_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "daemon-authority.sqlite"
+    store = TaskStore.create(database, dry_run=False)
+    store.claim_daemon_instance(
+        "daemon-one",
+        lifecycle="running",
+        state={
+            "publication_execution_mode": ExecutionMode.dry_run.value,
+            "publication_claim_id": "caller-selected",
+        },
+    )
+    state = store.get_daemon_state()
+    assert state is not None
+    assert state["publication_execution_mode"] == ExecutionMode.live.value
+    assert state["publication_claim_id"] != "caller-selected"
+    authority = store.get_daemon_publication_authority("daemon-one")
+    assert authority is not None
+
+    with store.daemon_publication_admission(
+        authority,
+        action=EffectActionKind.publication_overhead.value,
+        action_id="publication-overhead:test",
+        target="cloudflare-d1",
+    ) as decision:
+        assert decision.allowed
+
+    foreign = DaemonPublicationAuthority("foreign", authority.claim_id, authority.mode)
+    with store.daemon_publication_admission(
+        foreign,
+        action=EffectActionKind.publication_overhead.value,
+        action_id="publication-overhead:foreign",
+        target="cloudflare-d1",
+    ) as decision:
+        assert not decision.allowed
+
+    successor = TaskStore.open(database, dry_run=False)
+    successor.claim_daemon_instance("daemon-two", lifecycle="running")
+    with store.daemon_publication_admission(
+        authority,
+        action=EffectActionKind.publication_overhead.value,
+        action_id="publication-overhead:stale",
+        target="cloudflare-d1",
+    ) as decision:
+        assert not decision.allowed
+
+    successor.set_daemon_lifecycle("stopped", instance_id="daemon-two")
+    with successor.daemon_publication_admission(
+        successor.get_daemon_publication_authority("daemon-two"),
+        action=EffectActionKind.publication_overhead.value,
+        action_id="publication-overhead:stopped",
+        target="cloudflare-d1",
+    ) as decision:
+        assert not decision.allowed
+
+    dry_run = TaskStore.open(database, dry_run=True)
+    assert dry_run.get_daemon_publication_authority() is None
+    assert dry_run.get_daemon_state()["publication_execution_mode"] == ExecutionMode.dry_run.value
+    with store.daemon_publication_admission(
+        authority,
+        action=EffectActionKind.publication_overhead.value,
+        action_id="publication-overhead:dry-run",
+        target="cloudflare-d1",
+    ) as decision:
+        assert not decision.allowed
 
 
 def test_store_latch_is_owned_and_monotonic(tmp_path: Path) -> None:

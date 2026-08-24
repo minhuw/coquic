@@ -51,6 +51,7 @@ from ..core.models import (
     SchedulerStoreSnapshot,
     CodexRunState,
     EffectActionKind,
+    EffectDecision,
     EffectDecisionKind,
     EffectEvidence,
     EffectProposal,
@@ -62,6 +63,7 @@ from ..core.models import (
     EFFECT_RESULT_METADATA_KEY,
     LEGACY_EFFECT_RESULT_METADATA_KEY,
     derive_effect_result,
+    decide_effect,
     CodexSession,
     Event,
     ExecutionState,
@@ -329,6 +331,17 @@ _STORE_RECEIPT_FORMAT_VERSION = 1
 _STORE_RECEIPT_PREFIX = ".store-receipt-"
 _STORE_RECEIPT_SUFFIX = ".json"
 _STORE_RECEIPT_STATES = frozenset({"creating", "committed"})
+_DAEMON_PUBLICATION_MODE_KEY = "publication_execution_mode"
+_DAEMON_PUBLICATION_CLAIM_KEY = "publication_claim_id"
+_DAEMON_PUBLICATION_ACTIONS = frozenset(
+    {
+        EffectActionKind.publication_overhead,
+        EffectActionKind.publication_usage_backfill,
+    }
+)
+_DAEMON_LIFECYCLE_VALUES = frozenset(
+    {"starting", "reconciling", "running", "stopping", "stopped"}
+)
 
 
 class _ExecutionAdmissionGuard:
@@ -399,6 +412,12 @@ def _execution_admission_guard(
         return guard
 
 
+def _daemon_admission_guard(database: Path) -> _ExecutionAdmissionGuard:
+    """Return the shared lock for daemon claims, modes, and providers."""
+
+    return _execution_admission_guard(database, "__daemon_publication__")
+
+
 @dataclass(frozen=True, slots=True)
 class _StoreCreationReceipt:
     epoch_id: str
@@ -418,6 +437,54 @@ class _StoreDatabaseSnapshot:
     digest: bytes
     mode: int
     mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class DaemonPublicationAuthority:
+    """Store-issued authority for one daemon-owned aggregate publication claim."""
+
+    instance_id: str
+    claim_id: str
+    mode: ExecutionMode
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instance_id, str) or not self.instance_id or len(self.instance_id) > 128:
+            raise ValueError("daemon instance identity is invalid")
+        if not isinstance(self.claim_id, str) or not self.claim_id or len(self.claim_id) > 256:
+            raise ValueError("daemon publication claim identity is invalid")
+        mode = coerce_execution_mode(self.mode)
+        if mode is None:
+            raise ValueError("daemon publication execution mode is invalid")
+        object.__setattr__(self, "mode", mode)
+
+    @property
+    def generation(self) -> str:
+        """Return the opaque claim generation carried by this authority."""
+
+        return self.claim_id
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Return the Store-resolved mode carried by this authority."""
+
+        return self.mode
+
+    @property
+    def daemon_instance_id(self) -> str:
+        """Return the daemon identity bound to this claim."""
+
+        return self.instance_id
+
+    @property
+    def claim_generation(self) -> str:
+        """Return the durable claim generation bound to this authority."""
+
+        return self.claim_id
+
+
+# The alias keeps the aggregate boundary's purpose clear to callers without
+# creating a second authority type or persistence path.
+AggregatePublicationAuthority = DaemonPublicationAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,35 +753,39 @@ class SQLiteTaskStore:
             if startup is None:
                 raise TypeError("startup execution mode is required")
             selected_dry_run = startup is ExecutionMode.dry_run
-        with Session(self.engine) as session:
-            task_ids = sorted(session.scalars(select(TaskRow.id)).all())
-        with ExitStack() as admission_locks:
-            for task_id in task_ids:
-                admission_locks.enter_context(
-                    _execution_admission_guard(self.path, task_id).locked()
-                )
-            self._startup_dry_run = selected_dry_run
-            changed = 0
+        daemon_changed = False
+        with _daemon_admission_guard(self.path).locked():
             with Session(self.engine) as session:
-                session.execute(text("BEGIN IMMEDIATE"))
-                try:
-                    rows = session.scalars(select(TaskRow)).all()
-                    for row in rows:
-                        metadata = _metadata_dict(row.metadata_json, self.path_codec)
-                        current = execution_mode_from_metadata(metadata)
-                        resolved = resolve_execution_mode(current, startup)
-                        if current is resolved and metadata.get(EXECUTION_MODE_METADATA_KEY) == resolved.value:
-                            continue
-                        row.metadata_json = _dump_metadata(
-                            preserve_execution_mode(metadata, resolved=resolved),
-                            self.path_codec,
-                        )
-                        changed += 1
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    raise
-        if changed:
+                task_ids = sorted(session.scalars(select(TaskRow.id)).all())
+            with ExitStack() as admission_locks:
+                for task_id in task_ids:
+                    admission_locks.enter_context(
+                        _execution_admission_guard(self.path, task_id).locked()
+                    )
+                self._startup_dry_run = selected_dry_run
+                changed = 0
+                with Session(self.engine) as session:
+                    session.execute(text("BEGIN IMMEDIATE"))
+                    try:
+                        rows = session.scalars(select(TaskRow)).all()
+                        for row in rows:
+                            metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                            current = execution_mode_from_metadata(metadata)
+                            resolved = resolve_execution_mode(current, startup)
+                            if current is resolved and metadata.get(EXECUTION_MODE_METADATA_KEY) == resolved.value:
+                                continue
+                            row.metadata_json = _dump_metadata(
+                                preserve_execution_mode(metadata, resolved=resolved),
+                                self.path_codec,
+                            )
+                            changed += 1
+                        session.commit()
+                    except Exception:
+                        session.rollback()
+                        raise
+            if selected_dry_run:
+                daemon_changed = self._tighten_daemon_publication_mode_locked()
+        if changed or daemon_changed:
             self._notify_change()
         return changed
 
@@ -2392,71 +2463,302 @@ class SQLiteTaskStore:
     # ------------------------------------------------------------------
     # Daemon lifecycle ownership
 
+    @staticmethod
+    def _daemon_payload(row: DaemonStateRow) -> dict[str, object]:
+        try:
+            value = json.loads(row.state_json)
+        except (TypeError, json.JSONDecodeError):
+            value = {}
+        if not isinstance(value, dict):
+            return {}
+        payload = dict(value)
+        for key in ("instance_id", "lifecycle", "updated_at"):
+            payload.pop(key, None)
+        return payload
+
+    @staticmethod
+    def _daemon_mode(payload: Mapping[str, object]) -> ExecutionMode | None:
+        try:
+            return coerce_execution_mode(payload.get(_DAEMON_PUBLICATION_MODE_KEY))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _daemon_state_lifecycle(lifecycle: object) -> str | None:
+        if not isinstance(lifecycle, str) or lifecycle not in _DAEMON_LIFECYCLE_VALUES:
+            return None
+        return lifecycle
+
     def get_daemon_state(self) -> dict[str, object] | None:
         with Session(self.engine) as session:
             row = session.get(DaemonStateRow, "daemon")
             if row is None:
                 return None
-            try:
-                value = json.loads(row.state_json)
-            except (TypeError, json.JSONDecodeError):
-                value = {}
+            payload = self._daemon_payload(row)
             return {
                 "instance_id": row.instance_id,
                 "lifecycle": row.lifecycle,
                 "updated_at": row.updated_at,
-                **(value if isinstance(value, dict) else {}),
+                **payload,
             }
 
+    def _tighten_daemon_publication_mode_locked(self) -> bool:
+        """Tighten an existing daemon claim without changing its generation."""
+
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                row = session.get(DaemonStateRow, "daemon")
+                if row is None:
+                    session.commit()
+                    return False
+                payload = self._daemon_payload(row)
+                current = self._daemon_mode(payload)
+                if current is ExecutionMode.dry_run:
+                    session.commit()
+                    return False
+                payload[_DAEMON_PUBLICATION_MODE_KEY] = ExecutionMode.dry_run.value
+                payload.pop(_DAEMON_PUBLICATION_CLAIM_KEY, None)
+                row.state_json = json.dumps(payload, sort_keys=True)
+                row.updated_at = utc_now().isoformat()
+                session.commit()
+                return True
+            except Exception:
+                session.rollback()
+                raise
+
     def claim_daemon_instance(
-        self, instance_id: str, *, lifecycle: str = "starting", state: dict[str, object] | None = None
+        self,
+        instance_id: str,
+        *,
+        lifecycle: str = "starting",
+        state: dict[str, object] | None = None,
     ) -> dict[str, object]:
         if not instance_id or len(instance_id) > 128:
             raise ValueError("daemon instance identity is invalid")
+        if self._daemon_state_lifecycle(lifecycle) is None:
+            raise ValueError("daemon lifecycle is invalid")
         now = utc_now().isoformat()
+        claim_id = secrets.token_urlsafe(24)
         payload = dict(state or {})
         payload.pop("provider_session_id", None)
         payload.pop("private_home_path", None)
-        with Session(self.engine) as session, session.begin():
-            row = session.get(DaemonStateRow, "daemon")
-            if row is None:
-                row = DaemonStateRow(
-                    id="daemon", instance_id=instance_id, lifecycle=lifecycle,
-                    state_json=json.dumps(payload, sort_keys=True), updated_at=now,
-                )
-                session.add(row)
-            else:
-                row.instance_id = instance_id
-                row.lifecycle = lifecycle
-                row.state_json = json.dumps(payload, sort_keys=True)
-                row.updated_at = now
+        # These fields are Store-owned.  In particular, caller metadata must
+        # never select the mode or reuse a predecessor's claim generation.
+        for key in (
+            _DAEMON_PUBLICATION_MODE_KEY,
+            "execution_mode",
+            _DAEMON_PUBLICATION_CLAIM_KEY,
+            "claim_id",
+            "publication_mode",
+            "aggregate_publication_mode",
+            "daemon_publication_mode",
+            "aggregate_publication_authority",
+        ):
+            payload.pop(key, None)
+        with _daemon_admission_guard(self.path).locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(DaemonStateRow, "daemon")
+                    existing_mode = (
+                        self._daemon_mode(self._daemon_payload(row))
+                        if row is not None
+                        else None
+                    )
+                    selected_mode = resolve_execution_mode(
+                        existing_mode,
+                        execution_mode_for_dry_run(self._startup_dry_run),
+                    )
+                    payload[_DAEMON_PUBLICATION_MODE_KEY] = selected_mode.value
+                    payload[_DAEMON_PUBLICATION_CLAIM_KEY] = claim_id
+                    if row is None:
+                        row = DaemonStateRow(
+                            id="daemon",
+                            instance_id=instance_id,
+                            lifecycle=lifecycle,
+                            state_json=json.dumps(payload, sort_keys=True),
+                            updated_at=now,
+                        )
+                        session.add(row)
+                    else:
+                        row.instance_id = instance_id
+                        row.lifecycle = lifecycle
+                        row.state_json = json.dumps(payload, sort_keys=True)
+                        row.updated_at = now
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
         self._notify_change()
-        return self.get_daemon_state() or {"instance_id": instance_id, "lifecycle": lifecycle}
+        return self.get_daemon_state() or {
+            "instance_id": instance_id,
+            "lifecycle": lifecycle,
+            _DAEMON_PUBLICATION_MODE_KEY: selected_mode.value,
+            _DAEMON_PUBLICATION_CLAIM_KEY: claim_id,
+        }
 
     def set_daemon_lifecycle(
-        self, lifecycle: str, *, instance_id: str | None = None, state: dict[str, object] | None = None
+        self,
+        lifecycle: str,
+        *,
+        instance_id: str | None = None,
+        state: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        current = self.get_daemon_state() or {}
-        selected_instance = instance_id or str(current.get("instance_id") or "")
-        if not selected_instance:
-            selected_instance = "unknown"
-        payload = dict(current)
-        payload.update(state or {})
-        payload.pop("instance_id", None)
-        payload.pop("lifecycle", None)
-        payload.pop("updated_at", None)
-        now = utc_now().isoformat()
-        with Session(self.engine) as session, session.begin():
-            row = session.get(DaemonStateRow, "daemon")
-            if row is None:
-                row = DaemonStateRow(id="daemon")
-                session.add(row)
-            row.instance_id = selected_instance
-            row.lifecycle = lifecycle
-            row.state_json = json.dumps(payload, sort_keys=True)
-            row.updated_at = now
+        if self._daemon_state_lifecycle(lifecycle) is None:
+            raise ValueError("daemon lifecycle is invalid")
+        with _daemon_admission_guard(self.path).locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(DaemonStateRow, "daemon")
+                    current_payload = self._daemon_payload(row) if row is not None else {}
+                    current_instance = row.instance_id if row is not None else None
+                    if (
+                        row is not None
+                        and instance_id is not None
+                        and current_instance not in {None, instance_id}
+                    ):
+                        raise ValueError("daemon instance is not the current owner")
+                    selected_instance = instance_id or str(current_instance or "")
+                    if not selected_instance:
+                        selected_instance = "unknown"
+                    payload = dict(current_payload)
+                    updates = dict(state or {})
+                    updates.pop("instance_id", None)
+                    updates.pop("lifecycle", None)
+                    updates.pop("updated_at", None)
+                    updates.pop(_DAEMON_PUBLICATION_MODE_KEY, None)
+                    updates.pop("execution_mode", None)
+                    updates.pop(_DAEMON_PUBLICATION_CLAIM_KEY, None)
+                    updates.pop("claim_id", None)
+                    updates.pop("publication_mode", None)
+                    updates.pop("aggregate_publication_mode", None)
+                    updates.pop("daemon_publication_mode", None)
+                    updates.pop("aggregate_publication_authority", None)
+                    payload.update(updates)
+                    now = utc_now().isoformat()
+                    if row is None:
+                        row = DaemonStateRow(id="daemon")
+                        session.add(row)
+                    if lifecycle != "running":
+                        payload.pop(_DAEMON_PUBLICATION_CLAIM_KEY, None)
+                    row.instance_id = selected_instance
+                    row.lifecycle = lifecycle
+                    row.state_json = json.dumps(payload, sort_keys=True)
+                    row.updated_at = now
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
         self._notify_change()
         return self.get_daemon_state() or {}
+
+    def get_daemon_publication_authority(
+        self, instance_id: str | None = None
+    ) -> DaemonPublicationAuthority | None:
+        """Issue authority for the current running daemon claim, if valid."""
+
+        with _daemon_admission_guard(self.path).locked():
+            state = self.get_daemon_state()
+            if not isinstance(state, Mapping):
+                return None
+            requested_instance_id = instance_id
+            current_instance_id = state.get("instance_id")
+            lifecycle = state.get("lifecycle")
+            claim_id = state.get(_DAEMON_PUBLICATION_CLAIM_KEY)
+            mode = self._daemon_mode(state)
+            if (
+                not isinstance(current_instance_id, str)
+                or not current_instance_id
+                or (
+                    requested_instance_id is not None
+                    and requested_instance_id != current_instance_id
+                )
+                or lifecycle != "running"
+                or not isinstance(claim_id, str)
+                or not claim_id
+                or mode is not ExecutionMode.live
+            ):
+                return None
+            return DaemonPublicationAuthority(current_instance_id, claim_id, mode)
+
+    issue_daemon_publication_authority = get_daemon_publication_authority
+    acquire_daemon_publication_authority = get_daemon_publication_authority
+    daemon_publication_authority = get_daemon_publication_authority
+    get_aggregate_publication_authority = get_daemon_publication_authority
+    aggregate_publication_authority = get_daemon_publication_authority
+
+    def _daemon_publication_decision(
+        self,
+        authority: DaemonPublicationAuthority | None,
+        *,
+        action: str,
+        action_id: str,
+        target: str,
+        payload: Mapping[str, object] | None = None,
+        reason: str = "dry-run",
+    ) -> EffectDecision:
+        if not isinstance(authority, DaemonPublicationAuthority):
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        if authority.mode is None:
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        try:
+            selected_action = EffectActionKind(action)
+        except (TypeError, ValueError):
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        if selected_action not in _DAEMON_PUBLICATION_ACTIONS:
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        state = self.get_daemon_state()
+        if not isinstance(state, Mapping):
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        current_mode = self._daemon_mode(state)
+        if (
+            state.get("instance_id") != authority.instance_id
+            or state.get("lifecycle") != "running"
+            or state.get(_DAEMON_PUBLICATION_CLAIM_KEY) != authority.claim_id
+            or current_mode is None
+            or current_mode is not authority.mode
+        ):
+            return EffectDecision(EffectDecisionKind.proposal_required)
+        try:
+            return decide_effect(
+                current_mode,
+                action=selected_action,
+                action_id=action_id,
+                target=target,
+                payload=payload,
+                reason=reason,
+            )
+        except (TypeError, ValueError):
+            return EffectDecision(EffectDecisionKind.proposal_required)
+
+    @contextmanager
+    def daemon_publication_admission(
+        self,
+        authority: DaemonPublicationAuthority | None,
+        *,
+        action: str,
+        action_id: str,
+        target: str,
+        payload: Mapping[str, object] | None = None,
+        reason: str = "dry-run",
+    ) -> Iterator[EffectDecision]:
+        """Hold daemon claim admission across the provider operation."""
+
+        with _daemon_admission_guard(self.path).locked():
+            yield self._daemon_publication_decision(
+                authority,
+                action=action,
+                action_id=action_id,
+                target=target,
+                payload=payload,
+                reason=reason,
+            )
+
+    aggregate_publication_admission = daemon_publication_admission
+    daemon_effect_admission = daemon_publication_admission
+    aggregate_effect_admission = daemon_publication_admission
 
     # ------------------------------------------------------------------
     # Steward 2.0 normalized execution ledger

@@ -163,12 +163,14 @@ def _botocore_connection(
     return connection
 
 
-def _d1_transport_double(on_close=None) -> D1PublicationClient:
+def _d1_transport_double(
+    on_close=None, *, http_client: httpx.Client | None = None
+) -> D1PublicationClient:
     client = D1PublicationClient(
         account_id="a" * 32,
         database_id="00000000-0000-4000-8000-000000000000",
         token="test-token",
-        http_client=httpx.Client(),
+        http_client=http_client if http_client is not None else httpx.Client(),
     )
     original_close = client.close
 
@@ -734,8 +736,9 @@ def test_shutdown_revokes_publication_authority_before_worker_join(config):
 
 
 @pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("use_proxy", [False, True])
 def test_shutdown_pre_socket_connection_revokes_authority_before_join(
-    config, force: bool, monkeypatch
+    config, force: bool, use_proxy: bool, monkeypatch
 ):
     object.__setattr__(config, "dry_run", False)
     object.__setattr__(config, "shutdown_grace_seconds", 1.0)
@@ -777,12 +780,27 @@ def test_shutdown_pre_socket_connection_revokes_authority_before_join(
         def connect_unix_socket(self, **_kwargs: object) -> Stream:
             raise AssertionError("D1 must use TCP")
 
-    d1 = _d1_transport_double()
-    d1._client._transport._pool._network_backend = Backend()
+    if use_proxy:
+        direct = httpx.HTTPTransport(trust_env=False)
+        proxy = httpx.HTTPTransport(
+            proxy="http://proxy.example.test:8080", trust_env=False
+        )
+        proxy._pool._network_backend = Backend()
+        http_client = httpx.Client(
+            transport=direct,
+            mounts={"https://": proxy},
+            trust_env=False,
+        )
+        endpoint = "https://publication.example.test/query"
+    else:
+        http_client = httpx.Client(trust_env=False)
+        http_client._transport._pool._network_backend = Backend()
+        endpoint = "http://publication.example.test/query"
+    d1 = _d1_transport_double(http_client=http_client)
     monkeypatch.setattr(
         D1PublicationClient,
         "endpoint",
-        property(lambda _client: "http://publication.example.test/query"),
+        property(lambda _client: endpoint),
     )
     adapter = HttpxD1TransportAdapter(d1)
 
@@ -1992,6 +2010,379 @@ def test_httpx_transport_adapter_rejects_unsupported_connection_during_cancellat
             adapter.cancel()
         assert str(error.value) == "unsupported publication transport shape"
     finally:
+        d1.close()
+
+
+def test_httpx_transport_adapter_fences_existing_established_connection(
+    monkeypatch,
+):
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+
+    from coquic_steward.orchestration.transport import _HttpxD1HandoffStream
+
+    http_client = httpx.Client(transport=httpx.HTTPTransport(trust_env=False))
+    pool = http_client._transport._pool
+    origin = httpcore.Origin(b"http", b"publication.example.test", 80)
+    connection = pool.create_connection(origin)
+    left, right = socket.socketpair()
+    connection._connection = httpcore.HTTP11Connection(
+        origin=origin, stream=SyncStream(left)
+    )
+    pool._connections.append(connection)
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    try:
+        stream = connection._connection._network_stream
+        assert isinstance(stream, _HttpxD1HandoffStream)
+        adapter.cancel()
+        with pytest.raises(OSError):
+            stream.write(b"GET /after-revocation HTTP/1.1\r\n\r\n")
+        right.settimeout(1.0)
+        assert right.recv(1) == b""
+    finally:
+        adapter.close()
+        d1.close()
+        right.close()
+
+
+def test_httpx_transport_adapter_preserves_uncancelled_d1_publication(
+    monkeypatch,
+):
+    response_body = (
+        b'{"success":true,"errors":[],"result":[{"success":true,'
+        b'"errors":[],"results":[],"meta":{}}]}'
+    )
+    writes: list[bytes] = []
+
+    class Stream:
+        def __init__(self) -> None:
+            self._response = (
+                b"HTTP/1.1 200 OK\r\n"
+                + f"Content-Length: {len(response_body)}\r\n"
+                .encode()
+                + b"Content-Type: application/json\r\n\r\n"
+                + response_body
+            )
+
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, maximum: int, timeout: float | None = None) -> bytes:
+            response = self._response[:maximum]
+            self._response = self._response[maximum:]
+            return response
+
+        def close(self) -> None:
+            return None
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    http_client = httpx.Client(trust_env=False)
+    http_client._transport._pool._network_backend = Backend()
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    try:
+        result = d1._post([("SELECT 1", ())])
+        assert result == [
+            {"success": True, "errors": [], "results": [], "meta": {}}
+        ]
+        assert any(data.startswith(b"POST ") for data in writes)
+    finally:
+        adapter.close()
+        d1.close()
+
+
+def test_httpx_transport_adapter_fences_existing_established_proxy_connection(
+    monkeypatch,
+):
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+
+    from coquic_steward.orchestration.transport import _HttpxD1HandoffStream
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    pool = proxy._pool
+    origin = httpcore.Origin(b"https", b"publication.example.test", 443)
+    connection = pool.create_connection(origin)
+    left, right = socket.socketpair()
+    connection._connection = httpcore.HTTP11Connection(
+        origin=origin, stream=SyncStream(left)
+    )
+    connection._connected = True
+    pool._connections.append(connection)
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    try:
+        stream = connection._connection._network_stream
+        assert isinstance(stream, _HttpxD1HandoffStream)
+        adapter.cancel()
+        with pytest.raises(OSError):
+            stream.write(b"POST /after-revocation HTTP/1.1\r\n\r\n")
+        right.settimeout(1.0)
+        assert right.recv(1) == b""
+    finally:
+        adapter.close()
+        d1.close()
+        right.close()
+
+
+@pytest.mark.parametrize("endpoint_scheme", ["http", "https"])
+def test_httpx_transport_adapter_fences_selected_proxy_before_connect(
+    endpoint_scheme: str, monkeypatch
+):
+    import httpcore
+
+    started = threading.Event()
+    release = threading.Event()
+    stream_closed = threading.Event()
+    writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def start_tls(self, *_args: object, **_kwargs: object) -> "Stream":
+            return self
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            started.set()
+            release.wait(timeout=2.0)
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    proxy._pool._network_backend = Backend()
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={f"{endpoint_scheme}://": proxy},
+        trust_env=False,
+    )
+    d1 = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=http_client,
+    )
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(
+            lambda _client: f"{endpoint_scheme}://publication.example.test/query"
+        ),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+    assert adapter._pool is proxy._pool
+    assert type(adapter._pool) is httpcore.HTTPProxy
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1.0)
+    adapter.cancel()
+    adapter.cancel()
+    release.set()
+    worker.join(timeout=1.0)
+
+    try:
+        assert not worker.is_alive()
+        assert stream_closed.wait(timeout=1.0)
+        assert writes == []
+        assert errors
+        assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
+    finally:
+        release.set()
+        adapter.close()
+        d1.close()
+
+
+@pytest.mark.parametrize("selected_route", ["mock", "custom-pool", "socks"])
+def test_httpx_transport_adapter_rejects_unsupported_selected_route(
+    monkeypatch, selected_route: str
+):
+    import httpcore
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    if selected_route == "mock":
+        selected = httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"ok": True})
+        )
+    elif selected_route == "custom-pool":
+        class CustomPool(httpcore.ConnectionPool):
+            pass
+
+        selected = httpx.HTTPTransport(trust_env=False)
+        selected._pool = CustomPool()
+    else:
+        selected = httpx.HTTPTransport(trust_env=False)
+        selected._pool = object.__new__(httpcore.SOCKSProxy)
+        selected._pool.close = lambda: None
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": selected},
+        trust_env=False,
+    )
+    d1 = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=http_client,
+    )
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+
+    try:
+        with pytest.raises(PublicationTransportSetupError) as error:
+            HttpxD1TransportAdapter(d1)
+        assert str(error.value) == "unsupported publication transport shape"
+    finally:
+        d1.close()
+        http_client.close()
+
+
+def test_httpx_transport_adapter_fences_selected_proxy_tls_before_d1_write(
+    monkeypatch,
+):
+    tls_started = threading.Event()
+    release_tls = threading.Event()
+    stream_closed = threading.Event()
+    writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def __init__(self) -> None:
+            self._response = b"HTTP/1.1 200 Connection Established\r\n\r\n"
+
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, maximum: int, timeout: float | None = None) -> bytes:
+            response = self._response[:maximum]
+            self._response = self._response[maximum:]
+            return response
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def start_tls(self, *_args: object, **_kwargs: object) -> "Stream":
+            tls_started.set()
+            release_tls.wait(timeout=2.0)
+            return self
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    proxy._pool._network_backend = Backend()
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    d1 = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=http_client,
+    )
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    assert tls_started.wait(timeout=1.0)
+    adapter.cancel()
+    release_tls.set()
+    worker.join(timeout=1.0)
+
+    try:
+        assert not worker.is_alive()
+        assert stream_closed.is_set()
+        assert errors
+        assert isinstance(errors[0], D1Error)
+        assert errors[0].code.value == "network"
+        assert not any(b"POST " in data for data in writes)
+    finally:
+        release_tls.set()
+        adapter.close()
         d1.close()
 
 

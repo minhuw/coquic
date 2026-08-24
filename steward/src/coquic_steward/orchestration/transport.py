@@ -7,7 +7,14 @@ from typing import Any
 
 import httpx
 from botocore.awsrequest import AWSHTTPConnection, AWSHTTPSConnection
-from httpcore import ConnectionPool, HTTPConnection
+from httpcore import (
+    ConnectionPool,
+    HTTP11Connection,
+    HTTP2Connection,
+    HTTPConnection,
+    HTTPProxy,
+)
+from httpcore._sync.http_proxy import ForwardHTTPConnection, TunnelHTTPConnection
 
 from ..publication.d1 import D1PublicationClient
 from ..publication.r2 import R2Client
@@ -51,7 +58,9 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
 
     def __init__(self, client: R2Client) -> None:
         self._lock = threading.RLock()
+        self._cleanup_lock = threading.Lock()
         self._cancelled = False
+        self._owner_closed = False
         self._connections: dict[int, object] = {}
         self._connection_methods: dict[int, object] = {}
         self._managers: dict[int, object] = {}
@@ -211,18 +220,34 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             pass
 
     def cancel(self) -> None:
-        with self._lock:
-            self._cancelled = True
-            connections = tuple(self._connections.values())
-        for connection in connections:
-            self._abort_connection(connection)
+        with self._cleanup_lock:
+            with self._lock:
+                if self._cancelled:
+                    return
+                self._cancelled = True
+                connections = tuple(self._connections.values())
+            for connection in connections:
+                self._abort_connection(connection)
 
     def close(self) -> None:
-        self.cancel()
-        try:
-            self._provider_client.close()
-        except Exception:
-            pass
+        with self._cleanup_lock:
+            if self._owner_closed:
+                return
+            try:
+                with self._lock:
+                    if self._cancelled:
+                        connections = ()
+                    else:
+                        self._cancelled = True
+                        connections = tuple(self._connections.values())
+                for connection in connections:
+                    self._abort_connection(connection)
+            finally:
+                try:
+                    self._provider_client.close()
+                except Exception:
+                    pass
+                self._owner_closed = True
 
 
 class _HttpxD1HandoffStream:
@@ -231,7 +256,7 @@ class _HttpxD1HandoffStream:
     def __init__(
         self,
         adapter: "HttpxD1TransportAdapter",
-        connection: HTTPConnection,
+        connection: object,
         stream: object,
     ) -> None:
         self._adapter = adapter
@@ -239,6 +264,7 @@ class _HttpxD1HandoffStream:
         self._stream = stream
         self._closed = False
         self._write_started = False
+        self._active_operations = 0
 
     def _raise_if_cancelled(self) -> None:
         with self._adapter._lock:
@@ -255,6 +281,25 @@ class _HttpxD1HandoffStream:
             # normal transport error.
             if not write_started:
                 raise _PublicationTransportCancelled()
+            raise OSError("publication transport cancelled")
+
+    def _begin_operation(self, *, writes: bool = False) -> None:
+        with self._adapter._lock:
+            cancelled = self._adapter._cancelled
+            if not cancelled:
+                self._active_operations += 1
+                if writes:
+                    # Record the handoff's first request write before releasing
+                    # the lock.  Cancellation after this point follows the
+                    # established socket shutdown path instead of racing the
+                    # handoff fence.
+                    self._write_started = True
+        if cancelled:
+            self._raise_if_cancelled()
+
+    def _end_operation(self) -> None:
+        with self._adapter._lock:
+            self._active_operations = max(0, self._active_operations - 1)
 
     def close(self) -> None:
         with self._adapter._lock:
@@ -267,41 +312,49 @@ class _HttpxD1HandoffStream:
         self._adapter._close_stream(stream)
 
     def get_extra_info(self, info: str) -> object:
-        self._raise_if_cancelled()
-        value = self._stream.get_extra_info(info)
-        # Cancellation may close the stream while httpcore is inspecting it,
-        # before HTTPConnection has assigned it to its protocol connection.
-        self._raise_if_cancelled()
-        return value
+        self._begin_operation()
+        try:
+            value = self._stream.get_extra_info(info)
+            # Cancellation may close the stream while httpcore is inspecting
+            # it, before HTTPConnection has assigned it to its protocol
+            # connection.
+            self._raise_if_cancelled()
+            return value
+        finally:
+            self._end_operation()
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        self._raise_if_cancelled()
-        return self._stream.read(max_bytes, timeout=timeout)
+        self._begin_operation()
+        try:
+            value = self._stream.read(max_bytes, timeout=timeout)
+            self._raise_if_cancelled()
+            return value
+        finally:
+            self._end_operation()
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        with self._adapter._lock:
-            cancelled = self._adapter._cancelled
-            if not cancelled:
-                # Record the handoff's first request write before releasing the
-                # lock.  Cancellation after this point follows the established
-                # socket shutdown path instead of racing the handoff fence.
-                self._write_started = True
-        if cancelled:
+        self._begin_operation(writes=True)
+        try:
+            self._stream.write(buffer, timeout=timeout)
             self._raise_if_cancelled()
-        self._stream.write(buffer, timeout=timeout)
+        finally:
+            self._end_operation()
 
     def start_tls(self, *args: object, **kwargs: object) -> object:
-        self._raise_if_cancelled()
-        stream = self._stream.start_tls(*args, **kwargs)
-        with self._adapter._lock:
-            cancelled = self._closed or self._adapter._cancelled
-            if not cancelled:
-                self._stream = stream
-        if cancelled:
-            self._adapter._close_stream(stream)
-            self.close()
-            raise _PublicationTransportCancelled()
-        return self
+        self._begin_operation()
+        try:
+            stream = self._stream.start_tls(*args, **kwargs)
+            with self._adapter._lock:
+                cancelled = self._closed or self._adapter._cancelled
+                if not cancelled:
+                    self._stream = stream
+            if cancelled:
+                self._adapter._close_stream(stream)
+                self.close()
+                self._raise_if_cancelled()
+            return self
+        finally:
+            self._end_operation()
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._stream, name)
@@ -335,7 +388,7 @@ class _HttpxD1NetworkBackend:
 
 
 class HttpxD1TransportAdapter(DaemonCancellation):
-    """Cancel httpx 0.28.1/httpcore 1.0.9 through its observed pool shape."""
+    """Cancel the selected httpx 0.28.1/httpcore 1.0.9 route."""
 
     def __init__(self, client: D1PublicationClient) -> None:
         self._lock = threading.RLock()
@@ -344,22 +397,40 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         self._pending_streams: dict[int, _HttpxD1HandoffStream] = {}
         self._connection_methods: dict[int, object] = {}
         self._pool_methods: dict[int, object] = {}
+        self._proxy_connections: dict[int, HTTPConnection] = {}
+        self._cleanup_lock = threading.Lock()
+        self._owner_closed = False
         try:
             http_client = client._client
             if not isinstance(http_client, httpx.Client):
                 raise PublicationTransportSetupError()
-            transport = http_client._transport
-            if not isinstance(transport, httpx.HTTPTransport):
+            endpoint = httpx.URL(client.endpoint)
+            try:
+                select_transport = http_client._transport_for_url
+            except Exception:
+                raise PublicationTransportSetupError() from None
+            if not isinstance(select_transport, Callable):
+                raise PublicationTransportSetupError()
+            transport = select_transport(endpoint)
+            if type(transport) is not httpx.HTTPTransport:
+                raise PublicationTransportSetupError()
+            if endpoint.scheme not in ("http", "https"):
                 raise PublicationTransportSetupError()
             pool = transport._pool
-            if not isinstance(pool, ConnectionPool):
+            if type(pool) not in (ConnectionPool, HTTPProxy):
                 raise PublicationTransportSetupError()
             if not isinstance(pool.create_connection, Callable):
                 raise PublicationTransportSetupError()
             connections = tuple(pool.connections)
-            client.close
+            if not isinstance(client.close, Callable):
+                raise PublicationTransportSetupError()
+
             self._owner = client
+            self._endpoint = endpoint
+            self._transport = transport
             self._pool = pool
+            for connection in connections:
+                self._validate_connection_shape(connection)
             for connection in connections:
                 self._install_connection(connection)
                 self._track_connection(connection)
@@ -370,24 +441,179 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             raise PublicationTransportSetupError() from None
 
     @staticmethod
-    def _connection_socket(connection: object) -> socket.socket | None:
-        """Return an established socket, or None for a valid connecting state."""
-
-        if not isinstance(connection, HTTPConnection):
+    def _validate_protocol(protocol: object) -> None:
+        if type(protocol) not in (HTTP11Connection, HTTP2Connection):
             raise PublicationTransportSetupError()
         try:
-            http_connection = connection._connection
+            stream = protocol._network_stream
         except Exception:
             raise PublicationTransportSetupError() from None
-        if http_connection is None:
+        if isinstance(stream, _HttpxD1HandoffStream):
+            return
+        try:
+            raw_socket = stream._sock
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if not isinstance(raw_socket, socket.socket):
+            raise PublicationTransportSetupError()
+
+    @classmethod
+    def _validate_http_connection(
+        cls, connection: object
+    ) -> tuple[object, object]:
+        if type(connection) is not HTTPConnection:
+            raise PublicationTransportSetupError()
+        try:
+            current = connection._connection
+            connect = connection._connect
+            backend = connection._network_backend
+            uds = connection._uds
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if current is not None:
+            cls._validate_protocol(current)
+        if not isinstance(connect, Callable):
+            raise PublicationTransportSetupError()
+        if not isinstance(getattr(backend, "connect_tcp", None), Callable):
+            raise PublicationTransportSetupError()
+        if uds is not None and not isinstance(
+            getattr(backend, "connect_unix_socket", None), Callable
+        ):
+            raise PublicationTransportSetupError()
+        return connect, backend
+
+    def _validate_connection_shape(self, connection: object) -> HTTPConnection | None:
+        if type(self._pool) is ConnectionPool:
+            if type(connection) is not HTTPConnection:
+                raise PublicationTransportSetupError()
+            self._validate_http_connection(connection)
+            return connection
+        if type(self._pool) is not HTTPProxy:
+            raise PublicationTransportSetupError()
+        expected = (
+            TunnelHTTPConnection if self._endpoint.scheme == "https" else ForwardHTTPConnection
+        )
+        if type(connection) is not expected:
+            raise PublicationTransportSetupError()
+        if type(connection) is ForwardHTTPConnection:
+            try:
+                nested = connection._connection
+                close = connection.close
+            except Exception:
+                raise PublicationTransportSetupError() from None
+            if not isinstance(close, Callable):
+                raise PublicationTransportSetupError()
+            self._validate_http_connection(nested)
+            return nested
+        try:
+            current = connection._connection
+            connected = connection._connected
+            close = connection.close
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if not isinstance(connected, bool) or not isinstance(close, Callable):
+            raise PublicationTransportSetupError()
+        if type(current) is HTTPConnection:
+            self._validate_http_connection(current)
+            if connected:
+                raise PublicationTransportSetupError()
+            return current
+        if type(current) in (HTTP11Connection, HTTP2Connection):
+            self._validate_protocol(current)
+            if not connected:
+                raise PublicationTransportSetupError()
+            return None
+        raise PublicationTransportSetupError()
+
+    @classmethod
+    def _connection_socket(cls, connection: object) -> socket.socket | None:
+        """Return an established socket, or None for a valid connecting state."""
+
+        if type(connection) is HTTPConnection:
+            try:
+                http_connection = connection._connection
+            except Exception:
+                raise PublicationTransportSetupError() from None
+            if http_connection is None:
+                return None
+        elif type(connection) in (HTTP11Connection, HTTP2Connection):
+            http_connection = connection
+        else:
+            raise PublicationTransportSetupError()
+        cls._validate_protocol(http_connection)
+        try:
+            stream = http_connection._network_stream
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if isinstance(stream, _HttpxD1HandoffStream):
             return None
         try:
-            raw_socket = http_connection._network_stream._sock
+            raw_socket = stream._sock
         except Exception:
             raise PublicationTransportSetupError() from None
         if not isinstance(raw_socket, socket.socket):
             raise PublicationTransportSetupError()
         return raw_socket
+
+    def _connection_parts(self, connection: object) -> tuple[object, ...]:
+        if type(connection) is HTTPConnection:
+            if type(self._pool) is ConnectionPool:
+                self._validate_http_connection(connection)
+                return (connection,)
+            if type(self._pool) is not HTTPProxy:
+                raise PublicationTransportSetupError()
+            with self._lock:
+                nested_ids = {
+                    id(nested) for nested in self._proxy_connections.values()
+                }
+            if id(connection) not in nested_ids:
+                raise PublicationTransportSetupError()
+            self._validate_http_connection(connection)
+            return (connection,)
+        if type(self._pool) is not HTTPProxy or type(connection) not in (
+            ForwardHTTPConnection,
+            TunnelHTTPConnection,
+        ):
+            raise PublicationTransportSetupError()
+        expected = (
+            TunnelHTTPConnection if self._endpoint.scheme == "https" else ForwardHTTPConnection
+        )
+        if type(connection) is not expected:
+            raise PublicationTransportSetupError()
+        with self._lock:
+            nested = self._proxy_connections.get(id(connection))
+        try:
+            current = connection._connection
+            connected = connection._connected if type(connection) is TunnelHTTPConnection else None
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        parts: list[object] = []
+        if type(connection) is ForwardHTTPConnection:
+            if type(current) is not HTTPConnection:
+                raise PublicationTransportSetupError()
+            self._validate_http_connection(current)
+            if nested is not None and nested is not current:
+                raise PublicationTransportSetupError()
+            nested = current
+        elif type(current) is HTTPConnection:
+            self._validate_http_connection(current)
+            if not isinstance(connected, bool) or connected:
+                raise PublicationTransportSetupError()
+            if nested is not None and nested is not current:
+                raise PublicationTransportSetupError()
+            nested = current
+        elif type(current) in (HTTP11Connection, HTTP2Connection):
+            self._validate_protocol(current)
+            if not isinstance(connected, bool) or not connected:
+                raise PublicationTransportSetupError()
+        else:
+            raise PublicationTransportSetupError()
+        if nested is not None:
+            self._validate_http_connection(nested)
+            parts.append(nested)
+        if all(id(part) != id(current) for part in parts):
+            parts.append(current)
+        return tuple(parts)
 
     def _is_cancelled(self) -> bool:
         with self._lock:
@@ -406,7 +632,11 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             pass
 
     def _register_stream(
-        self, connection: HTTPConnection, stream: object
+        self,
+        connection: object,
+        stream: object,
+        *,
+        write_started: bool = False,
     ) -> _HttpxD1HandoffStream:
         handoff = _HttpxD1HandoffStream(self, connection, stream)
         with self._lock:
@@ -414,11 +644,42 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 rejected = True
             else:
                 rejected = False
+                handoff._write_started = write_started
                 self._pending_streams[id(connection)] = handoff
         if rejected:
             handoff.close()
             raise _PublicationTransportCancelled()
         return handoff
+
+    def _attach_protocol_stream(
+        self, protocol: object, connection: object
+    ) -> None:
+        self._validate_protocol(protocol)
+        try:
+            stream = protocol._network_stream
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if isinstance(stream, _HttpxD1HandoffStream):
+            if stream._adapter is not self:
+                raise PublicationTransportSetupError()
+            return
+        with self._lock:
+            handoff = next(
+                (
+                    candidate
+                    for candidate in self._pending_streams.values()
+                    if candidate._stream is stream and not candidate._closed
+                ),
+                None,
+            )
+        if handoff is None:
+            handoff = self._register_stream(
+                connection, stream, write_started=True
+            )
+        else:
+            with self._lock:
+                handoff._write_started = True
+        protocol._network_stream = handoff
 
     def _install_pool(self, pool: ConnectionPool) -> None:
         pool_id = id(pool)
@@ -427,6 +688,8 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 return
         try:
             create_connection = pool.create_connection
+            if not isinstance(create_connection, Callable):
+                raise PublicationTransportSetupError()
 
             def tracked_create_connection(origin: object) -> object:
                 connection = create_connection(origin)
@@ -449,24 +712,16 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         with self._lock:
             self._pool_methods[pool_id] = create_connection
 
-    def _install_connection(self, connection: object) -> None:
+    def _install_http_connection(self, connection: HTTPConnection) -> None:
         connection_id = id(connection)
         with self._lock:
             if connection_id in self._connection_methods:
                 return
         try:
-            if not isinstance(connection, HTTPConnection):
-                raise PublicationTransportSetupError()
-            self._connection_socket(connection)
-            connect = connection._connect
-            backend = connection._network_backend
-            connect_tcp = getattr(backend, "connect_tcp", None)
-            if not isinstance(connect, Callable) or not isinstance(connect_tcp, Callable):
-                raise PublicationTransportSetupError()
-            if getattr(connection, "_uds", None) is not None and not isinstance(
-                getattr(backend, "connect_unix_socket", None), Callable
-            ):
-                raise PublicationTransportSetupError()
+            connect, backend = self._validate_http_connection(connection)
+            current = connection._connection
+            if current is not None:
+                self._attach_protocol_stream(current, connection)
             connection._network_backend = _HttpxD1NetworkBackend(
                 self,
                 connection,
@@ -489,6 +744,32 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         with self._lock:
             self._connection_methods[connection_id] = connect
 
+    def _install_connection(self, connection: object) -> None:
+        connection_id = id(connection)
+        with self._lock:
+            if connection_id in self._connection_methods:
+                return
+        try:
+            nested = self._validate_connection_shape(connection)
+            if nested is not None:
+                self._install_http_connection(nested)
+                if type(connection) is not HTTPConnection:
+                    with self._lock:
+                        self._proxy_connections[connection_id] = nested
+            if type(connection) is not HTTPConnection:
+                current = connection._connection
+                if type(current) in (HTTP11Connection, HTTP2Connection):
+                    self._attach_protocol_stream(
+                        current, nested if nested is not None else connection
+                    )
+                close = connection.close
+                with self._lock:
+                    self._connection_methods[connection_id] = close
+        except PublicationTransportSetupError:
+            raise
+        except Exception:
+            raise PublicationTransportSetupError() from None
+
     def _track_connection(self, connection: object) -> bool:
         with self._lock:
             if self._cancelled:
@@ -498,11 +779,23 @@ class HttpxD1TransportAdapter(DaemonCancellation):
 
     def _abort_connection(self, connection: object) -> None:
         with self._lock:
-            pending = self._pending_streams.get(id(connection))
-        if pending is not None:
-            pending.close()
-        raw_socket = self._connection_socket(connection)
-        if raw_socket is not None:
+            pending_ids = [id(connection)]
+            nested = self._proxy_connections.get(id(connection))
+            if nested is not None:
+                pending_ids.append(id(nested))
+        for connection_id in pending_ids:
+            with self._lock:
+                pending = self._pending_streams.get(connection_id)
+            if pending is not None:
+                pending.close()
+
+        parts = self._connection_parts(connection)
+        sockets: list[socket.socket] = []
+        for part in parts:
+            raw_socket = self._connection_socket(part)
+            if raw_socket is not None and all(id(raw_socket) != id(existing) for existing in sockets):
+                sockets.append(raw_socket)
+        for raw_socket in sockets:
             try:
                 raw_socket.shutdown(socket.SHUT_RDWR)
             except Exception:
@@ -516,7 +809,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         except Exception:
             pass
 
-    def cancel(self) -> None:
+    def _cancel(self) -> None:
         with self._lock:
             if self._cancelled:
                 return
@@ -528,24 +821,44 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             pending_streams = tuple(self._pending_streams.values())
         for stream in pending_streams:
             stream.close()
+
+        pool_error = False
         try:
-            connections += tuple(self._pool.connections)
+            pool_connections = tuple(self._pool.connections)
         except Exception:
-            raise PublicationTransportSetupError() from None
+            pool_connections = ()
+            pool_error = True
+        connections += pool_connections
         seen: set[int] = set()
+        setup_error = pool_error
         for connection in connections:
             connection_id = id(connection)
             if connection_id in seen:
                 continue
             seen.add(connection_id)
-            self._abort_connection(connection)
+            try:
+                self._abort_connection(connection)
+            except PublicationTransportSetupError:
+                setup_error = True
+        if setup_error:
+            raise PublicationTransportSetupError()
+
+    def cancel(self) -> None:
+        with self._cleanup_lock:
+            self._cancel()
 
     def close(self) -> None:
-        self.cancel()
-        try:
-            self._owner.close()
-        except Exception:
-            pass
+        with self._cleanup_lock:
+            if self._owner_closed:
+                return
+            try:
+                self._cancel()
+            finally:
+                try:
+                    self._owner.close()
+                except Exception:
+                    pass
+                self._owner_closed = True
 
 
 class _PublicationTransportCancellation(DaemonCancellation):

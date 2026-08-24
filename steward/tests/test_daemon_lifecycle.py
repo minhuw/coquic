@@ -831,6 +831,84 @@ def test_shutdown_pre_socket_connection_revokes_authority_before_join(
     assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
 
 
+def test_shutdown_reports_stopping_when_authority_revocation_expires(config):
+    object.__setattr__(config, "dry_run", False)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    store.claim_daemon_instance(
+        daemon.runtime.instance_id,
+        lifecycle=DaemonLifecycleState.running.value,
+    )
+    lock = sqlite3.connect(store.path, isolation_level=None)
+    lock.execute("BEGIN IMMEDIATE")
+    shutdown_done = threading.Event()
+    result: list[object] = []
+
+    def shutdown() -> None:
+        result.append(daemon.shutdown(force=True))
+        shutdown_done.set()
+
+    worker = threading.Thread(target=shutdown, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    try:
+        assert shutdown_done.wait(timeout=1.75)
+        assert time.monotonic() - started < 1.75
+        assert result
+        assert result[0].state is DaemonLifecycleState.stopping
+        state = store.get_daemon_state()
+        assert state is not None
+        assert state["lifecycle"] == DaemonLifecycleState.running.value
+        assert state["publication_claim_id"]
+    finally:
+        lock.rollback()
+        lock.close()
+        worker.join(timeout=1.0)
+    assert not worker.is_alive()
+
+
+def test_shutdown_bounds_control_loop_lock_drain(config):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_control_loop_lock() -> None:
+        with daemon._control_loop_lock:
+            lock_entered.set()
+            release_lock.wait(timeout=3.0)
+
+    control_loop_writer = threading.Thread(
+        target=hold_control_loop_lock,
+        daemon=True,
+    )
+    daemon._control_loop_thread = control_loop_writer
+    control_loop_writer.start()
+    assert lock_entered.wait(timeout=1.0)
+
+    result: list[object] = []
+    shutdown_done = threading.Event()
+
+    def shutdown() -> None:
+        result.append(daemon.shutdown(force=True))
+        shutdown_done.set()
+
+    shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+    started = time.monotonic()
+    shutdown_thread.start()
+    try:
+        assert shutdown_done.wait(timeout=1.75)
+        assert time.monotonic() - started < 1.75
+        assert result
+        assert result[0].state is DaemonLifecycleState.stopping
+    finally:
+        release_lock.set()
+        control_loop_writer.join(timeout=1.0)
+        shutdown_thread.join(timeout=1.0)
+    assert not control_loop_writer.is_alive()
+    assert not shutdown_thread.is_alive()
+
+
 def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
@@ -1977,6 +2055,68 @@ def test_httpx_transport_adapter_fences_pre_socket_connection_after_cancellation
     try:
         assert not worker.is_alive()
         assert stream_closed.wait(timeout=1.0)
+        assert writes == []
+        assert errors
+        assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
+    finally:
+        adapter.close()
+        d1.close()
+
+
+def test_httpx_transport_adapter_fences_post_connect_stream_handoff(monkeypatch):
+    extra_info_entered = threading.Event()
+    release_extra_info = threading.Event()
+    stream_closed = threading.Event()
+    writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            extra_info_entered.set()
+            release_extra_info.wait(timeout=2.0)
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    d1 = _d1_transport_double()
+    d1._client._transport._pool._network_backend = Backend()
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    assert extra_info_entered.wait(timeout=1.0)
+    adapter.cancel()
+    assert stream_closed.is_set()
+    release_extra_info.set()
+    worker.join(timeout=1.0)
+
+    try:
+        assert not worker.is_alive()
         assert writes == []
         assert errors
         assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)

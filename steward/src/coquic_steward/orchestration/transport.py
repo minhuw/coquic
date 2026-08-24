@@ -225,6 +225,76 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             pass
 
 
+class _HttpxD1HandoffStream:
+    """Keep a connected stream fenced until httpcore finishes handoff."""
+
+    def __init__(
+        self,
+        adapter: "HttpxD1TransportAdapter",
+        connection: HTTPConnection,
+        stream: object,
+    ) -> None:
+        self._adapter = adapter
+        self._connection = connection
+        self._stream = stream
+        self._closed = False
+
+    def _raise_if_cancelled(self) -> None:
+        with self._adapter._lock:
+            cancelled = self._adapter._cancelled
+        if cancelled:
+            self.close()
+            # Once httpcore has installed its protocol connection, preserve
+            # established-socket behavior: the closed socket is translated by
+            # httpcore/httpx into the provider's normal transport error.  The
+            # internal cancellation signal is only needed while handoff is
+            # still in progress and no protocol connection owns this stream.
+            if getattr(self._connection, "_connection", None) is None:
+                raise _PublicationTransportCancelled()
+
+    def close(self) -> None:
+        with self._adapter._lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream = self._stream
+            if self._adapter._pending_streams.get(id(self._connection)) is self:
+                self._adapter._pending_streams.pop(id(self._connection), None)
+        self._adapter._close_stream(stream)
+
+    def get_extra_info(self, info: str) -> object:
+        self._raise_if_cancelled()
+        value = self._stream.get_extra_info(info)
+        # Cancellation may close the stream while httpcore is inspecting it,
+        # before HTTPConnection has assigned it to its protocol connection.
+        self._raise_if_cancelled()
+        return value
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        self._raise_if_cancelled()
+        return self._stream.read(max_bytes, timeout=timeout)
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._raise_if_cancelled()
+        self._stream.write(buffer, timeout=timeout)
+
+    def start_tls(self, *args: object, **kwargs: object) -> object:
+        self._raise_if_cancelled()
+        stream = self._stream.start_tls(*args, **kwargs)
+        with self._adapter._lock:
+            cancelled = self._closed or self._adapter._cancelled
+            if not cancelled:
+                self._stream = stream
+        if cancelled:
+            self._adapter._close_stream(stream)
+            self.close()
+            raise _PublicationTransportCancelled()
+        return self
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
 class _HttpxD1NetworkBackend:
     """Fence one HTTPConnection's stream handoff after cancellation."""
 
@@ -241,20 +311,12 @@ class _HttpxD1NetworkBackend:
     def connect_tcp(self, *args: object, **kwargs: object) -> object:
         self._adapter._raise_if_cancelled(self._connection)
         stream = self._backend.connect_tcp(*args, **kwargs)
-        if self._adapter._is_cancelled():
-            self._adapter._close_stream(stream)
-            self._adapter._abort_connection(self._connection)
-            raise _PublicationTransportCancelled()
-        return stream
+        return self._adapter._register_stream(self._connection, stream)
 
     def connect_unix_socket(self, *args: object, **kwargs: object) -> object:
         self._adapter._raise_if_cancelled(self._connection)
         stream = self._backend.connect_unix_socket(*args, **kwargs)
-        if self._adapter._is_cancelled():
-            self._adapter._close_stream(stream)
-            self._adapter._abort_connection(self._connection)
-            raise _PublicationTransportCancelled()
-        return stream
+        return self._adapter._register_stream(self._connection, stream)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._backend, name)
@@ -267,6 +329,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         self._lock = threading.RLock()
         self._cancelled = False
         self._connections: dict[int, object] = {}
+        self._pending_streams: dict[int, _HttpxD1HandoffStream] = {}
         self._connection_methods: dict[int, object] = {}
         self._pool_methods: dict[int, object] = {}
         try:
@@ -330,6 +393,21 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         except Exception:
             pass
 
+    def _register_stream(
+        self, connection: HTTPConnection, stream: object
+    ) -> _HttpxD1HandoffStream:
+        handoff = _HttpxD1HandoffStream(self, connection, stream)
+        with self._lock:
+            if self._cancelled:
+                rejected = True
+            else:
+                rejected = False
+                self._pending_streams[id(connection)] = handoff
+        if rejected:
+            handoff.close()
+            raise _PublicationTransportCancelled()
+        return handoff
+
     def _install_pool(self, pool: ConnectionPool) -> None:
         pool_id = id(pool)
         with self._lock:
@@ -386,10 +464,9 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             def guarded_connect(request: object) -> object:
                 self._raise_if_cancelled(connection)
                 stream = connect(request)
-                if self._is_cancelled():
-                    self._close_stream(stream)
-                    self._abort_connection(connection)
-                    raise _PublicationTransportCancelled()
+                if not isinstance(stream, _HttpxD1HandoffStream):
+                    stream = self._register_stream(connection, stream)
+                stream._raise_if_cancelled()
                 return stream
 
             connection._connect = guarded_connect
@@ -407,9 +484,12 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             self._connections[id(connection)] = connection
             return True
 
-    @classmethod
-    def _abort_connection(cls, connection: object) -> None:
-        raw_socket = cls._connection_socket(connection)
+    def _abort_connection(self, connection: object) -> None:
+        with self._lock:
+            pending = self._pending_streams.get(id(connection))
+        if pending is not None:
+            pending.close()
+        raw_socket = self._connection_socket(connection)
         if raw_socket is not None:
             try:
                 raw_socket.shutdown(socket.SHUT_RDWR)
@@ -428,8 +508,14 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         with self._lock:
             if self._cancelled:
                 return
+            # Set the state before inspecting any private connection shape.  A
+            # stream returned by connect can otherwise become reachable only
+            # after cancellation has already started.
             self._cancelled = True
             connections = tuple(self._connections.values())
+            pending_streams = tuple(self._pending_streams.values())
+        for stream in pending_streams:
+            stream.close()
         try:
             connections += tuple(self._pool.connections)
         except Exception:

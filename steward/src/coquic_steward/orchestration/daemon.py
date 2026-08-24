@@ -48,7 +48,11 @@ from ..core.models import (
     coerce_execution_mode,
 )
 from ..execution.executor import StewardExecutor
-from ..storage.sqlite import DaemonPublicationAuthority, TaskLedgerOwnershipError
+from ..storage.sqlite import (
+    DaemonPublicationAuthority,
+    DaemonPublicationRevocationResult,
+    TaskLedgerOwnershipError,
+)
 from ..execution.container import bind_deployment_identity
 from ..execution.session import (
     FreshPlannerSession,
@@ -1155,10 +1159,31 @@ class StewardDaemon:
         return result
 
     def _drain_control_loop_once(
-        self, *, full_audit: bool = False, publish: bool = True
+        self,
+        *,
+        full_audit: bool = False,
+        publish: bool = True,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         ledger = self._control_loop_ledger
-        with self._control_loop_lock:
+        if deadline is None:
+            acquired = self._control_loop_lock.acquire()
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "materialized": 0,
+                    "conflicts": 0,
+                    "deadline_exhausted": True,
+                }
+            acquired = self._control_loop_lock.acquire(timeout=remaining)
+        if not acquired:
+            return {
+                "materialized": 0,
+                "conflicts": 0,
+                "deadline_exhausted": True,
+            }
+        try:
             try:
                 result = self._control_loop_archive.reconcile(
                     ledger,
@@ -1209,6 +1234,8 @@ class StewardDaemon:
                         "rowCount": len(ledger.list_overhead_usage()),
                     }
             return result
+        finally:
+            self._control_loop_lock.release()
 
     def _start_control_loop_writer(self) -> None:
         with self._control_loop_lock:
@@ -1250,21 +1277,21 @@ class StewardDaemon:
             value = 1.0
         return max(0.05, min(value, 5.0))
 
-    def _stop_control_loop_writer(self, *, deadline: float | None = None) -> None:
+    def _stop_control_loop_writer(self, *, deadline: float | None = None) -> bool:
         self._control_loop_stop.set()
         self._control_loop_wakeup.set()
         thread = self._control_loop_thread
-        if thread is not None and thread is not threading.current_thread():
+        if thread is None:
+            return True
+        if thread is not threading.current_thread():
             timeout = 2.0
             if deadline is not None:
                 timeout = max(0.0, deadline - time.monotonic())
             thread.join(timeout=timeout)
-        if (
-            thread is not None
-            and not thread.is_alive()
-            and self._control_loop_thread is thread
-        ):
+        stopped = not thread.is_alive()
+        if stopped and self._control_loop_thread is thread:
             self._control_loop_thread = None
+        return stopped
 
     def _install_publication_change_callback(self) -> None:
         """Wake the publication worker after every committed local mutation."""
@@ -4253,12 +4280,13 @@ class StewardDaemon:
 
     def _enter_stopping(
         self, *, force: bool, deadline: float | None = None
-    ) -> None:
+    ) -> DaemonPublicationRevocationResult | None:
         """Persist stopping state after the cancellation fence is armed."""
 
         # Shutdown invalidates the local handle before worker cancellation; keep
         # this idempotent for callers that enter the lifecycle boundary directly.
         self._publication_authority = None
+        revocation: DaemonPublicationRevocationResult | None = None
         with self._runtime_lock:
             self.runtime.lifecycle = DaemonLifecycleState.stopping
             self.runtime.state = DaemonRuntimeState.stopping
@@ -4285,6 +4313,7 @@ class StewardDaemon:
                         "publication_worker_stopped": False,
                     },
                 )
+                revocation = result
                 if getattr(result, "ownership_lost", False):
                     # Preserve the historical local stopping record when this
                     # daemon never claimed a row.  A present row is never
@@ -4311,6 +4340,15 @@ class StewardDaemon:
             if str(exc) != "daemon instance is not the current owner":
                 raise
             self._log("daemon ownership lost before stopping lifecycle transition")
+        # Once the bounded revocation has exhausted the shared budget, do not
+        # start another SQLite write on the same database.  The durable claim
+        # is intentionally unresolved and the caller must receive stopping;
+        # an unbounded runtime journal write would defeat that bound.
+        if (
+            getattr(revocation, "deadline_exhausted", False)
+            or (deadline is not None and time.monotonic() >= deadline)
+        ):
+            return revocation
         try:
             self._control_loop_ledger.record_runtime(
                 "stopping",
@@ -4319,6 +4357,7 @@ class StewardDaemon:
             self._control_loop_wakeup.set()
         except Exception as exc:
             self._log(f"control-loop runtime stop lag error={exc.__class__.__name__}")
+        return revocation
     stop = request_shutdown
 
     def shutdown(self, *, force: bool = False) -> ShutdownResult:
@@ -4339,13 +4378,23 @@ class StewardDaemon:
         # Revoke the durable claim before waiting for a worker that may still be
         # blocked outside the Store admission boundary.
         try:
-            self._enter_stopping(force=force, deadline=deadline)
+            initial_revocation = self._enter_stopping(
+                force=force, deadline=deadline
+            )
         finally:
             publication_worker_stopped = self._join_publication_worker(
                 deadline=deadline
             )
-        self._stop_control_loop_writer(deadline=deadline)
-        self._drain_control_loop_once()
+        control_loop_writer_stopped = self._stop_control_loop_writer(deadline=deadline)
+        # The writer normally performs the final drain itself.  Do not acquire
+        # the control-loop lock after a timed-out join; a live writer may still
+        # own it and shutdown must not outlive the shared deadline.
+        if (
+            control_loop_writer_stopped
+            and not getattr(initial_revocation, "deadline_exhausted", False)
+            and time.monotonic() < deadline
+        ):
+            self._drain_control_loop_once(deadline=deadline)
         running_runs = [
             (run.task_id, run.id)
             for run in list(self.store.running_runs())
@@ -4478,7 +4527,12 @@ class StewardDaemon:
         self._stop_heartbeat_thread(deadline=deadline)
         lifecycle = (
             DaemonLifecycleState.stopping
-            if container_stop_failures or not publication_worker_stopped
+            if (
+                container_stop_failures
+                or not publication_worker_stopped
+                or not control_loop_writer_stopped
+                or getattr(initial_revocation, "deadline_exhausted", False)
+            )
             else DaemonLifecycleState.stopped
         )
         with self._runtime_lock:
@@ -4495,11 +4549,19 @@ class StewardDaemon:
                     "interrupted_runs": interrupted_runs,
                     "container_stop_failures": len(container_stop_failures),
                     "publication_worker_stopped": publication_worker_stopped,
+                    "control_loop_writer_stopped": control_loop_writer_stopped,
                 },
             )
             if getattr(result, "ownership_lost", False):
                 self._log("daemon ownership lost before final lifecycle transition")
             elif getattr(result, "deadline_exhausted", False):
+                # A lifecycle write that did not commit leaves the old claim
+                # usable by design; report unresolved stopping rather than a
+                # clean shutdown that falsely implies authority was revoked.
+                lifecycle = DaemonLifecycleState.stopping
+                with self._runtime_lock:
+                    self.runtime.lifecycle = lifecycle
+                    self.runtime.state = DaemonRuntimeState.stopping
                 self._log("daemon final lifecycle transition exceeded shutdown deadline")
         except ValueError as exc:
             if str(exc) != "daemon instance is not the current owner":

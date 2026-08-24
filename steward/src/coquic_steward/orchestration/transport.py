@@ -265,6 +265,8 @@ class _HttpxD1HandoffStream:
         self._closed = False
         self._write_started = False
         self._active_operations = 0
+        self._operations_complete = threading.Event()
+        self._operations_complete.set()
         self._active_writes = 0
         self._writes_complete = threading.Event()
         self._writes_complete.set()
@@ -290,6 +292,8 @@ class _HttpxD1HandoffStream:
         with self._adapter._lock:
             cancelled = self._adapter._cancelled
             if not cancelled:
+                if self._active_operations == 0:
+                    self._operations_complete.clear()
                 self._active_operations += 1
                 if writes:
                     # Record the handoff's first request write before releasing
@@ -305,10 +309,15 @@ class _HttpxD1HandoffStream:
     def _end_operation(self, *, writes: bool = False) -> None:
         with self._adapter._lock:
             self._active_operations = max(0, self._active_operations - 1)
+            if self._active_operations == 0:
+                self._operations_complete.set()
             if writes:
                 self._active_writes = max(0, self._active_writes - 1)
                 if self._active_writes == 0:
                     self._writes_complete.set()
+
+    def _wait_for_operations(self) -> None:
+        self._operations_complete.wait()
 
     def _wait_for_writes(self) -> None:
         self._writes_complete.wait()
@@ -882,8 +891,11 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 setup_error = True
         for stream in pending_streams:
             stream.close()
+        # A closed stream may still be inside start_tls or another admitted
+        # handoff operation.  Do not let authority revocation follow one of
+        # those operations while it can still touch the underlying stream.
         for stream in pending_streams:
-            stream._wait_for_writes()
+            stream._wait_for_operations()
         if setup_error:
             raise PublicationTransportSetupError()
 

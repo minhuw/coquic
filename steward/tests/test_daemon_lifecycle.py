@@ -2424,8 +2424,11 @@ def test_httpx_transport_adapter_fences_selected_proxy_tls_before_d1_write(
     tls_started = threading.Event()
     release_tls = threading.Event()
     stream_closed = threading.Event()
+    cancel_returned = threading.Event()
     writes: list[bytes] = []
     errors: list[BaseException] = []
+    cancel_errors: list[BaseException] = []
+    post_revocation_tls: list[bool] = []
 
     class Stream:
         def __init__(self) -> None:
@@ -2445,6 +2448,8 @@ def test_httpx_transport_adapter_fences_selected_proxy_tls_before_d1_write(
         def start_tls(self, *_args: object, **_kwargs: object) -> "Stream":
             tls_started.set()
             release_tls.wait(timeout=2.0)
+            if cancel_returned.is_set():
+                post_revocation_tls.append(True)
             return self
 
         def get_extra_info(self, _name: str) -> object | None:
@@ -2486,22 +2491,40 @@ def test_httpx_transport_adapter_fences_selected_proxy_tls_before_d1_write(
         except BaseException as error:
             errors.append(error)
 
+    def cancel() -> None:
+        try:
+            adapter.cancel()
+        except BaseException as error:
+            cancel_errors.append(error)
+        finally:
+            cancel_returned.set()
+
     worker = threading.Thread(target=request, daemon=True)
+    cancellation = threading.Thread(target=cancel, daemon=True)
     worker.start()
     assert tls_started.wait(timeout=1.0)
-    adapter.cancel()
-    release_tls.set()
-    worker.join(timeout=1.0)
+    cancellation.start()
 
     try:
+        assert stream_closed.wait(timeout=1.0)
+        assert not cancel_returned.is_set()
+        release_tls.set()
+        assert cancel_returned.wait(timeout=1.0)
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
+        assert not cancellation.is_alive()
         assert not worker.is_alive()
+        assert cancel_errors == []
         assert stream_closed.is_set()
         assert errors
         assert isinstance(errors[0], D1Error)
         assert errors[0].code.value == "network"
+        assert post_revocation_tls == []
         assert not any(b"POST " in data for data in writes)
     finally:
         release_tls.set()
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
         adapter.close()
         d1.close()
 
@@ -2578,8 +2601,10 @@ def test_httpx_transport_adapter_fences_post_connect_stream_handoff(monkeypatch)
     extra_info_entered = threading.Event()
     release_extra_info = threading.Event()
     stream_closed = threading.Event()
+    cancel_returned = threading.Event()
     writes: list[bytes] = []
     errors: list[BaseException] = []
+    cancel_errors: list[BaseException] = []
 
     class Stream:
         def write(self, data: bytes, timeout: float | None = None) -> None:
@@ -2618,20 +2643,37 @@ def test_httpx_transport_adapter_fences_post_connect_stream_handoff(monkeypatch)
         except BaseException as error:
             errors.append(error)
 
+    def cancel() -> None:
+        try:
+            adapter.cancel()
+        except BaseException as error:
+            cancel_errors.append(error)
+        finally:
+            cancel_returned.set()
+
     worker = threading.Thread(target=request, daemon=True)
+    cancellation = threading.Thread(target=cancel, daemon=True)
     worker.start()
     assert extra_info_entered.wait(timeout=1.0)
-    adapter.cancel()
-    assert stream_closed.is_set()
-    release_extra_info.set()
-    worker.join(timeout=1.0)
+    cancellation.start()
 
     try:
+        assert stream_closed.wait(timeout=1.0)
+        assert not cancel_returned.is_set()
+        release_extra_info.set()
+        assert cancel_returned.wait(timeout=1.0)
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
+        assert not cancellation.is_alive()
         assert not worker.is_alive()
+        assert cancel_errors == []
         assert writes == []
         assert errors
         assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
     finally:
+        release_extra_info.set()
+        cancellation.join(timeout=1.0)
+        worker.join(timeout=1.0)
         adapter.close()
         d1.close()
 

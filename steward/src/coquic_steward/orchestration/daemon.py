@@ -4340,14 +4340,10 @@ class StewardDaemon:
             if str(exc) != "daemon instance is not the current owner":
                 raise
             self._log("daemon ownership lost before stopping lifecycle transition")
-        # Once the bounded revocation has exhausted the shared budget, do not
-        # start another SQLite write on the same database.  The durable claim
-        # is intentionally unresolved and the caller must receive stopping;
-        # an unbounded runtime journal write would defeat that bound.
-        if (
-            getattr(revocation, "deadline_exhausted", False)
-            or (deadline is not None and time.monotonic() >= deadline)
-        ):
+        # During deadline-bound shutdown the daemon-state row is authoritative.
+        # Runtime events are secondary and recoverable from the durable ledger;
+        # do not start the fixed-timeout ledger transaction after revocation.
+        if deadline is not None:
             return revocation
         try:
             self._control_loop_ledger.record_runtime(
@@ -4386,15 +4382,9 @@ class StewardDaemon:
                 deadline=deadline
             )
         control_loop_writer_stopped = self._stop_control_loop_writer(deadline=deadline)
-        # The writer normally performs the final drain itself.  Do not acquire
-        # the control-loop lock after a timed-out join; a live writer may still
-        # own it and shutdown must not outlive the shared deadline.
-        if (
-            control_loop_writer_stopped
-            and not getattr(initial_revocation, "deadline_exhausted", False)
-            and time.monotonic() < deadline
-        ):
-            self._drain_control_loop_once(deadline=deadline)
+        # A completed writer owns its final drain.  A live writer may still be
+        # inside unbounded archive or ledger work, so leave its durable outbox
+        # work for that writer or the next startup/ordinary drain.
         running_runs = [
             (run.task_id, run.id)
             for run in list(self.store.running_runs())

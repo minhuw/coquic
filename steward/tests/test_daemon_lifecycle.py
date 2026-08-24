@@ -927,6 +927,151 @@ def test_shutdown_bounds_control_loop_lock_drain(config):
     assert not shutdown_thread.is_alive()
 
 
+def test_shutdown_does_not_start_fixed_timeout_ledger_write_after_revocation(
+    config, monkeypatch
+):
+    object.__setattr__(config, "dry_run", False)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    instance_id = daemon.runtime.instance_id
+    store.claim_daemon_instance(instance_id, lifecycle=DaemonLifecycleState.running.value)
+
+    original_revoke = store.revoke_daemon_publication_authority
+    original_record_runtime = daemon._control_loop_ledger.record_runtime
+    lock = sqlite3.connect(
+        store.path, isolation_level=None, check_same_thread=False
+    )
+    revocation_lock_ready = threading.Event()
+    shutdown_done = threading.Event()
+    revoke_calls = 0
+    record_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    result: list[object] = []
+
+    def revoke(
+        expected_instance_id: str,
+        lifecycle: str,
+        *,
+        deadline: float,
+        state: dict[str, object] | None = None,
+    ):
+        nonlocal revoke_calls
+        outcome = original_revoke(
+            expected_instance_id,
+            lifecycle,
+            deadline=deadline,
+            state=state,
+        )
+        revoke_calls += 1
+        if revoke_calls == 1:
+            # The real revocation has committed and closed its connection.  A
+            # second connection can now hold the write lock while the wrapper
+            # returns, reproducing a race with the secondary ledger writer.
+            lock.execute("BEGIN IMMEDIATE")
+            revocation_lock_ready.set()
+        return outcome
+
+    def record_runtime(*args: object, **kwargs: object):
+        record_calls.append((args, kwargs))
+        return original_record_runtime(*args, **kwargs)
+
+    monkeypatch.setattr(store, "revoke_daemon_publication_authority", revoke)
+    monkeypatch.setattr(daemon._control_loop_ledger, "record_runtime", record_runtime)
+
+    def shutdown() -> None:
+        result.append(daemon.shutdown(force=True))
+        shutdown_done.set()
+
+    worker = threading.Thread(target=shutdown, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    try:
+        assert revocation_lock_ready.wait(timeout=1.0)
+        state = store.get_daemon_state()
+        assert state is not None
+        assert state["lifecycle"] == DaemonLifecycleState.stopping.value
+        assert "publication_claim_id" not in state
+
+        # Keep the post-revocation lock held past the one-second force budget.
+        time.sleep(max(0.0, started + 1.1 - time.monotonic()))
+        assert shutdown_done.is_set()
+        assert result
+        assert result[0].state is DaemonLifecycleState.stopping
+        assert time.monotonic() - started < 1.75
+        assert record_calls == []
+    finally:
+        lock.rollback()
+        lock.close()
+        assert shutdown_done.wait(timeout=2.0)
+        worker.join(timeout=1.0)
+
+    successor = store.claim_daemon_instance(
+        "daemon-successor", lifecycle=DaemonLifecycleState.running.value
+    )
+    assert successor["instance_id"] == "daemon-successor"
+    assert store.get_daemon_state()["instance_id"] == "daemon-successor"
+
+
+def test_shutdown_leaves_pending_control_loop_outbox_for_ordinary_drain(
+    config, monkeypatch
+):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    event = store.control_loop.record_runtime("deferred")
+    drain_calls: list[dict[str, object]] = []
+
+    def forbidden_drain(**kwargs: object) -> dict[str, object]:
+        drain_calls.append(kwargs)
+        raise AssertionError("shutdown must not run a synchronous final drain")
+
+    monkeypatch.setattr(daemon, "_drain_control_loop_once", forbidden_drain)
+
+    daemon.shutdown(force=True)
+
+    assert drain_calls == []
+    pending = store.control_loop.outbox()
+    assert [row["event_id"] for row in pending] == [event.event_id]
+    assert pending[0]["materialized_at"] is None
+
+    monkeypatch.undo()
+    recovered = daemon._drain_control_loop_once()
+    assert recovered["materialized"] >= 1
+    assert store.control_loop.outbox() == []
+
+
+def test_shutdown_does_not_drain_behind_live_control_loop_writer(
+    config,
+):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    reconcile_entered = threading.Event()
+    release_reconcile = threading.Event()
+
+    def blocked_reconcile(*_args: object, **_kwargs: object) -> dict[str, object]:
+        reconcile_entered.set()
+        release_reconcile.wait(timeout=3.0)
+        return {"materialized": 0, "conflicts": 0}
+
+    daemon._control_loop_archive.reconcile = blocked_reconcile
+    daemon._start_control_loop_writer()
+    assert reconcile_entered.wait(timeout=1.0)
+    event = store.control_loop.record_runtime("after-snapshot")
+
+    worker = daemon._control_loop_thread
+    assert worker is not None
+    started = time.monotonic()
+    try:
+        result = daemon.shutdown(force=True)
+        assert result.state is DaemonLifecycleState.stopping
+        assert time.monotonic() - started < 1.75
+        assert worker.is_alive()
+        pending = store.control_loop.outbox()
+        assert [row["event_id"] for row in pending] == [event.event_id]
+        assert pending[0]["materialized_at"] is None
+    finally:
+        release_reconcile.set()
+        assert daemon._stop_control_loop_writer(deadline=time.monotonic() + 1.0)
+
+
 def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)

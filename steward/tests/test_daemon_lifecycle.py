@@ -2125,6 +2125,78 @@ def test_httpx_transport_adapter_fences_post_connect_stream_handoff(monkeypatch)
         d1.close()
 
 
+def test_httpx_transport_adapter_fences_protocol_assignment_after_cancellation(
+    monkeypatch,
+):
+    import httpcore._sync.connection as httpcore_connection
+    from httpcore._sync.http11 import HTTP11Connection as RealHTTP11Connection
+
+    constructor_entered = threading.Event()
+    release_constructor = threading.Event()
+    stream_closed = threading.Event()
+    writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    class PausedHTTP11Connection(RealHTTP11Connection):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            constructor_entered.set()
+            release_constructor.wait(timeout=2.0)
+
+    d1 = _d1_transport_double()
+    d1._client._transport._pool._network_backend = Backend()
+    monkeypatch.setattr(httpcore_connection, "HTTP11Connection", PausedHTTP11Connection)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    assert constructor_entered.wait(timeout=1.0)
+    adapter.cancel()
+    assert stream_closed.is_set()
+    release_constructor.set()
+    worker.join(timeout=1.0)
+
+    try:
+        assert not worker.is_alive()
+        assert writes == []
+        assert errors
+        assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
+    finally:
+        adapter.close()
+        d1.close()
+
+
 def test_publication_worker_shutdown_interrupts_inflight_httpx_d1_request(monkeypatch):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

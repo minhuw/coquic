@@ -238,18 +238,22 @@ class _HttpxD1HandoffStream:
         self._connection = connection
         self._stream = stream
         self._closed = False
+        self._write_started = False
 
     def _raise_if_cancelled(self) -> None:
         with self._adapter._lock:
             cancelled = self._adapter._cancelled
+            write_started = self._write_started
         if cancelled:
             self.close()
-            # Once httpcore has installed its protocol connection, preserve
-            # established-socket behavior: the closed socket is translated by
-            # httpcore/httpx into the provider's normal transport error.  The
-            # internal cancellation signal is only needed while handoff is
-            # still in progress and no protocol connection owns this stream.
-            if getattr(self._connection, "_connection", None) is None:
+            # HTTPConnection can install its protocol connection after this
+            # stream was cancelled.  Use the handoff's own request state rather
+            # than that mutable private pointer: until the first request write
+            # starts, cancellation must terminate the handoff locally.  Once a
+            # request has begun, preserve established-socket behavior so
+            # httpcore/httpx translates the closed socket into the provider's
+            # normal transport error.
+            if not write_started:
                 raise _PublicationTransportCancelled()
 
     def close(self) -> None:
@@ -275,7 +279,15 @@ class _HttpxD1HandoffStream:
         return self._stream.read(max_bytes, timeout=timeout)
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        self._raise_if_cancelled()
+        with self._adapter._lock:
+            cancelled = self._adapter._cancelled
+            if not cancelled:
+                # Record the handoff's first request write before releasing the
+                # lock.  Cancellation after this point follows the established
+                # socket shutdown path instead of racing the handoff fence.
+                self._write_started = True
+        if cancelled:
+            self._raise_if_cancelled()
         self._stream.write(buffer, timeout=timeout)
 
     def start_tls(self, *args: object, **kwargs: object) -> object:

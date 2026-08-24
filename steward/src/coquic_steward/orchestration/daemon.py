@@ -915,7 +915,9 @@ class StewardDaemon:
                     state={"reconciliation_complete": True},
                 )
                 self._publication_authority = (
-                    self.store.get_daemon_publication_authority()
+                    self.store.get_daemon_publication_authority(
+                        instance_id=self.runtime.instance_id
+                    )
                 )
                 if self._publication_authority is None:
                     self._log("daemon publication authority unavailable")
@@ -4230,9 +4232,8 @@ class StewardDaemon:
     def _enter_stopping(self, *, force: bool) -> None:
         """Persist stopping state after control has left any signal handler."""
 
-        # Drop the local handle before the durable lifecycle transition.  The
-        # Store lock then makes any in-flight provider admission finish before
-        # the claim becomes ineligible for further mutations.
+        # Shutdown invalidates the local handle before worker cancellation; keep
+        # this idempotent for callers that enter the lifecycle boundary directly.
         self._publication_authority = None
         with self._runtime_lock:
             self.runtime.lifecycle = DaemonLifecycleState.stopping
@@ -4240,11 +4241,16 @@ class StewardDaemon:
             self.runtime.stopping_requested_at = utc_now()
             self.runtime.forced_stop = force
             self.runtime.heartbeat_at = utc_now()
-        self.store.set_daemon_lifecycle(
-            DaemonLifecycleState.stopping.value,
-            instance_id=self.runtime.instance_id,
-            state={"forced": force},
-        )
+        try:
+            self.store.set_daemon_lifecycle(
+                DaemonLifecycleState.stopping.value,
+                instance_id=self.runtime.instance_id,
+                state={"forced": force},
+            )
+        except ValueError as exc:
+            if str(exc) != "daemon instance is not the current owner":
+                raise
+            self._log("daemon ownership lost before stopping lifecycle transition")
         try:
             self._control_loop_ledger.record_runtime(
                 "stopping",
@@ -4260,11 +4266,18 @@ class StewardDaemon:
 
         self.request_shutdown(force=force)
         force = force or self._force_shutdown_event.is_set()
+        deadline = (
+            time.monotonic()
+            if force
+            else time.monotonic() + float(self.config.shutdown_grace_seconds)
+        )
+        # Cancel provider I/O before the lifecycle transition waits on the same
+        # Store admission boundary held by an in-flight aggregate operation.
+        self._publication_authority = None
+        publication_worker_stopped = self._stop_publication_worker(deadline=deadline)
         self._enter_stopping(force=force)
         self._stop_control_loop_writer()
         self._drain_control_loop_once()
-        deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
-        publication_worker_stopped = self._stop_publication_worker(deadline=deadline)
         running_runs = [
             (run.task_id, run.id)
             for run in list(self.store.running_runs())
@@ -4398,16 +4411,21 @@ class StewardDaemon:
             self.runtime.lifecycle = lifecycle
             self.runtime.state = DaemonRuntimeState.stopping
             self.runtime.heartbeat_at = utc_now()
-        self.store.set_daemon_lifecycle(
-            lifecycle.value,
-            instance_id=self.runtime.instance_id,
-            state={
-                "forced": force,
-                "interrupted_runs": interrupted_runs,
-                "container_stop_failures": len(container_stop_failures),
-                "publication_worker_stopped": publication_worker_stopped,
-            },
-        )
+        try:
+            self.store.set_daemon_lifecycle(
+                lifecycle.value,
+                instance_id=self.runtime.instance_id,
+                state={
+                    "forced": force,
+                    "interrupted_runs": interrupted_runs,
+                    "container_stop_failures": len(container_stop_failures),
+                    "publication_worker_stopped": publication_worker_stopped,
+                },
+            )
+        except ValueError as exc:
+            if str(exc) != "daemon instance is not the current owner":
+                raise
+            self._log("daemon ownership lost before final lifecycle transition")
         return ShutdownResult(
             state=lifecycle,
             forced=force,

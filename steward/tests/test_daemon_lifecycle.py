@@ -657,6 +657,54 @@ def test_shutdown_keeps_stopping_while_publication_worker_is_live(config, tmp_pa
     assert store.on_change is None
 
 
+def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        daemon,
+        "_stop_publication_worker",
+        lambda **_kwargs: events.append("publication-cancel") or True,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_enter_stopping",
+        lambda **_kwargs: events.append("lifecycle") or None,
+    )
+
+    daemon.shutdown(force=True)
+
+    assert events[:2] == ["publication-cancel", "lifecycle"]
+
+
+def test_shutdown_after_ownership_loss_completes_local_cleanup(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    daemon.runtime.instance_id = "daemon-a"
+    store.claim_daemon_instance("daemon-a", lifecycle=DaemonLifecycleState.running.value)
+    store.claim_daemon_instance("daemon-b", lifecycle=DaemonLifecycleState.running.value)
+    before = store.get_daemon_state()
+    assert before is not None
+
+    cleanup: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "_stop_publication_worker",
+        lambda **_kwargs: cleanup.append("publication") or True,
+    )
+
+    result = daemon.shutdown(force=True)
+
+    after = store.get_daemon_state()
+    assert result.state is DaemonLifecycleState.stopped
+    assert cleanup == ["publication"]
+    assert after is not None
+    assert after["instance_id"] == before["instance_id"] == "daemon-b"
+    assert after["lifecycle"] == before["lifecycle"] == DaemonLifecycleState.running.value
+    assert after["publication_claim_id"] == before["publication_claim_id"]
+
+
 def test_publication_worker_reconciles_credential_free_staging_identity(
     tmp_path: Path,
 ) -> None:
@@ -2708,6 +2756,12 @@ def test_startup_orders_validation_recovery_reconciliation_claim_and_running(
         "iter_tasks",
         lambda: events.append("tasks") or [],
     )
+    authority_requests: list[str | None] = []
+    monkeypatch.setattr(
+        store,
+        "get_daemon_publication_authority",
+        lambda *, instance_id=None: authority_requests.append(instance_id) or None,
+    )
     monkeypatch.setattr(
         daemon,
         "_restore_resource_pressure",
@@ -2729,6 +2783,7 @@ def test_startup_orders_validation_recovery_reconciliation_claim_and_running(
     daemon.startup_reconcile()
 
     assert events == ["validation", "store", "archive", "tasks", "claim", "running"]
+    assert authority_requests == [daemon.runtime.instance_id]
     assert daemon.lifecycle_state is DaemonLifecycleState.running
 
 

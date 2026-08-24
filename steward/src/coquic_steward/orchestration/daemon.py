@@ -312,12 +312,19 @@ def create_live_rerun(
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise LiveRerunRejected("rerun_allocation_conflict") from exc
+    if allocation.created:
+        retained_count = len(selected_ids)
+        stale_count = len(stale_ids)
+    else:
+        retained_count, stale_count = _live_rerun_allocation_counts(
+            store, allocation.task
+        )
     return LiveRerunOutcome(
         source_task_id=source.id,
         task=allocation.task,
         created=allocation.created,
-        retained_signal_count=len(selected_ids),
-        stale_signal_count=len(stale_ids),
+        retained_signal_count=retained_count,
+        stale_signal_count=stale_count,
     )
 
 

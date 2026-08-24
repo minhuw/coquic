@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -945,6 +946,194 @@ def test_live_rerun_duplicate_skips_provider_revalidation(
     assert second.retained_signal_count == first.retained_signal_count == 1
     assert second.stale_signal_count == first.stale_signal_count == 0
     assert provider_calls == []
+
+
+def test_live_rerun_race_reports_durable_winning_counts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import coquic_steward.orchestration.daemon as daemon
+
+    config = StewardConfig(
+        repo_root=tmp_path / "repo",
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.repo_root.mkdir()
+    store = TaskStore.create(config.db_path, dry_run=True)
+    items = [
+        SignalItem(
+            provider="github-issues:features",
+            kind="github-issues.feature-request",
+            fingerprint=f"race-{number}",
+            title=f"issue {number}",
+            payload={"issue_number": number},
+        )
+        for number in (1, 2, 3)
+    ]
+    store.ingest_signal_collection(
+        SignalFetchRun(provider=items[0].provider, status=SignalFetchStatus.ok), items
+    )
+    saved = sorted(store.list_signal_items(), key=lambda item: item.payload["issue_number"])
+    source = _sealed_dry_run_source(
+        config,
+        store,
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="race source",
+            prompt="implement",
+            metadata={"selected_signal_item_ids": [item.id for item in saved]},
+        ),
+    )
+    store.mark_signal_items_planned(
+        [item.id for item in saved], planner_run_id="race-planner", task_id=source.id
+    )
+    archive = config.tasks_dir / source.id
+    archive_before = {
+        path.relative_to(archive): path.read_bytes()
+        for path in archive.rglob("*")
+        if path.is_file()
+    }
+    source_record_before = store.get(source.id)
+    source_before = (
+        source_record_before.status,
+        source_record_before.spec.source,
+        dict(source_record_before.spec.metadata),
+        source_record_before.dry_run_of_task_id,
+    )
+
+    live_config = replace(config, dry_run=False)
+    active_lookup_barrier = threading.Barrier(2)
+    revalidation_barrier = threading.Barrier(2)
+    coordination_lock = threading.Lock()
+    revalidation_number = 0
+    timeline: list[str] = []
+    outcomes = []
+    errors: list[Exception] = []
+
+    original_active_lookup = TaskStore.active_live_rerun
+
+    def synchronized_active_lookup(self, source_task_id):
+        existing = original_active_lookup(self, source_task_id)
+        with coordination_lock:
+            timeline.append("active:hit" if existing is not None else "active:miss")
+        active_lookup_barrier.wait(timeout=5)
+        return existing
+
+    monkeypatch.setattr(TaskStore, "active_live_rerun", synchronized_active_lookup)
+
+    def fake_revalidation(_config, linked, *, strict):
+        nonlocal revalidation_number
+        with coordination_lock:
+            number = revalidation_number
+            revalidation_number += 1
+            timeline.append("provider")
+        assert strict is True
+        assert {item.id for item in linked} == {item.id for item in saved}
+        revalidation_barrier.wait(timeout=5)
+        selected = [saved[0]] if number == 0 else [saved[0], saved[1]]
+        stale_reasons = {} if number == 0 else {saved[2].id: "source_closed"}
+        return SimpleNamespace(
+            actionable=selected,
+            stale_reasons=stale_reasons,
+            refreshed={item.id: item for item in selected},
+        )
+
+    monkeypatch.setattr(daemon, "revalidate_signal_items_with_context", fake_revalidation)
+    original_allocate = TaskStore.allocate_live_rerun
+
+    def recording_allocate(self, *args, **kwargs):
+        allocation = original_allocate(self, *args, **kwargs)
+        with coordination_lock:
+            timeline.append("allocation:created" if allocation.created else "allocation:duplicate")
+        return allocation
+
+    monkeypatch.setattr(TaskStore, "allocate_live_rerun", recording_allocate)
+
+    def invoke(slot: int) -> None:
+        thread_store = None
+        try:
+            thread_store = TaskStore.open(store.path, dry_run=False)
+            outcome = create_live_rerun(live_config, thread_store, source.id)
+            with coordination_lock:
+                outcomes.append((slot, outcome))
+        except Exception as exc:
+            with coordination_lock:
+                errors.append(exc)
+        finally:
+            if thread_store is not None:
+                thread_store.engine.dispose()
+
+    threads = [
+        threading.Thread(target=invoke, args=(slot,), daemon=True)
+        for slot in (0, 1)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors, errors
+    assert len(outcomes) == 2
+    assert revalidation_number == 2
+
+    outcome_values = [outcome for _slot, outcome in outcomes]
+    winners = [outcome for outcome in outcome_values if outcome.created]
+    losers = [outcome for outcome in outcome_values if not outcome.created]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    winner = winners[0]
+    loser = losers[0]
+    assert winner.task is not None and loser.task is not None
+    assert loser.task.id == winner.task.id
+
+    final_store = TaskStore.open(store.path, dry_run=False)
+    try:
+        descendants = final_store.active_live_descendants(source.id)
+        assert [task.id for task in descendants] == [winner.task.id]
+        rerun_events = [
+            event
+            for event in final_store.events(winner.task.id)
+            if event.kind == "task.live_rerun"
+        ]
+        assert len(rerun_events) == 1
+        event = rerun_events[0]
+        winning_counts = (
+            len(event.data["selected_signal_ids"]),
+            len(event.data["stale_signal_ids"]),
+        )
+        assert (
+            winner.retained_signal_count,
+            winner.stale_signal_count,
+        ) == winning_counts
+        assert (
+            loser.retained_signal_count,
+            loser.stale_signal_count,
+        ) == winning_counts
+        assert len(
+            [item for item in final_store.pending_wakeups() if item.reason == "task.live_rerun"]
+        ) == 1
+
+        source_after = final_store.get(source.id)
+        assert (
+            source_after.status,
+            source_after.spec.source,
+            source_after.spec.metadata,
+            source_after.dry_run_of_task_id,
+        ) == source_before
+    finally:
+        final_store.engine.dispose()
+
+    assert {
+        path.relative_to(archive): path.read_bytes()
+        for path in archive.rglob("*")
+        if path.is_file()
+    } == archive_before
+    duplicate_index = timeline.index("allocation:duplicate")
+    assert timeline.count("active:miss") == 2
+    assert timeline[:duplicate_index].count("provider") == 2
+    assert "provider" not in timeline[duplicate_index + 1 :]
 
 
 def test_live_rerun_rejects_all_stale_without_mutation(tmp_path: Path, monkeypatch) -> None:

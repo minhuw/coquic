@@ -225,10 +225,50 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             pass
 
 
+class _HttpxD1NetworkBackend:
+    """Fence one HTTPConnection's stream handoff after cancellation."""
+
+    def __init__(
+        self,
+        adapter: "HttpxD1TransportAdapter",
+        connection: HTTPConnection,
+        backend: object,
+    ) -> None:
+        self._adapter = adapter
+        self._connection = connection
+        self._backend = backend
+
+    def connect_tcp(self, *args: object, **kwargs: object) -> object:
+        self._adapter._raise_if_cancelled(self._connection)
+        stream = self._backend.connect_tcp(*args, **kwargs)
+        if self._adapter._is_cancelled():
+            self._adapter._close_stream(stream)
+            self._adapter._abort_connection(self._connection)
+            raise _PublicationTransportCancelled()
+        return stream
+
+    def connect_unix_socket(self, *args: object, **kwargs: object) -> object:
+        self._adapter._raise_if_cancelled(self._connection)
+        stream = self._backend.connect_unix_socket(*args, **kwargs)
+        if self._adapter._is_cancelled():
+            self._adapter._close_stream(stream)
+            self._adapter._abort_connection(self._connection)
+            raise _PublicationTransportCancelled()
+        return stream
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._backend, name)
+
+
 class HttpxD1TransportAdapter(DaemonCancellation):
     """Cancel httpx 0.28.1/httpcore 1.0.9 through its observed pool shape."""
 
     def __init__(self, client: D1PublicationClient) -> None:
+        self._lock = threading.RLock()
+        self._cancelled = False
+        self._connections: dict[int, object] = {}
+        self._connection_methods: dict[int, object] = {}
+        self._pool_methods: dict[int, object] = {}
         try:
             http_client = client._client
             if not isinstance(http_client, httpx.Client):
@@ -239,51 +279,167 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             pool = transport._pool
             if not isinstance(pool, ConnectionPool):
                 raise PublicationTransportSetupError()
+            if not isinstance(pool.create_connection, Callable):
+                raise PublicationTransportSetupError()
             connections = tuple(pool.connections)
-            for connection in connections:
-                self._connection_socket(connection)
             client.close
             self._owner = client
             self._pool = pool
+            for connection in connections:
+                self._install_connection(connection)
+                self._track_connection(connection)
+            self._install_pool(pool)
         except PublicationTransportSetupError:
             raise
         except Exception:
             raise PublicationTransportSetupError() from None
 
     @staticmethod
-    def _connection_socket(connection: object) -> socket.socket:
+    def _connection_socket(connection: object) -> socket.socket | None:
+        """Return an established socket, or None for a valid connecting state."""
+
         if not isinstance(connection, HTTPConnection):
             raise PublicationTransportSetupError()
         try:
-            raw_socket = connection._connection._network_stream._sock
+            http_connection = connection._connection
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if http_connection is None:
+            return None
+        try:
+            raw_socket = http_connection._network_stream._sock
         except Exception:
             raise PublicationTransportSetupError() from None
         if not isinstance(raw_socket, socket.socket):
             raise PublicationTransportSetupError()
         return raw_socket
 
+    def _is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def _raise_if_cancelled(self, connection: HTTPConnection) -> None:
+        if self._is_cancelled():
+            self._abort_connection(connection)
+            raise _PublicationTransportCancelled()
+
+    @staticmethod
+    def _close_stream(stream: object) -> None:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def _install_pool(self, pool: ConnectionPool) -> None:
+        pool_id = id(pool)
+        with self._lock:
+            if pool_id in self._pool_methods:
+                return
+        try:
+            create_connection = pool.create_connection
+
+            def tracked_create_connection(origin: object) -> object:
+                connection = create_connection(origin)
+                try:
+                    self._install_connection(connection)
+                    accepted = self._track_connection(connection)
+                except PublicationTransportSetupError:
+                    self._abort_connection(connection)
+                    raise
+                if not accepted or self._is_cancelled():
+                    self._abort_connection(connection)
+                    raise _PublicationTransportCancelled()
+                return connection
+
+            pool.create_connection = tracked_create_connection
+        except PublicationTransportSetupError:
+            raise
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        with self._lock:
+            self._pool_methods[pool_id] = create_connection
+
+    def _install_connection(self, connection: object) -> None:
+        connection_id = id(connection)
+        with self._lock:
+            if connection_id in self._connection_methods:
+                return
+        try:
+            if not isinstance(connection, HTTPConnection):
+                raise PublicationTransportSetupError()
+            self._connection_socket(connection)
+            connect = connection._connect
+            backend = connection._network_backend
+            connect_tcp = getattr(backend, "connect_tcp", None)
+            if not isinstance(connect, Callable) or not isinstance(connect_tcp, Callable):
+                raise PublicationTransportSetupError()
+            if getattr(connection, "_uds", None) is not None and not isinstance(
+                getattr(backend, "connect_unix_socket", None), Callable
+            ):
+                raise PublicationTransportSetupError()
+            connection._network_backend = _HttpxD1NetworkBackend(
+                self,
+                connection,
+                backend,
+            )
+
+            def guarded_connect(request: object) -> object:
+                self._raise_if_cancelled(connection)
+                stream = connect(request)
+                if self._is_cancelled():
+                    self._close_stream(stream)
+                    self._abort_connection(connection)
+                    raise _PublicationTransportCancelled()
+                return stream
+
+            connection._connect = guarded_connect
+        except PublicationTransportSetupError:
+            raise
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        with self._lock:
+            self._connection_methods[connection_id] = connect
+
+    def _track_connection(self, connection: object) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._connections[id(connection)] = connection
+            return True
+
     @classmethod
     def _abort_connection(cls, connection: object) -> None:
         raw_socket = cls._connection_socket(connection)
-        try:
-            raw_socket.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        try:
-            raw_socket.close()
-        except Exception:
-            pass
+        if raw_socket is not None:
+            try:
+                raw_socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                raw_socket.close()
+            except Exception:
+                pass
         try:
             connection.close()
         except Exception:
             pass
 
     def cancel(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            connections = tuple(self._connections.values())
         try:
-            connections = tuple(self._pool.connections)
+            connections += tuple(self._pool.connections)
         except Exception:
             raise PublicationTransportSetupError() from None
+        seen: set[int] = set()
         for connection in connections:
+            connection_id = id(connection)
+            if connection_id in seen:
+                continue
+            seen.add(connection_id)
             self._abort_connection(connection)
 
     def close(self) -> None:

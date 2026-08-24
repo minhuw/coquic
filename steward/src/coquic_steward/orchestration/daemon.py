@@ -1250,12 +1250,15 @@ class StewardDaemon:
             value = 1.0
         return max(0.05, min(value, 5.0))
 
-    def _stop_control_loop_writer(self) -> None:
+    def _stop_control_loop_writer(self, *, deadline: float | None = None) -> None:
         self._control_loop_stop.set()
         self._control_loop_wakeup.set()
         thread = self._control_loop_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            timeout = 2.0
+            if deadline is not None:
+                timeout = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=timeout)
         if (
             thread is not None
             and not thread.is_alive()
@@ -4248,8 +4251,10 @@ class StewardDaemon:
             except Exception:
                 pass
 
-    def _enter_stopping(self, *, force: bool) -> None:
-        """Persist stopping state after control has left any signal handler."""
+    def _enter_stopping(
+        self, *, force: bool, deadline: float | None = None
+    ) -> None:
+        """Persist stopping state after the cancellation fence is armed."""
 
         # Shutdown invalidates the local handle before worker cancellation; keep
         # this idempotent for callers that enter the lifecycle boundary directly.
@@ -4261,11 +4266,47 @@ class StewardDaemon:
             self.runtime.forced_stop = force
             self.runtime.heartbeat_at = utc_now()
         try:
-            self.store.set_daemon_lifecycle(
-                DaemonLifecycleState.stopping.value,
-                instance_id=self.runtime.instance_id,
-                state={"forced": force},
-            )
+            if deadline is None:
+                self.store.set_daemon_lifecycle(
+                    DaemonLifecycleState.stopping.value,
+                    instance_id=self.runtime.instance_id,
+                    state={
+                        "forced": force,
+                        "publication_worker_stopped": False,
+                    },
+                )
+            else:
+                result = self.store.revoke_daemon_publication_authority(
+                    self.runtime.instance_id,
+                    DaemonLifecycleState.stopping.value,
+                    deadline=deadline,
+                    state={
+                        "forced": force,
+                        "publication_worker_stopped": False,
+                    },
+                )
+                if getattr(result, "ownership_lost", False):
+                    # Preserve the historical local stopping record when this
+                    # daemon never claimed a row.  A present row is never
+                    # rewritten after ownership loss, so a successor remains
+                    # protected.
+                    if self.store.get_daemon_state() is None:
+                        try:
+                            self.store.set_daemon_lifecycle(
+                                DaemonLifecycleState.stopping.value,
+                                instance_id=self.runtime.instance_id,
+                                state={
+                                    "forced": force,
+                                    "publication_worker_stopped": False,
+                                },
+                            )
+                        except ValueError as exc:
+                            if str(exc) != "daemon instance is not the current owner":
+                                raise
+                    else:
+                        self._log("daemon ownership lost before stopping lifecycle transition")
+                elif getattr(result, "deadline_exhausted", False):
+                    self._log("daemon stopping lifecycle transition exceeded shutdown deadline")
         except ValueError as exc:
             if str(exc) != "daemon instance is not the current owner":
                 raise
@@ -4285,11 +4326,12 @@ class StewardDaemon:
 
         self.request_shutdown(force=force)
         force = force or self._force_shutdown_event.is_set()
-        deadline = (
-            time.monotonic()
+        shutdown_budget = (
+            PUBLICATION_JOIN_TIMEOUT_SECONDS
             if force
-            else time.monotonic() + float(self.config.shutdown_grace_seconds)
+            else float(self.config.shutdown_grace_seconds)
         )
+        deadline = time.monotonic() + shutdown_budget
         # Cancel provider I/O before the lifecycle transition waits on the same
         # Store admission boundary held by an in-flight aggregate operation.
         self._publication_authority = None
@@ -4297,12 +4339,12 @@ class StewardDaemon:
         # Revoke the durable claim before waiting for a worker that may still be
         # blocked outside the Store admission boundary.
         try:
-            self._enter_stopping(force=force)
+            self._enter_stopping(force=force, deadline=deadline)
         finally:
             publication_worker_stopped = self._join_publication_worker(
                 deadline=deadline
             )
-        self._stop_control_loop_writer()
+        self._stop_control_loop_writer(deadline=deadline)
         self._drain_control_loop_once()
         running_runs = [
             (run.task_id, run.id)
@@ -4348,7 +4390,10 @@ class StewardDaemon:
                 if not future.done()
             ]
             if forced_futures:
-                concurrent.futures.wait(forced_futures, timeout=2.0)
+                concurrent.futures.wait(
+                    forced_futures,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
             force_pool.shutdown(wait=False, cancel_futures=True)
         if interrupt_pool is not None:
             interrupt_pool.shutdown(wait=False, cancel_futures=True)
@@ -4367,7 +4412,7 @@ class StewardDaemon:
             }
             stopped, pending = concurrent.futures.wait(
                 stop_futures,
-                timeout=max(0.0, deadline - time.monotonic()) if not force else 2.0,
+                timeout=max(0.0, deadline - time.monotonic()),
             )
             for future in stopped:
                 task_id = stop_futures[future]
@@ -4385,7 +4430,7 @@ class StewardDaemon:
             if runtime is not None:
                 try:
                     runtime.stop(
-                        timeout=2.0 if force else max(0.0, deadline - time.monotonic())
+                        timeout=max(0.0, deadline - time.monotonic())
                     )
                 except Exception as exc:
                     container_stop_failures.append("scheduler-planner")
@@ -4425,9 +4470,12 @@ class StewardDaemon:
                         if not future.done()
                     ]
                 if pending_after_force:
-                    concurrent.futures.wait(pending_after_force, timeout=0.25)
-        self._subprocess_owner.wait(timeout=0.1 if force else max(0.0, deadline - time.monotonic()))
-        self._stop_heartbeat_thread()
+                    concurrent.futures.wait(
+                        pending_after_force,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    )
+        self._subprocess_owner.wait(timeout=max(0.0, deadline - time.monotonic()))
+        self._stop_heartbeat_thread(deadline=deadline)
         lifecycle = (
             DaemonLifecycleState.stopping
             if container_stop_failures or not publication_worker_stopped
@@ -4438,9 +4486,10 @@ class StewardDaemon:
             self.runtime.state = DaemonRuntimeState.stopping
             self.runtime.heartbeat_at = utc_now()
         try:
-            self.store.set_daemon_lifecycle(
+            result = self.store.revoke_daemon_publication_authority(
+                self.runtime.instance_id,
                 lifecycle.value,
-                instance_id=self.runtime.instance_id,
+                deadline=deadline,
                 state={
                     "forced": force,
                     "interrupted_runs": interrupted_runs,
@@ -4448,6 +4497,10 @@ class StewardDaemon:
                     "publication_worker_stopped": publication_worker_stopped,
                 },
             )
+            if getattr(result, "ownership_lost", False):
+                self._log("daemon ownership lost before final lifecycle transition")
+            elif getattr(result, "deadline_exhausted", False):
+                self._log("daemon final lifecycle transition exceeded shutdown deadline")
         except ValueError as exc:
             if str(exc) != "daemon instance is not the current owner":
                 raise
@@ -4895,11 +4948,14 @@ class StewardDaemon:
         while not self._heartbeat_stop.wait(self._heartbeat_interval_seconds()):
             self._touch_heartbeat()
 
-    def _stop_heartbeat_thread(self) -> None:
+    def _stop_heartbeat_thread(self, *, deadline: float | None = None) -> None:
         self._heartbeat_stop.set()
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            timeout = 2.0
+            if deadline is not None:
+                timeout = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=timeout)
         self._heartbeat_thread = None
 
     def _task_phase_requires_serialization(self, task_id: str) -> bool:

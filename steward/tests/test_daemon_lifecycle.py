@@ -733,6 +733,104 @@ def test_shutdown_revokes_publication_authority_before_worker_join(config):
         worker.join(timeout=1.0)
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_shutdown_pre_socket_connection_revokes_authority_before_join(
+    config, force: bool, monkeypatch
+):
+    object.__setattr__(config, "dry_run", False)
+    object.__setattr__(config, "shutdown_grace_seconds", 1.0)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    store.claim_daemon_instance(
+        daemon.runtime.instance_id,
+        lifecycle=DaemonLifecycleState.running.value,
+    )
+    authority = store.get_daemon_publication_authority(daemon.runtime.instance_id)
+    assert authority is not None
+
+    admission_entered = threading.Event()
+    connect_started = threading.Event()
+    release_connect = threading.Event()
+    stream_closed = threading.Event()
+    request_bytes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            request_bytes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            connect_started.set()
+            release_connect.wait(timeout=3.0)
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    d1 = _d1_transport_double()
+    d1._client._transport._pool._network_backend = Backend()
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    def publish() -> None:
+        try:
+            with store.daemon_publication_admission(
+                authority,
+                action="publication.overhead",
+                action_id="shutdown-pre-socket",
+                target="cloudflare-d1",
+            ) as decision:
+                assert decision.allowed
+                admission_entered.set()
+                d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=publish, daemon=True)
+    daemon._publication_thread = worker
+    daemon._publication_cancel = adapter
+    worker.start()
+    assert admission_entered.wait(timeout=1.0)
+    assert connect_started.wait(timeout=1.0)
+
+    started = time.monotonic()
+    try:
+        result = daemon.shutdown(force=force)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert result.state is DaemonLifecycleState.stopping
+        state = store.get_daemon_state()
+        assert state is not None
+        assert state["lifecycle"] == DaemonLifecycleState.stopping.value
+        assert state["publication_worker_stopped"] is False
+        assert "publication_claim_id" not in state
+        assert request_bytes == []
+    finally:
+        release_connect.set()
+        worker.join(timeout=2.0)
+        adapter.close()
+        d1.close()
+
+    assert not worker.is_alive()
+    assert stream_closed.wait(timeout=1.0)
+    assert errors
+    assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
+
+
 def test_shutdown_cancels_publication_before_lifecycle_transition(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
@@ -1816,6 +1914,74 @@ def test_httpx_transport_adapter_rejects_unsupported_connection_during_cancellat
             adapter.cancel()
         assert str(error.value) == "unsupported publication transport shape"
     finally:
+        d1.close()
+
+
+def test_httpx_transport_adapter_fences_pre_socket_connection_after_cancellation(
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+    stream_closed = threading.Event()
+    writes: list[bytes] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def start_tls(self, **_kwargs: object) -> "Stream":
+            return self
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            started.set()
+            release.wait(timeout=2.0)
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    d1 = _d1_transport_double()
+    d1._client._transport._pool._network_backend = Backend()
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+    errors: list[BaseException] = []
+
+    def request() -> None:
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1.0)
+    adapter.cancel()
+    adapter.cancel()
+    release.set()
+    worker.join(timeout=1.0)
+
+    try:
+        assert not worker.is_alive()
+        assert stream_closed.wait(timeout=1.0)
+        assert writes == []
+        assert errors
+        assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
+    finally:
+        adapter.close()
         d1.close()
 
 

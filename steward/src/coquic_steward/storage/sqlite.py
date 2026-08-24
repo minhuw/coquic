@@ -503,6 +503,38 @@ class StoreRecoveryResult:
             raise ValueError("Store recovery changed flag does not match its fields")
 
 
+_DAEMON_REVOCATION_REVOKED = "revoked"
+_DAEMON_REVOCATION_OWNERSHIP_LOST = "ownership_lost"
+_DAEMON_REVOCATION_DEADLINE_EXHAUSTED = "deadline_exhausted"
+
+
+@dataclass(frozen=True, slots=True)
+class DaemonPublicationRevocationResult:
+    """Outcome of one deadline-bounded shutdown-only authority revocation."""
+
+    status: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            _DAEMON_REVOCATION_REVOKED,
+            _DAEMON_REVOCATION_OWNERSHIP_LOST,
+            _DAEMON_REVOCATION_DEADLINE_EXHAUSTED,
+        }:
+            raise ValueError("daemon publication revocation status is invalid")
+
+    @property
+    def revoked(self) -> bool:
+        return self.status == _DAEMON_REVOCATION_REVOKED
+
+    @property
+    def ownership_lost(self) -> bool:
+        return self.status == _DAEMON_REVOCATION_OWNERSHIP_LOST
+
+    @property
+    def deadline_exhausted(self) -> bool:
+        return self.status == _DAEMON_REVOCATION_DEADLINE_EXHAUSTED
+
+
 class SQLiteStoreLifecycleError(RuntimeError):
     """The exact Store lifecycle precondition or validation failed."""
 
@@ -2653,6 +2685,135 @@ class SQLiteTaskStore:
                     raise
         self._notify_change()
         return self.get_daemon_state() or {}
+
+    def revoke_daemon_publication_authority(
+        self,
+        expected_instance_id: str,
+        lifecycle: str,
+        *,
+        deadline: float,
+        state: Mapping[str, object] | None = None,
+    ) -> DaemonPublicationRevocationResult:
+        """Revoke shutdown authority without taking the provider admission lock.
+
+        This exception to ordinary daemon lifecycle serialization is callable
+        only after the transport cancellation fence has been armed.  It uses a
+        direct SQLite transaction so a provider-held admission guard cannot
+        delay shutdown; the supplied monotonic deadline bounds database lock
+        waiting.  A false authority result never writes a successor row.
+        """
+
+        if not isinstance(expected_instance_id, str) or not expected_instance_id:
+            raise ValueError("daemon instance identity is invalid")
+        if self._daemon_state_lifecycle(lifecycle) is None:
+            raise ValueError("daemon lifecycle is invalid")
+        if lifecycle == "running":
+            raise ValueError("daemon revocation target must be non-running")
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            raise TypeError("daemon revocation deadline must be monotonic time")
+        updates = dict(state or {})
+        for key in (
+            "instance_id",
+            "lifecycle",
+            "updated_at",
+            _DAEMON_PUBLICATION_MODE_KEY,
+            "execution_mode",
+            _DAEMON_PUBLICATION_CLAIM_KEY,
+            "claim_id",
+            "publication_mode",
+            "aggregate_publication_mode",
+            "daemon_publication_mode",
+            "aggregate_publication_authority",
+        ):
+            updates.pop(key, None)
+
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            return DaemonPublicationRevocationResult(
+                _DAEMON_REVOCATION_DEADLINE_EXHAUSTED
+            )
+
+        connection: sqlite3.Connection | None = None
+        try:
+            timeout_ms = max(1, int(remaining * 1000))
+            connection = sqlite3.connect(
+                self.path,
+                timeout=max(0.001, remaining),
+                isolation_level=None,
+            )
+            _disable_sqlite_close_checkpoint(connection)
+            connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+            if time.monotonic() >= deadline:
+                return DaemonPublicationRevocationResult(
+                    _DAEMON_REVOCATION_DEADLINE_EXHAUSTED
+                )
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT instance_id, state_json FROM daemon_state WHERE id=?",
+                ("daemon",),
+            ).fetchone()
+            if row is None or row[0] != expected_instance_id:
+                connection.rollback()
+                return DaemonPublicationRevocationResult(
+                    _DAEMON_REVOCATION_OWNERSHIP_LOST
+                )
+            try:
+                payload_value = json.loads(row[1])
+            except (TypeError, json.JSONDecodeError):
+                payload_value = {}
+            payload = dict(payload_value) if isinstance(payload_value, dict) else {}
+            for key in ("instance_id", "lifecycle", "updated_at"):
+                payload.pop(key, None)
+            payload.pop(_DAEMON_PUBLICATION_CLAIM_KEY, None)
+            payload.update(updates)
+            updated = connection.execute(
+                """
+                UPDATE daemon_state
+                SET lifecycle=?, state_json=?, updated_at=?
+                WHERE id=? AND instance_id=?
+                """,
+                (
+                    lifecycle,
+                    json.dumps(payload, sort_keys=True),
+                    utc_now().isoformat(),
+                    "daemon",
+                    expected_instance_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                return DaemonPublicationRevocationResult(
+                    _DAEMON_REVOCATION_OWNERSHIP_LOST
+                )
+            if time.monotonic() >= deadline:
+                connection.rollback()
+                return DaemonPublicationRevocationResult(
+                    _DAEMON_REVOCATION_DEADLINE_EXHAUSTED
+                )
+            connection.commit()
+        except sqlite3.OperationalError as exc:
+            if connection is not None:
+                connection.rollback()
+            if time.monotonic() >= deadline or "locked" in str(exc).casefold():
+                return DaemonPublicationRevocationResult(
+                    _DAEMON_REVOCATION_DEADLINE_EXHAUSTED
+                )
+            raise SQLiteStoreLifecycleError(
+                "daemon publication authority revocation failed"
+            ) from exc
+        except sqlite3.Error as exc:
+            if connection is not None:
+                connection.rollback()
+            raise SQLiteStoreLifecycleError(
+                "daemon publication authority revocation failed"
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        self._notify_change()
+        return DaemonPublicationRevocationResult(_DAEMON_REVOCATION_REVOKED)
+
+    revoke_aggregate_publication_authority = revoke_daemon_publication_authority
 
     def get_daemon_publication_authority(
         self, instance_id: str | None = None

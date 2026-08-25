@@ -237,6 +237,7 @@ def test_publication_rejects_unknown_keys_and_unknown_section(
         "staging_dir",
         "staging_path",
         "trusted_staging_root",
+        "build_timeout_seconds",
         "lease_seconds",
         "lease_duration",
         "retry_limit",

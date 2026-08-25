@@ -1,36 +1,45 @@
-# Publication build-timeout contract
+# Publication build-timeout retirement record
 
-**Status:** non-binding decision packet
+**Status:** accepted
 
-**Accepted:** no
+**Decision:** immediate rejection with a zero-release deprecation window.
 
-**Runtime effect:** none. This packet changes no parser, configuration,
-publication, retry, cancellation, or failure behavior.
+**Runtime effect:** The first changed release rejects retained
+`build_timeout_seconds` keys through the existing strict unknown-key validation.
+Key-free publication configuration remains compatible with the previous release;
+publication, retry, cancellation, and failure behavior are otherwise unchanged.
+
+## Compatibility transition
+
+The first changed release rejects `build_timeout_seconds`; operators must remove
+the key before upgrading. The immediately previous release accepts the same
+key-free configuration, so rollback uses that configuration with the previous
+release. There is no warning period, compatibility alias, automatic rewrite,
+fleet migrator, or migration tool; no timer is implemented, and direct Python
+construction with the removed dataclass keyword is unsupported.
 
 ## Evidence map
 
-### Promised and actual configuration surface
+### Pre-retirement configuration surface
 
-- `StewardPublicationConfig.build_timeout_seconds` is a frozen configuration
-  field with a `300.0` default. Its constructor validates it as a finite,
-  positive value no greater than `86400` seconds and stores the normalized
-  value (`steward/src/coquic_steward/core/config.py:362-510`).
-- `_publication_config` includes `build_timeout_seconds` in its strict allowlist
-  and supplies the same `300.0` default when loading TOML
-  (`steward/src/coquic_steward/core/config.py:1254-1303`). Unknown keys are
-  rejected rather than ignored.
-- The example advertises `build_timeout_seconds = 300`
-  (`steward/steward.example.toml:50`). The example configuration test loads
-  the publication table successfully, while the configuration tests establish
-  that unsupported publication keys fail (`steward/tests/test_example_config.py:12-23,193-210`).
-- The exact repository inventory finds only parser/default/validation and
-  example references. There is no read of the value by a publication caller,
-  builder, provider client, retry policy, or test.
+- Before retirement, `StewardPublicationConfig.build_timeout_seconds` was a
+  frozen configuration field with a `300.0` default. Its constructor validated
+  it as a finite, positive value no greater than `86400` seconds and stored the
+  normalized value.
+- Before retirement, `_publication_config` included `build_timeout_seconds` in
+  its strict allowlist and supplied the same `300.0` default when loading TOML.
+  Unknown keys were rejected rather than ignored.
+- Before retirement, the example advertised `build_timeout_seconds = 300`. The
+  example configuration test loaded the publication table successfully, while
+  the configuration tests established that unsupported publication keys fail.
+- The pre-retirement repository inventory found only parser/default/validation
+  and example references. There was no read of the value by a publication
+  caller, builder, provider client, retry policy, or test.
 - History identifies `ee94b9fd feat(steward): configure cloud publication` as
   the introduction commit. That change added strict cloud publication settings
   and the example field, but did not establish deadline semantics or a
   consumer. Repository history cannot establish whether downstream operator
-  configurations treat the accepted key as a supported promise.
+  configurations treated the accepted key as a supported promise.
 
 ### Composition callers
 
@@ -103,25 +112,26 @@ cleanup at every owned boundary.
 - Provider retries are durable and bounded by `max_retries`; a completion-hook
   exception is deferred to daemon reconciliation, and CLI retry rebuilds
   current evidence. None of these paths supplies build-timeout semantics.
-- Removing the key immediately would make configurations containing it fail the
-  strict unknown-key check, including retained copies of the example. Keeping
-  it while accepting and ignoring it would preserve parsing but create an
-  explicit deprecation/observability contract; that is not currently defined.
+- Retiring the key makes configurations containing it fail the strict unknown-key
+  check, including retained copies of the example. Keeping it while accepting
+  and ignoring it would preserve parsing but create an explicit
+  deprecation/observability contract; the accepted transition does not do so.
 - A migration would need a target spelling or removal policy, support window,
   fleet/rollback behavior, and a way to update existing strict configurations.
   This repository evidence does not provide operator configuration contents,
-  telemetry, or credentials and does not justify choosing that policy.
+  telemetry, or credentials; the accepted zero-release transition instead
+  requires operators to remove the key before upgrading.
 
 ## Option matrix
 
-The matrix compares the two legitimate directions without accepting either
-one. It does not authorize runtime changes.
+The matrix records the accepted retirement decision and rejected alternatives. It
+does not authorize runtime deadline changes.
 
-| Direction | Candidate shape | Consequences and decisions still required |
+| Direction | Candidate shape | Decision and rationale |
 |---|---|---|
-| **Retirement** | **Immediate removal/rejection.** Delete the field from the dataclass, parser allowlist/default, and example in one compatibility transition. | Existing files containing the key fail strict parsing. The support window, release note, migration/rollback story, and whether example-based deployments are expected to update atomically must be approved first. |
-| **Retirement** | **Accepted-but-ignored deprecation.** Keep parsing the key while making its lack of effect explicit. | Avoids an immediate parse break but is a new compatibility promise and risks silently misleading operators. It needs warning/diagnostic behavior, an announced support window, and a final removal release. The current scope does not authorize silently ignoring or deprecating the key. |
-| **Retirement** | **Migration.** Rewrite existing configurations to a chosen replacement or remove the key under a controlled upgrade. | Requires a canonical replacement/removal target, version detection, dry-run and rollback behavior, fleet coverage, and tests for mixed-version readers. No replacement target exists in the current contract. |
+| **Retirement** | **Immediate removal/rejection.** Delete the field from the dataclass, parser allowlist/default, and example in one compatibility transition. | **Accepted.** The first changed release rejects retained keys through strict parsing; operators remove the key before upgrading. The previous release accepts omission, which provides rollback. |
+| **Retirement** | **Accepted-but-ignored deprecation.** Keep parsing the key while making its lack of effect explicit. | Rejected. It would preserve a misleading configuration promise and require a warning period and final removal release. |
+| **Retirement** | **Migration.** Rewrite existing configurations to a chosen replacement or remove the key under a controlled upgrade. | Rejected. No replacement target or migration tool is needed or authorized; the zero-release transition requires operators to remove the key. |
 | **Implementation** | **Real end-to-end deadline.** Define one monotonic budget for the complete composition boundary, or explicitly choose a narrower documented phase. | Must specify whether graph capture, conversion, sanitization, scanner/OCR, staging, and cleanup are included; which callers enforce it; and whether disabled publication still validates the value. A stop-waiting-only wrapper is rejected because it does not cancel owned work. |
 | **Implementation** | **Cancellation and cleanup.** Propagate cancellation/deadline through Python stages, scanner/OCR runners, temporary directories, staging descriptors, and child process groups. | Requires cancellable runner APIs, process termination/escalation rules, cleanup-after-timeout guarantees, and crash/restart behavior. A timed-out worker must not leave unowned child processes, partial staging, or an ambiguous outbox row. |
 | **Implementation** | **Failure and retry contract.** Add a stable timeout outcome and decide how it interacts with fail-closed publication, existing visible heads, repair, outbox state, CLI retry, and provider retry budgets. | Requires a public reason category or an explicit existing category, durable evidence without leaking details, whether timeout consumes a retry, whether a retry reuses the deterministic generation, and how repeated expiry becomes blocked. Provider/network timeouts remain separate. |
@@ -131,78 +141,65 @@ cross-boundary cancellation, cleanup, failure, and retry contract. The
 implementation option must not reinterpret scanner, OCR, network, lease, or
 Codex stage timeouts as this deadline.
 
-## Non-binding recommendation and routing
+## Accepted decision
 
-Do not change runtime behavior or configuration acceptance in this spike. Keep
-the field and its current no-consumer behavior until Grill records the
-compatibility choice and the intended meaning of “build.” On current evidence,
-retirement appears lower risk than inventing an incomplete deadline, but even
-retirement is not safe to execute without an explicit support window or
-migration/accepted-deprecation decision. If an operator requirement truly needs
-an end-to-end publication deadline, select the implementation shape instead and
-commission a dedicated contract plan for cancellation, cleanup, failure, and
-retry.
+Retire `build_timeout_seconds` rather than invent incomplete deadline semantics.
+The compatibility transition is immediate rejection with a zero-release
+deprecation window. The implementation removes the dataclass field, parser
+allowlist/default, and example entry; retained keys fail through strict
+unknown-key validation. Operators remove the key before upgrading, and the
+previous release accepts the same key-free configuration for rollback.
 
-This recommendation is non-binding. It is not an acceptance of the field as a
-semantic deadline, a deprecation, an accepted-and-ignored setting, or a promise
-to implement it. Behavior and compatibility are routed to Grill; no existing
-timeout is this deadline by implication.
+No warning period, silent-ignore path, automatic rewrite, fleet migrator, or
+compatibility alias exists. This change does not add a timer or change
+publication composition, provider, outbox, cleanup, or retry behavior. A future
+deadline requires the separately defined cancellation, cleanup, failure, and
+retry contract below.
 
-## Questions for Grill
+## Deferred implementation questions
 
-1. Is `build_timeout_seconds` an externally supported operator setting despite
-   having no consumer, or is its current presence only an unfinished
-   configuration surface?
-2. If it is retired, should old configurations be rejected immediately,
-   accepted with an explicit deprecation period, or migrated? What support
-   window and rollback behavior apply to each release in the window?
-3. If it is implemented, what exact wall-clock boundary does “build” cover:
-   graph capture, conversion, redaction, scanner/OCR, staging, cleanup, or
-   some subset? Is the budget monotonic and per generation, per caller, or per
-   task?
-4. Which synchronous callers must enforce the same contract: session
-   completion, daemon queue/reconciliation, terminal receipt verification, and
-   CLI retry? Is a retry granted a fresh budget?
-5. On expiry, should publication fail closed, request repair, hide an existing
+A future deadline requires answers to the following questions before any
+runtime work is planned:
+
+1. What exact wall-clock boundary does “build” cover: graph capture, conversion,
+   redaction, scanner/OCR, staging, cleanup, or some subset? Is the budget
+   monotonic and per generation, per caller, or per task?
+2. Which synchronous callers must enforce the same contract: session completion,
+   daemon queue/reconciliation, terminal receipt verification, and CLI retry? Is
+   a retry granted a fresh budget?
+3. On expiry, should publication fail closed, request repair, hide an existing
    visible head, remain queued, or become blocked? What stable reason and
    operator-facing evidence are required?
-6. Does expiry consume `max_retries`, or is build retry independent from
+4. Does expiry consume `max_retries`, or is build retry independent from
    provider/network retry? Should retries reuse the same deterministic
    generation identity or create a changed generation?
-7. What cancellation guarantee is required for scanner/OCR subprocesses,
-   Python work, temporary files, and staging children, including escalation
-   after a process ignores termination?
-8. Which cleanup and restart invariants must be proven before a timed-out
+5. What cancellation guarantee is required for scanner/OCR subprocesses, Python
+   work, temporary files, and staging children, including escalation after a
+   process ignores termination?
+6. Which cleanup and restart invariants must be proven before a timed-out
    composition can be retried, and how should an interrupted cleanup be
    represented durably?
-9. Is any operator configuration inventory or telemetry needed to select the
-   compatibility window? This packet does not inspect credentials or private
+7. Is any operator configuration inventory or telemetry needed to select a
+   future support policy? This record does not inspect credentials or private
    configuration contents.
 
-## Bounded follow-up shapes
+## Bounded follow-up shape
 
-These are separately approvable shapes, not implementation authority:
-
-1. **Retirement and compatibility transition.** Inventory supported versions
-   and config consumers, choose immediate rejection versus explicit
-   accepted-deprecation versus migration, define the support/rollback window,
-   update the example and documentation, and add strict-parser/config tests.
-   Do not add a runtime deadline or silently ignore the key without that
-   decision.
-2. **End-to-end build deadline.** Define the deadline boundary and monotonic
-   propagation, add cancellable scanner/OCR/child-process runners and cleanup
-   invariants, choose a stable failure and outbox/CLI retry policy, cover every
-   composition caller, and add focused timeout/restart tests. Keep network,
-   lease, scanner/OCR, and Codex stage timeouts as separate contracts.
+A future end-to-end build deadline is a separate contract. It must define the
+deadline boundary and monotonic propagation, add cancellable scanner/OCR and
+child-process runners with cleanup invariants, choose a stable failure and
+outbox/CLI retry policy, cover every composition caller, and add focused
+timeout/restart tests. Keep network, lease, scanner/OCR, and Codex stage
+timeouts as separate contracts.
 
 ## Verification record
 
-The plan evidence searches were reproduced against the assigned tree:
+The pre-retirement evidence searches were reproduced against the assigned tree:
 
 - `git grep -n 'build_timeout_seconds' -- steward/src steward/steward.example.toml steward/tests` — only configuration and example references.
 - `git grep -n 'compose_publication_generation' -- steward/src/coquic_steward steward/tests` — session, daemon, publisher, and tests are visible.
 - `git grep -n -E 'scanner_timeout|ocr_timeout|network_timeout_seconds|lease_duration_seconds' -- steward/src/coquic_steward/publication steward/src/coquic_steward/orchestration steward/src/coquic_steward/cli.py` — separate stage, provider, and lease owners are visible.
 - `git log --oneline -S'build_timeout_seconds' -- steward` — introduction commit `ee94b9fd feat(steward): configure cloud publication`.
 
-The document gate and hygiene gate are run separately after this packet is
-written. No code or test changes are part of this spike.
+The source/example inventory, removed-key test, focused/full tests, hooks, and
+hygiene checks verify this retirement transition.

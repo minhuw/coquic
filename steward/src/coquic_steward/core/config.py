@@ -381,7 +381,6 @@ class StewardPublicationConfig:
     private_bucket: str = ""
     public_base_url: str = ""
     staging_root: Path | None = None
-    build_timeout_seconds: float = 300.0
     network_timeout_seconds: float = 30.0
     lease_duration_seconds: float = 300.0
     max_retries: int = 3
@@ -448,11 +447,6 @@ class StewardPublicationConfig:
         if public_bucket and private_bucket and public_bucket == private_bucket:
             raise ValueError("publication.public_bucket and private_bucket must differ")
 
-        build_timeout = _publication_float(
-            self.build_timeout_seconds,
-            "build_timeout_seconds",
-            maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
-        )
         network_timeout = _publication_float(
             self.network_timeout_seconds,
             "network_timeout_seconds",
@@ -505,7 +499,6 @@ class StewardPublicationConfig:
         object.__setattr__(self, "private_bucket", private_bucket)
         object.__setattr__(self, "public_base_url", public_url)
         object.__setattr__(self, "staging_root", staging)
-        object.__setattr__(self, "build_timeout_seconds", build_timeout)
         object.__setattr__(self, "network_timeout_seconds", network_timeout)
         object.__setattr__(self, "lease_duration_seconds", lease_seconds)
         object.__setattr__(self, "max_retries", retry_count)
@@ -1266,7 +1259,6 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
         "private_bucket",
         "public_base_url",
         "staging_root",
-        "build_timeout_seconds",
         "network_timeout_seconds",
         "lease_duration_seconds",
         "max_retries",
@@ -1293,7 +1285,6 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
         private_bucket=data.get("private_bucket", ""),
         public_base_url=data.get("public_base_url", ""),
         staging_root=data.get("staging_root"),
-        build_timeout_seconds=data.get("build_timeout_seconds", 300.0),
         network_timeout_seconds=data.get("network_timeout_seconds", 30.0),
         lease_duration_seconds=data.get("lease_duration_seconds", 300.0),
         max_retries=data.get("max_retries", 3),

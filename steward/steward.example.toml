@@ -47,7 +47,6 @@ public_bucket = "coquic-public-example"
 private_bucket = "coquic-private-example"
 public_base_url = "https://objects.example.test/coquic/"
 staging_root = "/tmp/fake-coquic-home/private/publication-staging"
-build_timeout_seconds = 300
 network_timeout_seconds = 30
 lease_duration_seconds = 300
 max_retries = 3

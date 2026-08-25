@@ -126,18 +126,6 @@ from coquic_steward.storage.schema import (
 )
 from durable_harness import drive_durable, passing_durable_gates, write_durable_codex
 
-def git_branch_exists(repo: Path, branch: str) -> bool:
-    result = run_command(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=repo,
-    )
-    return result.returncode == 0
-
-def git_branch_head(repo: Path, branch: str) -> str:
-    return run_command(
-        ["git", "rev-parse", branch], cwd=repo, check=True
-    ).stdout.strip()
-
 def _advance_durable(
     executor: StewardExecutor, task_id: str, steps: int
 ) -> list[object]:

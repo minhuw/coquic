@@ -88,13 +88,6 @@ def _task_is_dry_run(task: TaskRecord) -> bool:
     return mode is ExecutionMode.dry_run
 
 
-def _global_dry_run(config: StewardConfig | object) -> bool:
-    active = getattr(config, "dry_run_enabled", None)
-    if active is not None:
-        return bool(active)
-    return bool(getattr(config, "dry_run", False))
-
-
 def publication_graph_for_task(
     config: StewardConfig, store: TaskStore, task: TaskRecord
 ) -> dict[str, object]:
@@ -323,7 +316,7 @@ def enqueue_materialized_publication(
             if not _write_publication_snapshot(config, task.id, run_id, graph):
                 return None
         if isinstance(store, TaskStore):
-            if _global_dry_run(config):
+            if config.dry_run:
                 # Tighten the persisted latch before asking the Store to
                 # authorize the enqueue.  This handles callers that retained
                 # a live Store instance while the daemon switched to dry-run.
@@ -344,7 +337,7 @@ def enqueue_materialized_publication(
                 if not decision.allowed:
                     return decision.proposal
                 return store.enqueue_publication(outcome.to_outbox())
-        elif _global_dry_run(config) or _task_is_dry_run(task):
+        elif config.dry_run or _task_is_dry_run(task):
             return None
         return store.enqueue_publication(outcome.to_outbox())
     except Exception:

@@ -64,7 +64,6 @@ def _spec(**metadata: object) -> TaskSpec:
 def test_config_defaults_to_dry_run_and_validates_boolean(repo: Path, tmp_path: Path) -> None:
     config = load_config(repo_root=repo)
     assert config.dry_run is True
-    assert config.dry_run_enabled is True
 
     path = tmp_path / "invalid-bool.toml"
     path.write_text('[steward]\ndry_run = "false"\n', encoding="utf-8")

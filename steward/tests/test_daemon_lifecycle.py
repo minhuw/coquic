@@ -406,6 +406,7 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     daemon.store = Store()
     daemon.executor = SimpleNamespace()
     daemon.config = SimpleNamespace(
+        dry_run=False,
         publication=SimpleNamespace(
             enabled=True,
             d1_token_path=None,
@@ -448,6 +449,7 @@ def test_publication_worker_waits_after_queued_generation_listing_failure():
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
+    daemon.config = SimpleNamespace(dry_run=False)
     daemon._log = lambda *_args, **_kwargs: None
 
     assert daemon._publish_next_generation(object()) is False
@@ -478,6 +480,7 @@ def test_publication_worker_waits_after_blocked_generation_listing_failure():
     store = Store()
     daemon = object.__new__(StewardDaemon)
     daemon.store = store
+    daemon.config = SimpleNamespace(dry_run=False)
     daemon._log = lambda *_args, **_kwargs: None
 
     assert daemon._publish_next_generation(object()) is False
@@ -512,6 +515,7 @@ def test_publication_worker_drains_pending_hides_before_exposure_claim():
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
+    daemon.config = SimpleNamespace(dry_run=False)
     daemon.logger = None
 
     assert daemon._publish_next_generation(Publisher()) is True
@@ -541,6 +545,7 @@ def test_publication_worker_keeps_exposure_queued_when_hide_reconciliation_fails
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
+    daemon.config = SimpleNamespace(dry_run=False)
     daemon.logger = None
 
     assert daemon._publish_next_generation(Publisher()) is False
@@ -550,7 +555,9 @@ def test_publication_worker_keeps_exposure_queued_when_hide_reconciliation_fails
 def _publication_callback_daemon(store: object) -> StewardDaemon:
     daemon = object.__new__(StewardDaemon)
     daemon.store = store
-    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    daemon.config = SimpleNamespace(
+        dry_run=False, publication=SimpleNamespace(enabled=True)
+    )
     daemon._publication_stop = threading.Event()
     daemon._publication_wakeup = threading.Event()
     daemon._publication_thread = None
@@ -1425,7 +1432,7 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.logger = None
     daemon._publication_source = lambda _generation: {"canonical": True}
     publisher = Publisher()
@@ -1488,7 +1495,7 @@ def test_publication_worker_reconciles_blocked_identity_after_restart(
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.logger = None
     daemon._publication_source = lambda _generation: {"canonical": True}
     publisher = Publisher()
@@ -1531,7 +1538,9 @@ def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
-    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    daemon.config = SimpleNamespace(
+        dry_run=False, publication=SimpleNamespace(enabled=True)
+    )
     daemon.logger = None
     daemon._terminal_publication_receipts_verified = lambda *_args: (True, "verified")
     monkeypatch.setattr(
@@ -1632,6 +1641,7 @@ def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
+    daemon.config = SimpleNamespace(dry_run=False)
     daemon.logger = None
     daemon._publication_source = lambda _generation: {}
 
@@ -4773,6 +4783,7 @@ def test_publication_recovery_enqueues_oldest_run_after_detached_pages(
     daemon = object.__new__(StewardDaemon)
     daemon.store = store
     daemon.config = SimpleNamespace(
+        dry_run=False,
         publication=SimpleNamespace(enabled=True),
     )
 

@@ -30,13 +30,6 @@ class StewardPreflightError(RuntimeError):
     pass
 
 
-def _dry_run_enabled(config: StewardConfig) -> bool:
-    active = getattr(config, "dry_run_enabled", None)
-    if active is not None:
-        return bool(active)
-    return bool(getattr(config, "dry_run", False))
-
-
 @dataclass(frozen=True)
 class PreflightReport:
     """Bounded launch checks; values never include subprocess output."""
@@ -124,7 +117,7 @@ def run_preflight(
         _validate_task_image_identity(inspect.stdout, container.runtime_protocol)
         checks.extend(("docker", "task-image"))
 
-    if check_remote_push and not _dry_run_enabled(config):
+    if check_remote_push and not config.dry_run:
         preflight_remote_push(config)
         checks.append("remote-push")
     return PreflightReport(tuple(checks), tuple(warnings))
@@ -296,7 +289,7 @@ def _validate_container_host_mapping(config: StewardConfig) -> None:
 
 
 def preflight_remote_push(config: StewardConfig) -> bool:
-    if _dry_run_enabled(config):
+    if config.dry_run:
         return False
     fetch = run_command(
         ["git", "fetch", "--quiet", config.git_remote, config.main_branch],

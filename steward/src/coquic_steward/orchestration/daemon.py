@@ -164,13 +164,6 @@ GLOBAL_ACTIVE_TASK_ADMISSION_CAP = 16
 _BUILTIN_DOCKER_RECONCILE = DockerResourceManager.reconcile
 
 
-def _global_dry_run(config: StewardConfig | object) -> bool:
-    active = getattr(config, "dry_run_enabled", None)
-    if active is not None:
-        return bool(active)
-    return bool(getattr(config, "dry_run", False))
-
-
 def _task_execution_mode(task: TaskRecord) -> ExecutionMode | None:
     metadata = getattr(getattr(task, "spec", None), "metadata", None)
     if not isinstance(metadata, Mapping):
@@ -221,7 +214,7 @@ def create_live_rerun(
     repository and provider state when it later dispatches the new task.
     """
 
-    if _global_dry_run(config):
+    if config.dry_run:
         raise LiveRerunRejected("dry_run_configured")
     try:
         source = store.get(source_task_id)
@@ -425,7 +418,7 @@ class StewardDaemon:
         # The daemon is the startup authority.  Low-level Store callers may
         # still use the legacy live default, but a configured global policy is
         # attached before any task is reconciled or dispatched.
-        self.store.set_startup_execution_mode(_global_dry_run(self.config))
+        self.store.set_startup_execution_mode(self.config.dry_run)
         self.logger = logger
         self._lifecycle_lock = threading.RLock()
         self._shutdown_event = threading.Event()
@@ -646,7 +639,7 @@ class StewardDaemon:
     def _reconcile_docker_resources(self) -> OwnedDockerUsage | None:
         if self._docker_resources is None:
             return None
-        if _global_dry_run(self.config):
+        if self.config.dry_run:
             # A custom lifecycle adapter owns its own read-only policy; retain
             # that adapter contract while the built-in manager stays guarded.
             if (
@@ -1300,7 +1293,7 @@ class StewardDaemon:
     def _install_publication_change_callback(self) -> None:
         """Wake the publication worker after every committed local mutation."""
 
-        if _global_dry_run(self.config):
+        if self.config.dry_run:
             return
         if not getattr(self.config.publication, "enabled", False):
             return
@@ -1348,7 +1341,7 @@ class StewardDaemon:
     def _build_publication_publisher(self) -> CloudPublisher | None:
         """Construct transport clients only for a live publication worker."""
 
-        if _global_dry_run(self.config):
+        if self.config.dry_run:
             return None
         publication = self.config.publication
         r2: object | None = None
@@ -1656,7 +1649,7 @@ class StewardDaemon:
         return progressed, True
 
     def _publish_next_generation(self, publisher: CloudPublisher) -> bool:
-        if _global_dry_run(getattr(self, "config", None)):
+        if self.config.dry_run:
             self._log("dry-run publication worker paused")
             return False
         hide_progress, hides_seen = self._drain_pending_publication_hides(publisher)
@@ -1813,7 +1806,7 @@ class StewardDaemon:
     def _start_publication_worker(self) -> None:
         """Start the one daemon-owned publication worker when enabled."""
 
-        if _global_dry_run(self.config):
+        if self.config.dry_run:
             return
         if not getattr(self.config.publication, "enabled", False):
             return
@@ -1901,10 +1894,7 @@ class StewardDaemon:
     def _enqueue_materialized_publications(self) -> None:
         """Compose completion evidence without crossing the publication boundary."""
 
-        if (
-            not getattr(self.config.publication, "enabled", False)
-            or _global_dry_run(self.config)
-        ):
+        if not getattr(self.config.publication, "enabled", False) or self.config.dry_run:
             return
         tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
         materialized: list[tuple[TaskRecord, object]] = []
@@ -3498,7 +3488,7 @@ class StewardDaemon:
     def _terminal_publication_gate(self, task: TaskRecord) -> bool:
         """Require the final durable generation and all verified receipts."""
 
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
+        if self.config.dry_run or _task_is_dry_run(task):
             # Dry-run publication is explicitly not applicable.  No outbox row,
             # receipt wait, transport client, or cleanup intent is created.
             return True

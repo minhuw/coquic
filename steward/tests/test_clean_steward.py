@@ -317,7 +317,6 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.private_root == coquic_home / "private"
     assert config.transcripts_dir == config.state_dir / "transcripts"
     assert config.dry_run is True
-    assert config.dry_run_enabled is True
     assert config.enabled_signals == (
         "github-actions:ci",
         "github-actions:test",

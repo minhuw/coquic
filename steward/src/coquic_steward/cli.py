@@ -114,20 +114,11 @@ def _context(*, resolve_execution_modes: bool = True) -> tuple[TaskStore, Stewar
             **{**config.__dict__, "local_codex_test_harness": True}
         )
     if resolve_execution_modes:
-        store = TaskStore.open(
-            config.db_path, dry_run=_publication_mutation_blocked(config)
-        )
+        store = TaskStore.open(config.db_path, dry_run=config.dry_run)
     else:
         # Inspection commands must not silently become a startup boundary.
         store = TaskStore.open(config.db_path)
     return store, config
-
-
-def _publication_mutation_blocked(config: StewardConfig) -> bool:
-    active = getattr(config, "dry_run_enabled", None)
-    if active is not None:
-        return bool(active)
-    return bool(getattr(config, "dry_run", False))
 
 
 def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
@@ -158,7 +149,7 @@ def _current_publication_source(
 def _build_cli_hide_publisher(
     config: StewardConfig, store: TaskStore
 ) -> tuple[CloudPublisher, D1PublicationClient] | None:
-    if _publication_mutation_blocked(config):
+    if config.dry_run:
         return None
     publication: StewardPublicationConfig = config.publication
     if not publication.enabled:
@@ -200,7 +191,7 @@ def _build_cli_retry_publisher(
     fail closed through ``CloudPublisher.hide_task`` when no D1 client exists.
     """
 
-    if _publication_mutation_blocked(config):
+    if config.dry_run:
         return None
     built = _build_cli_hide_publisher(config, store)
     if built is not None:
@@ -322,7 +313,7 @@ def publication_retry(publication_id: str) -> None:
     """Rebuild current evidence and enqueue a changed generation."""
 
     store, config = _context()
-    if _publication_mutation_blocked(config):
+    if config.dry_run:
         _emit_publication(
             {
                 "status": PublicationStatus.blocked.value,
@@ -415,7 +406,7 @@ def publication_hide(
     if reason not in _PUBLICATION_HIDE_REASONS:
         raise typer.BadParameter("unsupported reason", param_hint="--reason")
     store, config = _context()
-    if _publication_mutation_blocked(config):
+    if config.dry_run:
         _emit_publication(
             {
                 "status": PublicationHideStatus.blocked.value,
@@ -490,14 +481,10 @@ def init() -> None:
         with acquire_daemon_lock(config):
             try:
                 if os.path.lexists(config.db_path):
-                    store = TaskStore.open(
-                        config.db_path, dry_run=_publication_mutation_blocked(config)
-                    )
+                    store = TaskStore.open(config.db_path, dry_run=config.dry_run)
                     outcome = "already initialized"
                 else:
-                    store = TaskStore.create(
-                        config.db_path, dry_run=_publication_mutation_blocked(config)
-                    )
+                    store = TaskStore.create(config.db_path, dry_run=config.dry_run)
                     outcome = "initialized"
             finally:
                 if store is not None:
@@ -572,7 +559,7 @@ def rerun_live(task_id: str) -> None:
     """Queue a fresh live task from a verified dry-run task."""
 
     config = load_config()
-    if _publication_mutation_blocked(config):
+    if config.dry_run:
         typer.echo(
             f"blocked source={task_id} reason=dry_run_configured",
             err=True,

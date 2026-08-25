@@ -788,12 +788,6 @@ class StewardConfig:
         object.__setattr__(self, "signal_providers", providers)
 
     @property
-    def dry_run_enabled(self) -> bool:
-        """Whether the global startup policy is enforcing dry-run."""
-
-        return self.dry_run
-
-    @property
     def codex_api_key_path(self) -> Path | None:
         """Daemon-only path for the configured Codex credential."""
 

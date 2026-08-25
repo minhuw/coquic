@@ -380,7 +380,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
             return list(receipts)
 
     daemon = object.__new__(StewardDaemon)
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.store = Store()
     daemon._publication_source = lambda _generation: graph
     calls: list[object] = []
@@ -501,7 +501,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
 
     publisher._enqueue_precomposed_repair = capture_enqueue
     daemon = object.__new__(StewardDaemon)
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.store = store
     daemon.logger = None
     daemon._publication_source = lambda _generation: graph
@@ -669,7 +669,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
             )
 
     daemon = object.__new__(StewardDaemon)
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.store = restarted
     daemon.logger = None
     source_calls: list[str] = []
@@ -849,7 +849,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
         later_free.task_id: later_graph,
     }
     daemon = object.__new__(StewardDaemon)
-    daemon.config = SimpleNamespace(publication=config)
+    daemon.config = SimpleNamespace(dry_run=False, publication=config)
     daemon.store = restarted
     daemon.logger = None
     daemon._publication_source = lambda generation: source_by_task[generation.task_id]
@@ -906,6 +906,7 @@ def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation
         active_graph,
     )
     daemon.config = SimpleNamespace(
+        dry_run=False,
         tasks_dir=tasks_dir,
         publication=SimpleNamespace(enabled=True),
     )
@@ -1066,7 +1067,8 @@ def test_materialized_success_enqueues_deterministically_without_transport(
     staging_root = tmp_path / "publication-staging"
     staging_root.mkdir(mode=0o700)
     config = SimpleNamespace(
-        publication=SimpleNamespace(enabled=True, staging_root=staging_root)
+        dry_run=False,
+        publication=SimpleNamespace(enabled=True, staging_root=staging_root),
     )
     task = SimpleNamespace(id="task-publication-preflight")
     run = SimpleNamespace(
@@ -1114,6 +1116,7 @@ def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
     monkeypatch.setattr(session_module, "compose_publication_generation", compose)
     queued: list[object] = []
     config = SimpleNamespace(
+        dry_run=False,
         tasks_dir=tmp_path / "tasks",
         publication=SimpleNamespace(enabled=True),
     )
@@ -1330,7 +1333,7 @@ def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path)
         supervisor = object.__new__(session_module.SessionSupervisor)
         supervisor.archive = Archive()
         supervisor.store = store
-        supervisor.config = SimpleNamespace()
+        supervisor.config = SimpleNamespace(dry_run=False)
         supervisor._active = {}
         supervisor._active_lock = threading.RLock()
         supervisor._enqueue_completed_run = lambda _task, saved: completed_ids.append(

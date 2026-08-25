@@ -50,10 +50,6 @@ case "${1:-serve}" in
     shift
     exec /bin/kill -"${COQUIC_STEWARD_SIGNAL:?}" "$@"
     ;;
-  prepare)
-    shift
-    mkdir -p -- "$@"
-    ;;
   *)
     echo "unknown task entrypoint operation" >&2
     exit 64

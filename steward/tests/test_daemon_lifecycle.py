@@ -849,6 +849,251 @@ def test_shutdown_pre_socket_connection_revokes_authority_before_join(
     assert isinstance(errors[0], daemon_module._PublicationTransportCancelled)
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_shutdown_bounds_active_d1_operation_without_revocation(
+    config, force: bool, monkeypatch
+):
+    object.__setattr__(config, "dry_run", False)
+    object.__setattr__(config, "shutdown_grace_seconds", 1.0)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    store.claim_daemon_instance(
+        daemon.runtime.instance_id,
+        lifecycle=DaemonLifecycleState.running.value,
+    )
+    authority = store.get_daemon_publication_authority(daemon.runtime.instance_id)
+    assert authority is not None
+
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    stream_closed = threading.Event()
+    shutdown_done = threading.Event()
+    revocation_committed = threading.Event()
+    writes: list[bytes] = []
+    post_revocation_writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            del timeout
+            write_entered.set()
+            release_write.wait(timeout=3.0)
+            writes.append(data)
+            if revocation_committed.is_set():
+                post_revocation_writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            del timeout
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    http_client = httpx.Client(trust_env=False)
+    http_client._transport._pool._network_backend = Backend()
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+    daemon._publication_thread = None
+    daemon._publication_cancel = adapter
+
+    original_revoke = store.revoke_daemon_publication_authority
+
+    def revoke(*args: object, **kwargs: object):
+        result = original_revoke(*args, **kwargs)
+        if result.revoked:
+            revocation_committed.set()
+        return result
+
+    monkeypatch.setattr(store, "revoke_daemon_publication_authority", revoke)
+
+    def publish() -> None:
+        try:
+            with store.daemon_publication_admission(
+                authority,
+                action="publication.overhead",
+                action_id="bounded-d1-operation",
+                target="cloudflare-d1",
+            ) as decision:
+                assert decision.allowed
+                d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=publish, daemon=True)
+    daemon._publication_thread = worker
+    worker.start()
+    assert write_entered.wait(timeout=1.0)
+
+    result: list[object] = []
+
+    def shutdown() -> None:
+        result.append(daemon.shutdown(force=force))
+        shutdown_done.set()
+
+    shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+    started = time.monotonic()
+    shutdown_thread.start()
+    try:
+        assert stream_closed.wait(timeout=1.0)
+        assert shutdown_done.wait(timeout=1.75)
+        assert time.monotonic() - started < 2.0
+        assert result
+        assert result[0].state is DaemonLifecycleState.stopping
+        state = store.get_daemon_state()
+        assert state is not None
+        assert state["lifecycle"] == DaemonLifecycleState.running.value
+        assert state["publication_claim_id"] == authority.claim_id
+        assert not revocation_committed.is_set()
+        assert writes == []
+    finally:
+        release_write.set()
+        worker.join(timeout=2.0)
+        shutdown_thread.join(timeout=1.0)
+        adapter.close()
+        d1.close()
+
+    assert not worker.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert errors
+    assert not post_revocation_writes
+
+
+def test_shutdown_waits_for_active_d1_quiescence_before_revocation(
+    config, monkeypatch
+):
+    object.__setattr__(config, "dry_run", False)
+    object.__setattr__(config, "shutdown_grace_seconds", 1.0)
+    store = TaskStore.create(config.db_path, dry_run=False)
+    daemon = StewardDaemon(config, store)
+    store.claim_daemon_instance(
+        daemon.runtime.instance_id,
+        lifecycle=DaemonLifecycleState.running.value,
+    )
+    authority = store.get_daemon_publication_authority(daemon.runtime.instance_id)
+    assert authority is not None
+
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    stream_closed = threading.Event()
+    revocation_committed = threading.Event()
+    shutdown_done = threading.Event()
+    writes: list[bytes] = []
+    post_revocation_writes: list[bytes] = []
+    errors: list[BaseException] = []
+
+    class Stream:
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            del timeout
+            write_entered.set()
+            release_write.wait(timeout=2.0)
+            writes.append(data)
+            if revocation_committed.is_set():
+                post_revocation_writes.append(data)
+
+        def read(self, _maximum: int, timeout: float | None = None) -> bytes:
+            del timeout
+            return b""
+
+        def close(self) -> None:
+            stream_closed.set()
+
+        def get_extra_info(self, _name: str) -> object | None:
+            return None
+
+    class Backend:
+        def connect_tcp(self, **_kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_unix_socket(self, **_kwargs: object) -> Stream:
+            raise AssertionError("D1 must use TCP")
+
+    http_client = httpx.Client(trust_env=False)
+    http_client._transport._pool._network_backend = Backend()
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "http://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+    daemon._publication_cancel = adapter
+
+    original_revoke = store.revoke_daemon_publication_authority
+
+    def revoke(*args: object, **kwargs: object):
+        result = original_revoke(*args, **kwargs)
+        if result.revoked:
+            revocation_committed.set()
+        return result
+
+    monkeypatch.setattr(store, "revoke_daemon_publication_authority", revoke)
+
+    def publish() -> None:
+        try:
+            with store.daemon_publication_admission(
+                authority,
+                action="publication.overhead",
+                action_id="quiescent-d1-operation",
+                target="cloudflare-d1",
+            ) as decision:
+                assert decision.allowed
+                d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=publish, daemon=True)
+    daemon._publication_thread = worker
+    worker.start()
+    assert write_entered.wait(timeout=1.0)
+
+    result: list[object] = []
+
+    def shutdown() -> None:
+        result.append(daemon.shutdown(force=True))
+        shutdown_done.set()
+
+    shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+    shutdown_thread.start()
+    try:
+        assert stream_closed.wait(timeout=1.0)
+        assert not shutdown_done.is_set()
+        release_write.set()
+        assert shutdown_done.wait(timeout=1.5)
+        assert result
+        assert result[0].state is DaemonLifecycleState.stopped
+        state = store.get_daemon_state()
+        assert state is not None
+        assert state["lifecycle"] == DaemonLifecycleState.stopped.value
+        assert "publication_claim_id" not in state
+        assert revocation_committed.is_set()
+    finally:
+        release_write.set()
+        worker.join(timeout=1.0)
+        shutdown_thread.join(timeout=1.0)
+        adapter.close()
+        d1.close()
+
+    assert not worker.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert errors
+    assert not post_revocation_writes
+
+
 def test_shutdown_reports_stopping_when_authority_revocation_expires(config):
     object.__setattr__(config, "dry_run", False)
     store = TaskStore.create(config.db_path, dry_run=False)
@@ -1498,11 +1743,17 @@ def test_publication_worker_shutdown_closes_nested_r2_transport_before_deadline(
     assert started.wait(timeout=1.0)
 
     deadline = time.monotonic() + 1.0
-    daemon._stop_publication_worker(deadline=deadline)
+    assert daemon._stop_publication_worker(deadline=deadline) is False
+    assert not r2_closed.is_set()
+    assert not d1_closed.is_set()
+    assert worker.is_alive()
 
+    released.set()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
     assert r2_closed.is_set()
     assert d1_closed.is_set()
-    assert not worker.is_alive()
+    assert daemon._stop_publication_worker(deadline=time.monotonic() + 1.0) is True
     assert daemon._publication_thread is None
 
 
@@ -2318,6 +2569,60 @@ def test_httpx_transport_adapter_fences_existing_established_proxy_connection(
         adapter.cancel()
         with pytest.raises(OSError):
             stream.write(b"POST /after-revocation HTTP/1.1\r\n\r\n")
+        right.settimeout(1.0)
+        assert right.recv(1) == b""
+    finally:
+        adapter.close()
+        d1.close()
+        right.close()
+
+
+def test_httpx_transport_adapter_accepts_mixed_proxy_pool_and_tunnel_transition(
+    monkeypatch,
+):
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+
+    from coquic_steward.orchestration.transport import _HttpxD1HandoffStream
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    pool = proxy._pool
+    forward = pool.create_connection(
+        httpcore.Origin(b"http", b"forward.example.test", 80)
+    )
+    tunnel = pool.create_connection(
+        httpcore.Origin(b"https", b"publication.example.test", 443)
+    )
+    left, right = socket.socketpair()
+    tunnel._connection = httpcore.HTTP11Connection(
+        origin=httpcore.Origin(b"https", b"publication.example.test", 443),
+        stream=SyncStream(left),
+    )
+    tunnel._connected = False
+    pool._connections.extend([forward, tunnel])
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+    adapter = HttpxD1TransportAdapter(d1)
+
+    try:
+        assert adapter._proxy_connections[id(forward)] is forward._connection
+        assert tunnel._connection is not None
+        assert isinstance(
+            tunnel._connection._network_stream, _HttpxD1HandoffStream
+        )
+        assert adapter.cancel().quiescent
         right.settimeout(1.0)
         assert right.recv(1) == b""
     finally:

@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class DaemonCancellationResult:
+    """Report whether a daemon collaborator reached quiescence."""
+
+    quiescent: bool
 
 
 class PublicationTransportSetupError(RuntimeError):
@@ -14,5 +22,5 @@ class DaemonCancellation(ABC):
     """Private cancellation boundary owned by the daemon."""
 
     @abstractmethod
-    def cancel(self) -> None:
-        """Cancel the work owned by one daemon collaborator."""
+    def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
+        """Cancel one collaborator, bounded by an optional monotonic deadline."""

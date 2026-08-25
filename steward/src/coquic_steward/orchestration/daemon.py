@@ -138,7 +138,11 @@ from ..signals import (
     revalidate_signal_items,
 )
 from ..signals.collector import revalidate_signal_items_with_context
-from .contracts import DaemonCancellation, PublicationTransportSetupError
+from .contracts import (
+    DaemonCancellation,
+    DaemonCancellationResult,
+    PublicationTransportSetupError,
+)
 from .transport import (
     BotocoreR2TransportAdapter,
     HttpxD1TransportAdapter,
@@ -1835,20 +1839,30 @@ class StewardDaemon:
 
     def _request_publication_worker_stop(
         self, *, deadline: float | None = None
-    ) -> None:
-        """Initiate provider cancellation without waiting for worker teardown."""
+    ) -> DaemonCancellationResult:
+        """Initiate bounded provider cancellation without worker teardown."""
 
         self._publication_stop.set()
         self._publication_wakeup.set()
         self._publication_deadline = deadline
         cancel = self._publication_cancel
-        if cancel is not None:
-            # Closing the daemon-owned clients is the provider cancellation
-            # boundary.  The worker still owns final cleanup in its finally.
-            try:
-                cancel.cancel()
-            except Exception:
-                pass
+        if cancel is None:
+            return DaemonCancellationResult(quiescent=True)
+        # Cancellation closes transport streams and sockets, while the worker
+        # retains ownership of final client cleanup in its finally block.
+        try:
+            result = cancel.cancel(deadline=deadline)
+        except Exception as exc:
+            self._log(
+                "publication transport cancellation failed "
+                f"error={exc.__class__.__name__}"
+            )
+            return DaemonCancellationResult(quiescent=False)
+        if isinstance(result, DaemonCancellationResult):
+            return result
+        # A collaborator that does not return the typed outcome cannot prove
+        # quiescence and must not unlock durable authority revocation.
+        return DaemonCancellationResult(quiescent=False)
 
     def _join_publication_worker(self, *, deadline: float | None = None) -> bool:
         """Join a cancelled publication worker within the shutdown deadline."""
@@ -4370,14 +4384,25 @@ class StewardDaemon:
         # Cancel provider I/O before the lifecycle transition waits on the same
         # Store admission boundary held by an in-flight aggregate operation.
         self._publication_authority = None
-        self._request_publication_worker_stop(deadline=deadline)
-        # Revoke the durable claim before waiting for a worker that may still be
-        # blocked outside the Store admission boundary.
-        try:
-            initial_revocation = self._enter_stopping(
-                force=force, deadline=deadline
-            )
-        finally:
+        cancellation = self._request_publication_worker_stop(deadline=deadline)
+        # Durable authority may be revoked only after every admitted D1
+        # handoff operation has quiesced.  A timeout leaves the durable claim
+        # untouched while the worker completes its own cleanup asynchronously.
+        quiescence_proven = (
+            cancellation is None
+            or getattr(cancellation, "quiescent", False)
+        )
+        initial_revocation: DaemonPublicationRevocationResult | None = None
+        if quiescence_proven:
+            try:
+                initial_revocation = self._enter_stopping(
+                    force=force, deadline=deadline
+                )
+            finally:
+                publication_worker_stopped = self._join_publication_worker(
+                    deadline=deadline
+                )
+        else:
             publication_worker_stopped = self._join_publication_worker(
                 deadline=deadline
             )
@@ -4518,7 +4543,8 @@ class StewardDaemon:
         lifecycle = (
             DaemonLifecycleState.stopping
             if (
-                container_stop_failures
+                not quiescence_proven
+                or container_stop_failures
                 or not publication_worker_stopped
                 or not control_loop_writer_stopped
                 or getattr(initial_revocation, "deadline_exhausted", False)
@@ -4529,34 +4555,39 @@ class StewardDaemon:
             self.runtime.lifecycle = lifecycle
             self.runtime.state = DaemonRuntimeState.stopping
             self.runtime.heartbeat_at = utc_now()
-        try:
-            result = self.store.revoke_daemon_publication_authority(
-                self.runtime.instance_id,
-                lifecycle.value,
-                deadline=deadline,
-                state={
-                    "forced": force,
-                    "interrupted_runs": interrupted_runs,
-                    "container_stop_failures": len(container_stop_failures),
-                    "publication_worker_stopped": publication_worker_stopped,
-                    "control_loop_writer_stopped": control_loop_writer_stopped,
-                },
-            )
-            if getattr(result, "ownership_lost", False):
+        if quiescence_proven:
+            try:
+                result = self.store.revoke_daemon_publication_authority(
+                    self.runtime.instance_id,
+                    lifecycle.value,
+                    deadline=deadline,
+                    state={
+                        "forced": force,
+                        "interrupted_runs": interrupted_runs,
+                        "container_stop_failures": len(container_stop_failures),
+                        "publication_worker_stopped": publication_worker_stopped,
+                        "control_loop_writer_stopped": control_loop_writer_stopped,
+                    },
+                )
+                if getattr(result, "ownership_lost", False):
+                    self._log("daemon ownership lost before final lifecycle transition")
+                elif getattr(result, "deadline_exhausted", False):
+                    # A lifecycle write that did not commit leaves the old claim
+                    # usable by design; report unresolved stopping rather than a
+                    # clean shutdown that falsely implies authority was revoked.
+                    lifecycle = DaemonLifecycleState.stopping
+                    with self._runtime_lock:
+                        self.runtime.lifecycle = lifecycle
+                        self.runtime.state = DaemonRuntimeState.stopping
+                    self._log("daemon final lifecycle transition exceeded shutdown deadline")
+            except ValueError as exc:
+                if str(exc) != "daemon instance is not the current owner":
+                    raise
                 self._log("daemon ownership lost before final lifecycle transition")
-            elif getattr(result, "deadline_exhausted", False):
-                # A lifecycle write that did not commit leaves the old claim
-                # usable by design; report unresolved stopping rather than a
-                # clean shutdown that falsely implies authority was revoked.
-                lifecycle = DaemonLifecycleState.stopping
-                with self._runtime_lock:
-                    self.runtime.lifecycle = lifecycle
-                    self.runtime.state = DaemonRuntimeState.stopping
-                self._log("daemon final lifecycle transition exceeded shutdown deadline")
-        except ValueError as exc:
-            if str(exc) != "daemon instance is not the current owner":
-                raise
-            self._log("daemon ownership lost before final lifecycle transition")
+        else:
+            self._log(
+                "daemon publication authority remains active until transport quiescence"
+            )
         return ShutdownResult(
             state=lifecycle,
             forced=force,

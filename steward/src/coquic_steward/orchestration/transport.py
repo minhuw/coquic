@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -18,7 +19,11 @@ from httpcore._sync.http_proxy import ForwardHTTPConnection, TunnelHTTPConnectio
 
 from ..publication.d1 import D1PublicationClient
 from ..publication.r2 import R2Client
-from .contracts import DaemonCancellation, PublicationTransportSetupError
+from .contracts import (
+    DaemonCancellation,
+    DaemonCancellationResult,
+    PublicationTransportSetupError,
+)
 
 
 class _PublicationTransportCancelled(RuntimeError):
@@ -31,8 +36,10 @@ class _CallbackDaemonCancellation(DaemonCancellation):
     def __init__(self, callback: Callable[[], None]) -> None:
         self._callback = callback
 
-    def cancel(self) -> None:
+    def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
+        del deadline
         self._callback()
+        return DaemonCancellationResult(quiescent=True)
 
 
 def _close_r2_provider_client(client: R2Client) -> None:
@@ -58,7 +65,7 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
 
     def __init__(self, client: R2Client) -> None:
         self._lock = threading.RLock()
-        self._cleanup_lock = threading.Lock()
+        self._cleanup_lock = threading.RLock()
         self._cancelled = False
         self._owner_closed = False
         self._connections: dict[int, object] = {}
@@ -219,29 +226,23 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
         except Exception:
             pass
 
-    def cancel(self) -> None:
-        with self._cleanup_lock:
-            with self._lock:
-                if self._cancelled:
-                    return
-                self._cancelled = True
-                connections = tuple(self._connections.values())
-            for connection in connections:
-                self._abort_connection(connection)
+    def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
+        del deadline
+        with self._lock:
+            if self._cancelled:
+                return DaemonCancellationResult(quiescent=True)
+            self._cancelled = True
+            connections = tuple(self._connections.values())
+        for connection in connections:
+            self._abort_connection(connection)
+        return DaemonCancellationResult(quiescent=True)
 
     def close(self) -> None:
         with self._cleanup_lock:
             if self._owner_closed:
                 return
             try:
-                with self._lock:
-                    if self._cancelled:
-                        connections = ()
-                    else:
-                        self._cancelled = True
-                        connections = tuple(self._connections.values())
-                for connection in connections:
-                    self._abort_connection(connection)
+                self.cancel()
             finally:
                 try:
                     self._provider_client.close()
@@ -311,13 +312,23 @@ class _HttpxD1HandoffStream:
             self._active_operations = max(0, self._active_operations - 1)
             if self._active_operations == 0:
                 self._operations_complete.set()
+                if self._closed:
+                    self._adapter._handoff_streams.pop(id(self), None)
             if writes:
                 self._active_writes = max(0, self._active_writes - 1)
                 if self._active_writes == 0:
                     self._writes_complete.set()
 
-    def _wait_for_operations(self) -> None:
-        self._operations_complete.wait()
+    def _wait_for_operations(self, deadline: float | None = None) -> bool:
+        if deadline is None:
+            self._operations_complete.wait()
+            return True
+        if self._operations_complete.is_set():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        return self._operations_complete.wait(timeout=remaining)
 
     def _wait_for_writes(self) -> None:
         self._writes_complete.wait()
@@ -330,6 +341,8 @@ class _HttpxD1HandoffStream:
             stream = self._stream
             if self._adapter._pending_streams.get(id(self._connection)) is self:
                 self._adapter._pending_streams.pop(id(self._connection), None)
+            if self._active_operations == 0:
+                self._adapter._handoff_streams.pop(id(self), None)
         self._adapter._close_stream(stream)
 
     def get_extra_info(self, info: str) -> object:
@@ -416,6 +429,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         self._cancelled = False
         self._connections: dict[int, object] = {}
         self._pending_streams: dict[int, _HttpxD1HandoffStream] = {}
+        self._handoff_streams: dict[int, _HttpxD1HandoffStream] = {}
         self._connection_methods: dict[int, object] = {}
         self._pool_methods: dict[int, object] = {}
         self._proxy_connections: dict[int, HTTPConnection] = {}
@@ -511,11 +525,6 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             return connection
         if type(self._pool) is not HTTPProxy:
             raise PublicationTransportSetupError()
-        expected = (
-            TunnelHTTPConnection if self._endpoint.scheme == "https" else ForwardHTTPConnection
-        )
-        if type(connection) is not expected:
-            raise PublicationTransportSetupError()
         if type(connection) is ForwardHTTPConnection:
             try:
                 nested = connection._connection
@@ -526,6 +535,8 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 raise PublicationTransportSetupError()
             self._validate_http_connection(nested)
             return nested
+        if type(connection) is not TunnelHTTPConnection:
+            raise PublicationTransportSetupError()
         try:
             current = connection._connection
             connected = connection._connected
@@ -541,8 +552,6 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             return current
         if type(current) in (HTTP11Connection, HTTP2Connection):
             self._validate_protocol(current)
-            if not connected:
-                raise PublicationTransportSetupError()
             return None
         raise PublicationTransportSetupError()
 
@@ -608,11 +617,6 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             TunnelHTTPConnection,
         ):
             raise PublicationTransportSetupError()
-        expected = (
-            TunnelHTTPConnection if self._endpoint.scheme == "https" else ForwardHTTPConnection
-        )
-        if type(connection) is not expected:
-            raise PublicationTransportSetupError()
         with self._lock:
             nested = self._proxy_connections.get(id(connection))
         try:
@@ -637,7 +641,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             nested = current
         elif type(current) in (HTTP11Connection, HTTP2Connection):
             self._validate_protocol(current)
-            if not isinstance(connected, bool) or not connected:
+            if not isinstance(connected, bool):
                 raise PublicationTransportSetupError()
         else:
             raise PublicationTransportSetupError()
@@ -673,6 +677,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
     ) -> _HttpxD1HandoffStream:
         handoff = _HttpxD1HandoffStream(self, connection, stream)
         with self._lock:
+            self._handoff_streams[id(handoff)] = handoff
             if self._cancelled:
                 rejected = True
             else:
@@ -861,16 +866,21 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         except Exception:
             pass
 
-    def _cancel(self) -> None:
+    def _cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
         with self._lock:
-            if self._cancelled:
-                return
+            already_cancelled = self._cancelled
             # Set the state before inspecting any private connection shape.  A
             # stream returned by connect can otherwise become reachable only
             # after cancellation has already started.
             self._cancelled = True
             connections = tuple(self._connections.values())
             pending_streams = tuple(self._pending_streams.values())
+            handoff_streams = tuple(self._handoff_streams.values())
+        if already_cancelled:
+            for stream in handoff_streams:
+                if not stream._wait_for_operations(deadline=deadline):
+                    return DaemonCancellationResult(quiescent=False)
+            return DaemonCancellationResult(quiescent=True)
         pool_error = False
         try:
             pool_connections = tuple(self._pool.connections)
@@ -894,14 +904,17 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         # A closed stream may still be inside start_tls or another admitted
         # handoff operation.  Do not let authority revocation follow one of
         # those operations while it can still touch the underlying stream.
-        for stream in pending_streams:
-            stream._wait_for_operations()
+        quiescent = True
+        for stream in handoff_streams:
+            if not stream._wait_for_operations(deadline=deadline):
+                quiescent = False
+                break
         if setup_error:
             raise PublicationTransportSetupError()
+        return DaemonCancellationResult(quiescent=quiescent)
 
-    def cancel(self) -> None:
-        with self._cleanup_lock:
-            self._cancel()
+    def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
+        return self._cancel(deadline=deadline)
 
     def close(self) -> None:
         with self._cleanup_lock:
@@ -939,9 +952,19 @@ class _PublicationTransportCancellation(DaemonCancellation):
         self._r2 = r2_adapter
         self._d1 = d1_adapter
 
-    def cancel(self) -> None:
-        self._r2.close()
-        self._d1.close()
+    def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
+        errors: list[BaseException] = []
+        results: list[DaemonCancellationResult] = []
+        for adapter in (self._r2, self._d1):
+            try:
+                results.append(adapter.cancel(deadline=deadline))
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+        return DaemonCancellationResult(
+            quiescent=all(result.quiescent for result in results)
+        )
 
     def close(self) -> None:
         self._r2.close()

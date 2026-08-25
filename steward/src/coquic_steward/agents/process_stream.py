@@ -258,13 +258,6 @@ def _process_group_exists(pid: int) -> bool:
     return True
 
 
-# Explicit aliases make the two process-boundary policies easy to discover.
-ExactTermination = ExactTerminationStrategy
-GroupTermination = GroupTerminationStrategy
-ExactProcessTermination = ExactTerminationStrategy
-GroupProcessTermination = GroupTerminationStrategy
-
-
 @dataclass(frozen=True)
 class _PipeReadResult:
     stream_index: int

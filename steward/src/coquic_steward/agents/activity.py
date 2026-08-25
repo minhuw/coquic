@@ -326,13 +326,6 @@ class ActivityRecorder:
                 if self._abandoned.is_set():
                     self._close_handle()
 
-    record_event = observe
-    record = observe
-    consume_event = observe
-    handle = observe
-    on_event = observe
-    observe_event = observe
-
     def abandon(self) -> None:
         """Stop capture without waiting for a blocked metadata write."""
 

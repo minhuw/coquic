@@ -389,10 +389,6 @@ class SourceDocument:
     def canonical_bytes(self) -> bytes:
         return self.content
 
-    @property
-    def trajectory(self) -> Mapping[str, Any]:
-        return self.document
-
     def as_dict(self) -> dict[str, Any]:
         return {
             "logicalPath": self.logical_path,

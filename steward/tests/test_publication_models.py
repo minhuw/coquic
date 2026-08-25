@@ -103,6 +103,16 @@ def _run(state: str = "completed") -> RunMetadata:
 
 def test_models_round_trip_as_bounded_dicts() -> None:
     document = SourceDocument("runs/run-clean/trajectory.json", b'{"ok":true}\n', "application/json")
+    assert document.data == document.content
+    assert document.canonical_bytes == document.content
+    assert document.byte_size == len(document.content)
+    assert document.sha256 == hashlib.sha256(document.content).hexdigest()
+    assert document.as_dict() == {
+        "logicalPath": document.logical_path,
+        "mediaType": document.media_type,
+        "byteSize": document.byte_size,
+        "sha256": document.sha256,
+    }
     artifact = LogicalArtifact.from_document("artifact-trajectory", document, owner_step_id=1)
     component = PublicBundleComponent(artifact, document.content)
     snapshot = PublicationSnapshot(

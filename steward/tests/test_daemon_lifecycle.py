@@ -2643,6 +2643,109 @@ def test_httpx_transport_adapter_fences_existing_established_proxy_connection(
         right.close()
 
 
+def test_httpx_transport_adapter_rejects_https_forward_origin_before_publication(
+    monkeypatch,
+):
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+    from httpcore._sync.http_proxy import ForwardHTTPConnection
+
+    writes: list[bytes] = []
+
+    class RecordingStream(SyncStream):
+        def write(self, data: bytes, timeout: float | None = None) -> None:
+            writes.append(data)
+            super().write(data, timeout=timeout)
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    pool = proxy._pool
+    proxy_origin = pool._proxy_url.origin
+    forward = ForwardHTTPConnection(
+        proxy_origin=proxy_origin,
+        remote_origin=httpcore.Origin(
+            b"https", b"publication.example.test", 443
+        ),
+        network_backend=pool._network_backend,
+    )
+    left, right = socket.socketpair()
+    forward._connection._connection = httpcore.HTTP11Connection(
+        origin=proxy_origin,
+        stream=RecordingStream(left),
+    )
+    pool._connections.append(forward)
+    d1 = _d1_transport_double(http_client=http_client)
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: "https://publication.example.test/query"),
+    )
+
+    try:
+        with pytest.raises(PublicationTransportSetupError) as error:
+            HttpxD1TransportAdapter(d1)
+        assert str(error.value) == "unsupported publication transport shape"
+        assert writes == []
+    finally:
+        d1.close()
+        right.close()
+        left.close()
+
+
+def test_httpx_transport_adapter_rejects_mutated_forward_origin_during_cancellation():
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    pool = proxy._pool
+    forward = pool.create_connection(
+        httpcore.Origin(b"http", b"forward.example.test", 80)
+    )
+    tunnel = pool.create_connection(
+        httpcore.Origin(b"https", b"publication.example.test", 443)
+    )
+    left, right = socket.socketpair()
+    tunnel._connection = httpcore.HTTP11Connection(
+        origin=httpcore.Origin(b"https", b"publication.example.test", 443),
+        stream=SyncStream(left),
+    )
+    tunnel._connected = False
+    pool._connections.extend([forward, tunnel])
+    d1 = _d1_transport_double(http_client=http_client)
+    adapter = HttpxD1TransportAdapter(d1)
+    forward._remote_origin = httpcore.Origin(
+        b"https", b"publication.example.test", 443
+    )
+
+    try:
+        with pytest.raises(PublicationTransportSetupError) as error:
+            adapter.cancel()
+        assert str(error.value) == "unsupported publication transport shape"
+        assert not adapter.cancel().quiescent
+        right.settimeout(1.0)
+        assert right.recv(1) == b""
+    finally:
+        adapter.close()
+        d1.close()
+        right.close()
+        left.close()
+
+
 def test_httpx_transport_adapter_accepts_mixed_proxy_pool_and_tunnel_transition(
     monkeypatch,
 ):

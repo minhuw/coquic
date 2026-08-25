@@ -14,6 +14,7 @@ from httpcore import (
     HTTP2Connection,
     HTTPConnection,
     HTTPProxy,
+    Origin,
 )
 from httpcore._sync.http_proxy import ForwardHTTPConnection, TunnelHTTPConnection
 
@@ -552,6 +553,32 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             raise PublicationTransportSetupError()
         return connect, backend
 
+    def _validate_forward_connection(
+        self, connection: ForwardHTTPConnection
+    ) -> HTTPConnection:
+        try:
+            nested = connection._connection
+            close = connection.close
+            proxy_origin = connection._proxy_origin
+            remote_origin = connection._remote_origin
+            nested_origin = nested._origin
+            proxy_url_origin = self._pool._proxy_url.origin
+            valid_origins = (
+                type(nested) is HTTPConnection
+                and type(proxy_origin) is Origin
+                and type(remote_origin) is Origin
+                and type(nested_origin) is Origin
+                and type(proxy_url_origin) is Origin
+                and remote_origin.scheme == b"http"
+                and proxy_origin == proxy_url_origin
+                and nested_origin == proxy_origin
+            )
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if not isinstance(close, Callable) or not valid_origins:
+            raise PublicationTransportSetupError()
+        return nested
+
     def _validate_connection_shape(self, connection: object) -> HTTPConnection | None:
         if type(self._pool) is ConnectionPool:
             if type(connection) is not HTTPConnection:
@@ -561,13 +588,7 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         if type(self._pool) is not HTTPProxy:
             raise PublicationTransportSetupError()
         if type(connection) is ForwardHTTPConnection:
-            try:
-                nested = connection._connection
-                close = connection.close
-            except Exception:
-                raise PublicationTransportSetupError() from None
-            if not isinstance(close, Callable):
-                raise PublicationTransportSetupError()
+            nested = self._validate_forward_connection(connection)
             self._validate_http_connection(nested)
             return nested
         if type(connection) is not TunnelHTTPConnection:
@@ -662,6 +683,9 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         parts: list[object] = []
         if type(connection) is ForwardHTTPConnection:
             if type(current) is not HTTPConnection:
+                raise PublicationTransportSetupError()
+            validated_nested = self._validate_forward_connection(connection)
+            if validated_nested is not current:
                 raise PublicationTransportSetupError()
             self._validate_http_connection(current)
             if nested is not None and nested is not current:

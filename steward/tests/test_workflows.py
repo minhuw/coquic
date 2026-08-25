@@ -13,27 +13,12 @@ from coquic_steward.core.models import (
     TaskSpec,
     TaskStatus,
     TaskWorkflow,
-    ValidationResult,
     WorkerKind,
 )
 from coquic_steward.execution import StewardExecutor
-from coquic_steward.orchestration import StewardDaemon
 from coquic_steward.execution.implementation_plan import parse_implementation_plan
 from coquic_steward.storage import TaskStore
-
-def _drive_durable(
-    executor: StewardExecutor, task_id: str, *, max_steps: int = 128
-) -> bool:
-    for _ in range(max_steps):
-        outcome = executor.advance_once(task_id)
-        if outcome.status in {"ready_to_seal", "terminal", "blocked"}:
-            StewardDaemon(executor.config, executor.store).finalize_terminal_task(task_id)
-            return outcome.status in {"ready_to_seal", "terminal"}
-        if outcome.status == "in_progress":
-            continue
-        if not outcome.progressed and outcome.next_phase is None:
-            return False
-    raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
+from durable_harness import drive_durable, passing_durable_gates, write_durable_codex
 
 VALID_PLAN = {
     "summary": "Implement the scoped change.",
@@ -116,7 +101,13 @@ def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -
 def test_feature_plans_then_codes_in_separate_session(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = _fake_codex(tmp_path, invalid_plan=False)
+    fake = write_durable_codex(
+        tmp_path,
+        change="changed",
+        commit='{"subject":"fix: durable workflow","body":"persist the durable workflow result"}',
+        plan=json.dumps(VALID_PLAN),
+        thread_events=True,
+    )
     configured = config.__class__(
         **{
             **config.__dict__,
@@ -146,11 +137,11 @@ def test_feature_plans_then_codes_in_separate_session(
         )
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(configured, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id, finalize=True)
     saved = store.get(task.id)
     plan_runs = store.plan_runs(task.id)
     iterations = store.iterations(task.id)
@@ -180,7 +171,12 @@ def test_feature_plans_then_codes_in_separate_session(
 def test_fix_workflow_skips_planning(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = _fake_codex(tmp_path, invalid_plan=False)
+    fake = write_durable_codex(
+        tmp_path,
+        change="changed",
+        commit='{"subject":"fix: durable workflow","body":"persist the durable workflow result"}',
+        thread_events=True,
+    )
     configured = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     configured.ensure_dirs()
     store = TaskStore.create(configured.db_path)
@@ -194,11 +190,11 @@ def test_fix_workflow_skips_planning(
         )
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(configured, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id, finalize=True)
     assert store.plan_runs(task.id) == []
     assert not any(
         event.kind.startswith("implementation_plan.") for event in store.events(task.id)
@@ -207,7 +203,13 @@ def test_fix_workflow_skips_planning(
 def test_invalid_feature_plan_retries_without_coding(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    fake = _fake_codex(tmp_path, invalid_plan=True)
+    fake = write_durable_codex(
+        tmp_path,
+        change="changed",
+        commit='{"subject":"fix: durable workflow","body":"persist the durable workflow result"}',
+        plan="{}",
+        thread_events=True,
+    )
     configured = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     configured.ensure_dirs()
     store = TaskStore.create(configured.db_path)
@@ -221,49 +223,7 @@ def test_invalid_feature_plan_retries_without_coding(
     )
 
     executor = StewardExecutor(configured, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id, finalize=True)
     assert store.get(task.id).status == TaskStatus.blocked
     assert len(store.plan_runs(task.id)) == 2
     assert store.iterations(task.id) == []
-
-def _fake_codex(tmp_path: Path, *, invalid_plan: bool) -> Path:
-    fake = tmp_path / ("codex-invalid-plan" if invalid_plan else "codex-workflow")
-    plan_json = "{}" if invalid_plan else json.dumps(VALID_PLAN)
-    fake.write_text(
-        "#!/bin/sh\n"
-        "last=\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'case "$last" in\n'
-        f'  */implementation-plan-*) printf \'%s\\n\' \'{plan_json}\' > "$last"; printf \'{{"type":"thread.started","thread_id":"plan-thread"}}\\n\';;\n'
-        '  */reviewer-*) printf \'%s\\n\' \'{"verdict":"approve","summary":"ok","findings":[],"validation_gaps":[],"remaining_risk":""}\' > "$last"; printf \'{"type":"thread.started","thread_id":"review-thread"}\\n\';;\n'
-        '  */commit-message-*) printf \'%s\\n\' \'{"subject":"fix: durable workflow","body":"persist the durable workflow result"}\' > "$last"; printf \'{"type":"thread.started","thread_id":"commit-message-thread"}\\n\';;\n'
-        '  *) printf \'changed\\n\' > README.md; printf \'done\\n\' > "$last"; printf \'{"type":"thread.started","thread_id":"worker-thread"}\\n\';;\n'
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    return fake
-
-def _passing_gates(
-    config,
-    task_id,
-    cwd,
-    *,
-    label=None,
-    on_gate_start=None,
-    on_gate_result=None,
-    command_runner=None,
-):
-    output = config.logs_dir / task_id / (label or "validation") / "fake.txt"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("ok\n", encoding="utf-8")
-    return [
-        ValidationResult(
-            command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-        )
-    ]

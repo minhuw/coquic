@@ -124,6 +124,7 @@ from coquic_steward.storage.schema import (
     TaskRow,
     ValidationRow,
 )
+from durable_harness import drive_durable, passing_durable_gates, write_durable_codex
 
 def git_branch_exists(repo: Path, branch: str) -> bool:
     result = run_command(
@@ -137,76 +138,10 @@ def git_branch_head(repo: Path, branch: str) -> str:
         ["git", "rev-parse", branch], cwd=repo, check=True
     ).stdout.strip()
 
-def _drive_durable(
-    executor: StewardExecutor,
-    task_id: str,
-    *,
-    max_steps: int = 128,
-    finalize: bool = False,
-) -> bool:
-    """Advance one task through persisted phases with a bounded driver."""
-
-    for _ in range(max_steps):
-        outcome = executor.advance_once(task_id)
-        if outcome.status in {"ready_to_seal", "terminal", "blocked"}:
-            if finalize:
-                StewardDaemon(executor.config, executor.store).finalize_terminal_task(task_id)
-            return outcome.status in {"ready_to_seal", "terminal"}
-        if outcome.status == "in_progress":
-            continue
-        if not outcome.progressed and outcome.next_phase is None:
-            return False
-    raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
-
 def _advance_durable(
     executor: StewardExecutor, task_id: str, steps: int
 ) -> list[object]:
     return [executor.advance_once(task_id) for _ in range(steps)]
-
-def _durable_codex(
-    tmp_path: Path,
-    *,
-    change: str = "changed by durable pipeline",
-    review: str = '{"verdict":"approve","summary":"ok","findings":[],"validation_gaps":[],"remaining_risk":""}',
-    commit: str = '{"subject":"fix: durable pipeline","body":"persist the accepted durable tree"}',
-) -> Path:
-    fake = tmp_path / "durable-codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "case \"$last\" in\n"
-        f"  */reviewer-*) printf '%s\\n' '{review}' > \"$last\" ;;\n"
-        f"  */commit-message-*) printf '%s\\n' '{commit}' > \"$last\" ;;\n"
-        f"  *) printf '%s\\n' '{change}' > README.md; printf 'done\\n' > \"$last\" ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    return fake
-
-def _passing_durable_gates(
-    config,
-    task_id,
-    cwd,
-    *,
-    label=None,
-    on_gate_start=None,
-    on_gate_result=None,
-    command_runner=None,
-):
-    output = config.logs_dir / task_id / (label or "durable") / "gate.txt"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("ok\\n", encoding="utf-8")
-    return [
-        ValidationResult(
-            command=["fake-gate"], cwd=cwd, passed=True, exit_code=0, output_path=output
-        )
-    ]
 
 def _durable_push_setup(
     config: StewardConfig,
@@ -230,7 +165,7 @@ def _durable_push_setup(
         cwd=config.repo_root,
         check=True,
     )
-    fake = _durable_codex(tmp_path, change="durable push change")
+    fake = write_durable_codex(tmp_path, change="durable push change")
     config = config.__class__(
         **{
             **config.__dict__,
@@ -284,7 +219,7 @@ def _durable_push_setup(
         )
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
     return config, store, source, integration, StewardExecutor(config, store)
 
@@ -5507,7 +5442,7 @@ def test_executor_no_changes_reaches_terminal_status(
     )
 
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.no_changes
     assert any(event.kind == "pipeline.ready_to_seal" for event in store.events(task.id))
@@ -5549,7 +5484,7 @@ def test_executor_blocks_worker_patch_that_changes_frozen_path(
         lambda *_args, **_kwargs: pytest.fail("validation should not run after a frozen path change"),
     )
     executor = StewardExecutor(config, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id)
 
     saved = store.get(task.id)
     events = store.events(task.id)
@@ -5601,7 +5536,7 @@ def test_executor_blocks_frozen_path_written_by_validation(
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
     executor = StewardExecutor(config, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id)
 
     saved = store.get(task.id)
     assert saved.status == TaskStatus.blocked
@@ -5632,7 +5567,7 @@ def test_executor_does_not_clean_external_finished_worktree(
 def test_executor_marks_task_validation_running_before_gates(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="changed by steward")
+    fake = write_durable_codex(tmp_path, change="changed by steward")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -5669,7 +5604,7 @@ def test_executor_marks_task_validation_running_before_gates(
 def test_executor_records_validation_results_incrementally(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path)
+    fake = write_durable_codex(tmp_path)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -5880,7 +5815,7 @@ def test_run_validation_applies_configured_timeout(
 def test_executor_rejects_invalid_review_output(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, review="not-json")
+    fake = write_durable_codex(tmp_path, review="not-json")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -5888,11 +5823,11 @@ def test_executor_rejects_invalid_review_output(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.blocked
     assert any(event.kind == "pipeline.review.raw" for event in store.events(task.id))
@@ -5901,7 +5836,7 @@ def test_executor_rejects_invalid_review_output(
 def test_executor_accepts_approved_review_with_validation_gaps(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(
+    fake = write_durable_codex(
         tmp_path,
         review='{"verdict":"approve","summary":"ok with gap","findings":[],"validation_gaps":["shellcheck unavailable"],"remaining_risk":"low"}',
     )
@@ -5912,7 +5847,7 @@ def test_executor_accepts_approved_review_with_validation_gaps(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
@@ -5928,7 +5863,7 @@ def test_executor_accepts_approved_review_with_validation_gaps(
 def test_executor_push_main_uses_durable_commit_phase(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path)
+    fake = write_durable_codex(tmp_path)
     config = config.__class__(
         **{
             **config.__dict__,
@@ -5942,11 +5877,11 @@ def test_executor_push_main_uses_durable_commit_phase(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.succeeded
     assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
@@ -5961,7 +5896,7 @@ def test_durable_dry_run_commit_proposes_remote_push(
     config, store, source, integration, executor = _durable_push_setup(
         config, tmp_path, monkeypatch, dry_run=True
     )
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
     assert store.get(integration.id).status == TaskStatus.succeeded
     assert store.get(source.id).status == TaskStatus.queued
     remote_text = subprocess.run(
@@ -5990,7 +5925,7 @@ def test_dry_run_feature_issue_proposals_are_persisted(
         return real_command(command, cwd, timeout=timeout, **_kwargs)
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     actions = [
         event.data["action"]
@@ -6065,7 +6000,7 @@ def test_durable_push_blocks_when_main_push_budget_is_reached(
         raise AssertionError("push must be blocked by the daily budget")
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "main push budget reached"
@@ -6095,7 +6030,7 @@ def test_durable_ordinary_push_uses_task_as_issue_source(
         return real_command(argv, cwd, timeout=timeout, **_kwargs)
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
-    assert _drive_durable(executor, source.id), (
+    assert drive_durable(executor, source.id), (
         f"status={store.get(source.id).status} "
         f"summary={store.get(source.id).summary} "
         f"events={[event.kind for event in store.events(source.id)]}"
@@ -6124,7 +6059,7 @@ def test_durable_validation_blocks_frozen_path_before_commit(
         return [ValidationResult(command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output)]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "frozen paths changed: flake.nix"
@@ -6145,7 +6080,7 @@ def test_durable_validation_blocks_frozen_path_before_repair_child(
         return [ValidationResult(command=["fake"], cwd=cwd, passed=False, exit_code=1, output_path=output)]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "frozen paths changed: flake.nix"
@@ -6245,7 +6180,7 @@ def test_durable_push_persists_transport_retry_before_success(
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", transient_push)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     saved = store.get(integration.id)
     events = store.events(integration.id)
@@ -6276,7 +6211,7 @@ def test_durable_push_blocks_after_bounded_transport_failures(
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", fail_push)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
 
     saved = store.get(integration.id)
     events = store.events(integration.id)
@@ -6311,7 +6246,7 @@ def test_durable_push_rejection_does_not_update_feature_issue(
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", rejected_push)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
 
     saved = store.get(integration.id)
     events = store.events(integration.id)
@@ -6360,7 +6295,7 @@ def test_durable_push_closes_one_feature_issue_after_push(
         return CommandResult(command, cwd, 0, "", "")
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", fake_run_command)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     comment = next(command for command in commands if command[:3] == ["gh", "issue", "comment"])
     close = next(command for command in commands if command[:3] == ["gh", "issue", "close"])
@@ -6393,7 +6328,7 @@ def test_durable_ambiguous_push_also_closes_feature_issue(
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", push_then_report_ambiguity)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     events = store.events(integration.id)
     assert any(event.kind == "pipeline.push.ambiguous_resolved" for event in events)
@@ -6423,7 +6358,7 @@ def test_ambiguous_push_consumes_one_daily_budget_unit(
         return result
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", push_first_then_report_ambiguity)
-    assert _drive_durable(executor, first_integration.id)
+    assert drive_durable(executor, first_integration.id)
 
     first_events = store.events(first_integration.id)
     assert sum(event.kind == "pipeline.push.ambiguous_resolved" for event in first_events) == 1
@@ -6457,7 +6392,7 @@ def test_ambiguous_push_consumes_one_daily_budget_unit(
         )
     )
 
-    assert _drive_durable(executor, second_integration.id)
+    assert drive_durable(executor, second_integration.id)
     assert store.get(second_integration.id).status == TaskStatus.pushed
     assert not any(
         event.kind == "pipeline.push.blocked"
@@ -6535,7 +6470,7 @@ def test_durable_push_remains_pushed_when_feature_issue_update_fails(
         return real_command(command, cwd, timeout=timeout, **_kwargs)
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", failed_command)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     assert store.get(integration.id).status == TaskStatus.pushed
     event = next(
@@ -6563,7 +6498,7 @@ def test_durable_push_skips_multiple_feature_issues(
         return real_command(command, cwd, timeout=timeout, **_kwargs)
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_command)
-    assert _drive_durable(executor, integration.id)
+    assert drive_durable(executor, integration.id)
 
     event = next(
         event for event in store.events(source.id) if event.kind == "github.issue_update_skipped"
@@ -6595,7 +6530,7 @@ def test_durable_push_blocks_without_explicit_source_metadata(
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "integration source task missing"
@@ -6622,7 +6557,7 @@ def test_durable_push_skips_terminal_integration_source(
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_command)
     monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
 
     assert store.get(source.id).status == TaskStatus.failed
     saved = store.get(integration.id)
@@ -6645,7 +6580,7 @@ def test_durable_commit_message_failure_blocks_before_push(
         return result
 
     monkeypatch.setattr(executor.runner, "run", invalid_commit_message)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "commit message generation failed"
@@ -6708,7 +6643,7 @@ def test_durable_commit_failure_blocks_without_push(
         raise RuntimeError("commit hook failed")
 
     monkeypatch.setattr("coquic_steward.execution.worktree.Worktrees.commit_all", fail_commit)
-    assert not _drive_durable(executor, integration.id)
+    assert not drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert any(event.kind == "pipeline.blocked" for event in store.events(integration.id))
@@ -6744,11 +6679,11 @@ def test_executor_drives_blocking_review_through_durable_repair(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id, finalize=True)
+    assert drive_durable(executor, task.id, finalize=True)
 
     iterations = store.iterations(task.id)
     assert [item.iteration for item in iterations] == [0, 1]
@@ -6767,7 +6702,7 @@ def test_executor_drives_blocking_review_through_durable_repair(
 def test_executor_persists_durable_iteration_as_first_class_record(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="initial change")
+    fake = write_durable_codex(tmp_path, change="initial change")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6775,11 +6710,11 @@ def test_executor_persists_durable_iteration_as_first_class_record(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id)
     iterations = store.iterations(task.id)
     assert [item.iteration for item in iterations] == [0]
     assert iterations[0].patch_path is not None
@@ -6790,7 +6725,7 @@ def test_executor_persists_durable_iteration_as_first_class_record(
 def test_executor_routes_validation_failure_to_durable_child_pipeline(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="bad")
+    fake = write_durable_codex(tmp_path, change="bad")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6828,7 +6763,7 @@ def test_executor_routes_validation_failure_to_durable_child_pipeline(
 def test_executor_blocks_unchanged_validation_revision(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="bad")
+    fake = write_durable_codex(tmp_path, change="bad")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6849,7 +6784,7 @@ def test_executor_blocks_unchanged_validation_revision(
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
     executor = StewardExecutor(config, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "validation made no progress"
@@ -6858,7 +6793,7 @@ def test_executor_blocks_unchanged_validation_revision(
 def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="formatted")
+    fake = write_durable_codex(tmp_path, change="formatted")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6885,14 +6820,14 @@ def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id)
     assert gate_runs == 2
     assert any(event.kind == "pipeline.validation.failure" for event in store.events(task.id))
 
 def test_executor_blocks_repeated_patch_and_validation_failure(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="same patch")
+    fake = write_durable_codex(tmp_path, change="same patch")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6914,7 +6849,7 @@ def test_executor_blocks_repeated_patch_and_validation_failure(
     output.write_text("same failure\n", encoding="utf-8")
 
     executor = StewardExecutor(config, store)
-    assert not _drive_durable(executor, task.id)
+    assert not drive_durable(executor, task.id)
     assert store.get(task.id).status == TaskStatus.blocked
     assert len(store.list_pipelines(task.id)) <= executor.MAX_PIPELINES
     assert any(event.kind == "pipeline.blocked" for event in store.events(task.id))
@@ -6922,7 +6857,7 @@ def test_executor_blocks_repeated_patch_and_validation_failure(
 def test_executor_uses_durable_phase_order_for_validation_and_review(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(tmp_path, change="review fixed")
+    fake = write_durable_codex(tmp_path, change="review fixed")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6930,11 +6865,11 @@ def test_executor_uses_durable_phase_order_for_validation_and_review(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
     )
 
     executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
+    assert drive_durable(executor, task.id)
     phases = [
         event.data["phase"]
         for event in store.events(task.id)

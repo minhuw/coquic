@@ -2746,6 +2746,101 @@ def test_httpx_transport_adapter_rejects_mutated_forward_origin_during_cancellat
         left.close()
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+def test_httpx_transport_adapter_interrupts_mutated_forward_handoff(
+    bounded: bool,
+):
+    import httpcore
+    from httpcore._backends.sync import SyncStream
+
+    read_entered = threading.Event()
+    read_done = threading.Event()
+    read_errors: list[BaseException] = []
+
+    class BlockingStream(SyncStream):
+        def read(self, maximum: int, timeout: float | None = None) -> bytes:
+            read_entered.set()
+            return super().read(maximum, timeout=timeout)
+
+    direct = httpx.HTTPTransport(trust_env=False)
+    proxy = httpx.HTTPTransport(
+        proxy="http://proxy.example.test:8080", trust_env=False
+    )
+    http_client = httpx.Client(
+        transport=direct,
+        mounts={"https://": proxy},
+        trust_env=False,
+    )
+    pool = proxy._pool
+    forward = pool.create_connection(
+        httpcore.Origin(b"http", b"forward.example.test", 80)
+    )
+    left, right = socket.socketpair()
+    forward._connection._connection = httpcore.HTTP11Connection(
+        origin=pool._proxy_url.origin,
+        stream=BlockingStream(left),
+    )
+    pool._connections.append(forward)
+    d1 = _d1_transport_double(http_client=http_client)
+    adapter = HttpxD1TransportAdapter(d1)
+    stream = forward._connection._connection._network_stream
+
+    def read() -> None:
+        try:
+            stream.read(1)
+        except BaseException as error:
+            read_errors.append(error)
+        finally:
+            read_done.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    assert read_entered.wait(timeout=1.0)
+    forward._remote_origin = httpcore.Origin(
+        b"https", b"publication.example.test", 443
+    )
+
+    cancellation_done = threading.Event()
+    cancellation_errors: list[BaseException] = []
+    deadline = time.monotonic() + 0.25 if bounded else None
+
+    def cancel() -> None:
+        try:
+            adapter.cancel(deadline=deadline)
+        except BaseException as error:
+            cancellation_errors.append(error)
+        finally:
+            cancellation_done.set()
+
+    cancellation = threading.Thread(target=cancel, daemon=True)
+    cancellation.start()
+    try:
+        assert cancellation_done.wait(timeout=1.0)
+        cancellation.join(timeout=1.0)
+        assert cancellation_errors
+        assert isinstance(cancellation_errors[0], PublicationTransportSetupError)
+        assert str(cancellation_errors[0]) == "unsupported publication transport shape"
+        assert read_done.wait(timeout=1.0)
+        reader.join(timeout=1.0)
+        assert not reader.is_alive()
+        assert read_errors
+        right.settimeout(1.0)
+        assert right.recv(1) == b""
+        assert not adapter.cancel(deadline=time.monotonic() + 0.25).quiescent
+    finally:
+        if not read_done.is_set() or not cancellation_done.is_set():
+            try:
+                right.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        right.close()
+        cancellation.join(timeout=1.0)
+        adapter.close()
+        d1.close()
+        reader.join(timeout=1.0)
+        left.close()
+
+
 def test_httpx_transport_adapter_accepts_mixed_proxy_pool_and_tunnel_transition(
     monkeypatch,
 ):

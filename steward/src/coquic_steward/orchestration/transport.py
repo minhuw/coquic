@@ -874,6 +874,24 @@ class HttpxD1TransportAdapter(DaemonCancellation):
             self._connections[id(connection)] = connection
             return True
 
+    @staticmethod
+    def _shutdown_sockets(sockets: list[socket.socket]) -> None:
+        # Shutdown must precede stream close: closing a socket from another
+        # thread does not reliably interrupt a blocked recv/send.
+        for raw_socket in sockets:
+            try:
+                raw_socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _close_sockets(sockets: list[socket.socket]) -> None:
+        for raw_socket in sockets:
+            try:
+                raw_socket.close()
+            except Exception:
+                pass
+
     def _abort_connection(self, connection: object) -> None:
         with self._lock:
             pending_ids = [id(connection)]
@@ -886,15 +904,18 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 if (pending := self._pending_streams.get(connection_id)) is not None
             )
 
+        sockets: list[socket.socket] = []
         try:
-            parts = self._connection_parts(connection)
-            sockets: list[socket.socket] = []
+            # These streams were installed and tracked by this adapter.  Keep
+            # their sockets available even when later validation finds that a
+            # mutable wrapper field has become contradictory.
             for stream in pending_streams:
                 raw_socket = self._stream_socket(stream)
                 if raw_socket is not None and all(
                     id(raw_socket) != id(existing) for existing in sockets
                 ):
                     sockets.append(raw_socket)
+            parts = self._connection_parts(connection)
             for part in parts:
                 raw_socket = self._connection_socket(part)
                 if raw_socket is not None and all(
@@ -902,24 +923,16 @@ class HttpxD1TransportAdapter(DaemonCancellation):
                 ):
                     sockets.append(raw_socket)
         except PublicationTransportSetupError:
+            self._shutdown_sockets(sockets)
             for pending in pending_streams:
                 pending.close()
+            self._close_sockets(sockets)
             raise
 
-        # Shutdown must precede stream close: closing a socket from another
-        # thread does not reliably interrupt a blocked recv/send.
-        for raw_socket in sockets:
-            try:
-                raw_socket.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
+        self._shutdown_sockets(sockets)
         for pending in pending_streams:
             pending.close()
-        for raw_socket in sockets:
-            try:
-                raw_socket.close()
-            except Exception:
-                pass
+        self._close_sockets(sockets)
         try:
             connection.close()
         except Exception:

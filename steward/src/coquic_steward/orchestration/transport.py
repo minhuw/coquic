@@ -67,6 +67,9 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
         self._lock = threading.RLock()
         self._cleanup_lock = threading.RLock()
         self._cancelled = False
+        self._cancel_in_progress = False
+        self._cancel_complete = threading.Event()
+        self._cancel_result: DaemonCancellationResult | None = None
         self._owner_closed = False
         self._connections: dict[int, object] = {}
         self._connection_methods: dict[int, object] = {}
@@ -227,15 +230,44 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             pass
 
     def cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
-        del deadline
         with self._lock:
-            if self._cancelled:
-                return DaemonCancellationResult(quiescent=True)
-            self._cancelled = True
-            connections = tuple(self._connections.values())
-        for connection in connections:
-            self._abort_connection(connection)
-        return DaemonCancellationResult(quiescent=True)
+            if self._cancel_complete.is_set():
+                return self._cancel_result or DaemonCancellationResult(quiescent=False)
+            if self._cancel_in_progress:
+                completion = self._cancel_complete
+                connections: tuple[object, ...] = ()
+                owner = False
+            else:
+                self._cancel_in_progress = True
+                self._cancelled = True
+                completion = self._cancel_complete
+                connections = tuple(self._connections.values())
+                owner = True
+
+        if not owner:
+            if deadline is None:
+                completed = completion.wait()
+            else:
+                remaining = deadline - time.monotonic()
+                completed = remaining > 0 and completion.wait(timeout=remaining)
+            if not completed:
+                return DaemonCancellationResult(quiescent=False)
+            with self._lock:
+                return self._cancel_result or DaemonCancellationResult(
+                    quiescent=False
+                )
+
+        result = DaemonCancellationResult(quiescent=False)
+        try:
+            for connection in connections:
+                self._abort_connection(connection)
+            result = DaemonCancellationResult(quiescent=True)
+        finally:
+            with self._lock:
+                self._cancel_result = result
+                self._cancel_in_progress = False
+                self._cancel_complete.set()
+        return result
 
     def close(self) -> None:
         with self._cleanup_lock:
@@ -427,6 +459,9 @@ class HttpxD1TransportAdapter(DaemonCancellation):
     def __init__(self, client: D1PublicationClient) -> None:
         self._lock = threading.RLock()
         self._cancelled = False
+        self._cancellation_failed = False
+        self._cancellation_in_progress = False
+        self._cancellation_validation_complete = threading.Event()
         self._connections: dict[int, object] = {}
         self._pending_streams: dict[int, _HttpxD1HandoffStream] = {}
         self._handoff_streams: dict[int, _HttpxD1HandoffStream] = {}
@@ -869,14 +904,37 @@ class HttpxD1TransportAdapter(DaemonCancellation):
     def _cancel(self, deadline: float | None = None) -> DaemonCancellationResult:
         with self._lock:
             already_cancelled = self._cancelled
+            cancellation_failed = self._cancellation_failed
+            cancellation_in_progress = self._cancellation_in_progress
             # Set the state before inspecting any private connection shape.  A
             # stream returned by connect can otherwise become reachable only
             # after cancellation has already started.
             self._cancelled = True
+            if not already_cancelled:
+                self._cancellation_in_progress = True
             connections = tuple(self._connections.values())
             pending_streams = tuple(self._pending_streams.values())
             handoff_streams = tuple(self._handoff_streams.values())
         if already_cancelled:
+            if cancellation_failed:
+                return DaemonCancellationResult(quiescent=False)
+            if cancellation_in_progress:
+                if deadline is None:
+                    validated = self._cancellation_validation_complete.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    validated = (
+                        remaining > 0
+                        and self._cancellation_validation_complete.wait(
+                            timeout=remaining
+                        )
+                    )
+                if not validated:
+                    return DaemonCancellationResult(quiescent=False)
+                with self._lock:
+                    if self._cancellation_failed:
+                        return DaemonCancellationResult(quiescent=False)
+                    handoff_streams = tuple(self._handoff_streams.values())
             for stream in handoff_streams:
                 if not stream._wait_for_operations(deadline=deadline):
                     return DaemonCancellationResult(quiescent=False)
@@ -890,17 +948,29 @@ class HttpxD1TransportAdapter(DaemonCancellation):
         connections += pool_connections
         seen: set[int] = set()
         setup_error = pool_error
-        for connection in connections:
-            connection_id = id(connection)
-            if connection_id in seen:
-                continue
-            seen.add(connection_id)
-            try:
-                self._abort_connection(connection)
-            except PublicationTransportSetupError:
-                setup_error = True
+        try:
+            for connection in connections:
+                connection_id = id(connection)
+                if connection_id in seen:
+                    continue
+                seen.add(connection_id)
+                try:
+                    self._abort_connection(connection)
+                except PublicationTransportSetupError:
+                    setup_error = True
+        except BaseException:
+            with self._lock:
+                self._cancellation_in_progress = False
+                self._cancellation_failed = True
+                self._cancellation_validation_complete.set()
+            raise
         for stream in pending_streams:
             stream.close()
+        with self._lock:
+            self._cancellation_in_progress = False
+            if setup_error:
+                self._cancellation_failed = True
+            self._cancellation_validation_complete.set()
         # A closed stream may still be inside start_tls or another admitted
         # handoff operation.  Do not let authority revocation follow one of
         # those operations while it can still touch the underlying stream.

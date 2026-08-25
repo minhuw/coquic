@@ -2319,6 +2319,71 @@ def test_botocore_transport_adapter_instruments_proxy_manager():
         adapter.close()
 
 
+def test_botocore_transport_adapter_bounds_concurrent_cancellation():
+    r2 = _botocore_transport_double()
+    adapter = BotocoreR2TransportAdapter(r2)
+    session = r2._client._endpoint.http_session
+    manager = session._get_connection_manager("http://publication.example.test")
+    pool = manager.connection_from_url("http://publication.example.test")
+    pool._get_conn(timeout=0.0)
+
+    abort_started = threading.Event()
+    release_abort = threading.Event()
+    first_returned = threading.Event()
+    second_returned = threading.Event()
+    first_result: list[bool] = []
+    second_result: list[bool] = []
+    errors: list[BaseException] = []
+
+    def gated_abort(_connection: object) -> None:
+        abort_started.set()
+        release_abort.wait(timeout=2.0)
+
+    adapter._abort_connection = gated_abort
+
+    def first_cancel() -> None:
+        try:
+            first_result.append(adapter.cancel().quiescent)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            first_returned.set()
+
+    def second_cancel() -> None:
+        try:
+            second_result.append(
+                adapter.cancel(deadline=time.monotonic() + 0.1).quiescent
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            second_returned.set()
+
+    first = threading.Thread(target=first_cancel, daemon=True)
+    second = threading.Thread(target=second_cancel, daemon=True)
+    first.start()
+    assert abort_started.wait(timeout=1.0)
+    second.start()
+
+    try:
+        assert second_returned.wait(timeout=1.0)
+        assert second_result == [False]
+        assert not first_returned.is_set()
+        release_abort.set()
+        assert first_returned.wait(timeout=1.0)
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert first_result == [True]
+        assert errors == []
+    finally:
+        release_abort.set()
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
+        adapter.close()
+
+
 @pytest.mark.parametrize("failure", ["r2", "d1"])
 def test_publication_transport_cancellation_closes_clients_on_setup_failure(failure):
     r2 = _botocore_transport_double()
@@ -2405,6 +2470,7 @@ def test_httpx_transport_adapter_rejects_unsupported_connection_during_cancellat
         with pytest.raises(PublicationTransportSetupError) as error:
             adapter.cancel()
         assert str(error.value) == "unsupported publication transport shape"
+        assert not adapter.cancel().quiescent
     finally:
         d1.close()
 

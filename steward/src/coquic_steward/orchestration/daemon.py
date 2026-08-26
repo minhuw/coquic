@@ -30,7 +30,6 @@ from ..core.models import (
     DaemonCycleSummary,
     DaemonRuntime,
     DaemonRuntimeState,
-    EffectActionKind,
     EffectResult,
     ExecutionMode,
     EXECUTION_MODE_METADATA_KEY,
@@ -3812,9 +3811,6 @@ class StewardDaemon:
                     limit=None,
                 )
             )
-        except AttributeError:
-            # Narrow legacy adapters predate the publication outbox query.
-            return True, None
         except Exception:
             return False, None
         candidates = [
@@ -3838,8 +3834,6 @@ class StewardDaemon:
         )
         try:
             self.store.list_publication_receipts(generation.publication_id)
-        except AttributeError:
-            pass
         except Exception:
             return False, None
         return True, generation
@@ -3855,19 +3849,10 @@ class StewardDaemon:
         if not isinstance(publication_id, str) or not publication_id:
             return False
         try:
-            try:
-                self.store.record_publication_exposure_reconciled(
-                    task.id,
-                    publication_id=publication_id,
-                )
-            except AttributeError:
-                # Narrow legacy Store adapters have the older live-only seam;
-                # production TaskStore always provides the reconciliation path.
-                self.store.record_effect_applied(
-                    task.id,
-                    action=EffectActionKind.publication_transport.value,
-                    action_id=f"publication-d1-expose:{publication_id}",
-                )
+            self.store.record_publication_exposure_reconciled(
+                task.id,
+                publication_id=publication_id,
+            )
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             self.store.add_event(
                 task.id,
@@ -4075,21 +4060,16 @@ class StewardDaemon:
                             archive_pipeline,
                             runs=runs,
                         )
-                    try:
-                        effect_result = self.store.effect_result(task.id)
-                        if effect_result is None:
-                            effect_result = self.store.derive_effect_result(task.id)
-                        effect_evidence = self.store.effect_evidence(task.id)
-                        archive.materialize_effects(
-                            task.id,
-                            effect_evidence,
-                            result=effect_result,
-                            mode=(mode.value if mode is not None else "dry-run"),
-                        )
-                    except AttributeError:
-                        # Narrow legacy test/archive adapters predate the
-                        # dedicated sidecar; their sealed bytes stay untouched.
-                        pass
+                    effect_result = self.store.effect_result(task.id)
+                    if effect_result is None:
+                        effect_result = self.store.derive_effect_result(task.id)
+                    effect_evidence = self.store.effect_evidence(task.id)
+                    archive.materialize_effects(
+                        task.id,
+                        effect_evidence,
+                        result=effect_result,
+                        mode=(mode.value if mode is not None else "dry-run"),
+                    )
                     archive.seal(
                         task.id,
                         str(task.status),

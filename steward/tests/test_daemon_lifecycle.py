@@ -6391,6 +6391,79 @@ def test_terminal_seal_uses_canonical_utc_timestamp(config):
     assert "+00:00" not in manifest["completedAt"]
 
 
+@pytest.mark.parametrize(
+    ("api", "failure"),
+    [
+        pytest.param("generations", "missing", id="missing-generations"),
+        pytest.param("generations", "failing", id="failing-generations"),
+        pytest.param("receipts", "missing", id="missing-receipts"),
+        pytest.param("receipts", "failing", id="failing-receipts"),
+    ],
+)
+def test_durable_publication_exposure_requires_generation_and_receipt_apis(
+    api, failure
+):
+    task = SimpleNamespace(id="task-publication-evidence")
+    exposed_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    generation = replace(
+        _publication_generation(task.id),
+        state=PublicationState.exposed,
+        updated_at=exposed_at,
+        exposed_at=exposed_at,
+    )
+    store = SimpleNamespace()
+
+    if api == "generations":
+        if failure == "failing":
+            def list_publication_generations(**_kwargs):
+                raise RuntimeError("generation query failed")
+
+            store.list_publication_generations = list_publication_generations
+    else:
+        store.list_publication_generations = lambda **_kwargs: [generation]
+        if failure == "failing":
+            def list_publication_receipts(_publication_id):
+                raise RuntimeError("receipt query failed")
+
+            store.list_publication_receipts = list_publication_receipts
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+
+    assert daemon._durable_publication_exposure(task) == (False, None)
+
+
+@pytest.mark.parametrize("reconciliation", ["missing", "failing"])
+def test_terminal_publication_effect_requires_reconciliation_api(reconciliation):
+    task = SimpleNamespace(id="task-publication-effect")
+    generation = _publication_generation(task.id)
+    events = []
+    generic_calls = []
+    store = SimpleNamespace(
+        add_event=lambda task_id, kind, message, data=None: events.append(
+            (task_id, kind, message, data)
+        ),
+        record_effect_applied=lambda *args, **kwargs: generic_calls.append(
+            (args, kwargs)
+        ),
+    )
+    if reconciliation == "failing":
+        def record_publication_exposure_reconciled(*_args, **_kwargs):
+            raise ValueError("reconciliation failed")
+
+        store.record_publication_exposure_reconciled = (
+            record_publication_exposure_reconciled
+        )
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+
+    assert daemon._record_terminal_publication_effect(task, generation) is False
+    assert generic_calls == []
+    assert events[-1][1] == "cleanup_blocked"
+    assert events[-1][3]["reason"] == "publication_effect_invalid"
+
+
 def test_completed_cleanup_intent_reconciles_missing_completion_event(config):
     config = config.__class__(**{**config.__dict__, "dry_run": False})
     store = TaskStore.create(config.db_path, dry_run=False)
@@ -6506,6 +6579,9 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
         def materialize_pipeline(self, *_args, **_kwargs):
             return None
 
+        def materialize_effects(self, task_id, *_args, **_kwargs):
+            calls.append(("materialize_effects", task_id))
+
         def seal(self, task_id, *_args, **_kwargs):
             calls.append(("seal", task_id))
             manifest = self.task_dir(task_id) / "manifest.json"
@@ -6561,6 +6637,9 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     assert calls.count(("remove", task.id)) == 3
     assert not worktree.exists()
     assert not private_home.exists()
+    materialize_effects_call = ("materialize_effects", task.id)
+    assert calls.count(materialize_effects_call) == 1
+    assert calls.index(materialize_effects_call) < calls.index(("seal", task.id))
     assert (config.tasks_dir / task.id / "manifest.json").read_bytes() == (
         b"sealed-public-bytes"
     )

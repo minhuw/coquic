@@ -12,17 +12,11 @@ from typer.testing import CliRunner
 
 from coquic_steward import cli
 from coquic_steward.core.config import StewardConfig
-from coquic_steward.core.models import (
-    EffectDecision,
-    EffectDecisionKind,
-    TaskKind,
-    TaskSpec,
-    WorkerKind,
-)
+from coquic_steward.core.models import EffectDecision, EffectDecisionKind
 from coquic_steward.cli import app
 from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
-from coquic_steward.publication.generation import PublicationComposer, PublicationGeneration as ComposedGeneration
+from coquic_steward.publication.generation import PublicationGeneration as ComposedGeneration
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
@@ -42,26 +36,12 @@ from coquic_steward.publication.publisher import (
     publication_health_view,
 )
 from coquic_steward.storage import TaskStore
+from publication_harness import enqueue_publication as _enqueue_publication
+from publication_harness import returning_composer as _returning_composer
 
 
 NOW = datetime(2026, 8, 1, tzinfo=timezone.utc)
 POLICY = PublicationRetryPolicy()
-
-
-def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
-    try:
-        store.get(generation.task_id)
-    except KeyError:
-        store.add_task(
-            TaskSpec(
-                id=generation.task_id,
-                kind=TaskKind.custom,
-                worker=WorkerKind.custom,
-                title="publication fixture",
-                prompt="publication fixture",
-            )
-        )
-    return store.enqueue_publication(generation)
 
 
 def _generation(*, state: str = "blocked") -> PublicationGeneration:
@@ -132,33 +112,6 @@ def _composed_generation(
         },
     }
     return ComposedGeneration(payload=payload)
-
-
-def _returning_composer(result: object):
-    def compose(
-        _source: object,
-        *,
-        task: object = None,
-        completed_runs: object = None,
-        task_id: str | None = None,
-        run_builder: object = None,
-        builder: object = None,
-        credential_sources: object = None,
-        known_secrets: object = None,
-        staging_root: Path | None = None,
-        scanner_runner: object = None,
-        scanner_timeout: float = 30.0,
-        max_repair_passes: int = 2,
-        ocr_runner: object = None,
-        ocr_timeout: float = 30.0,
-        price_catalog: object = None,
-        generation_boundary: str | None = None,
-        publication_id: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> object:
-        return result
-
-    return PublicationComposer(compose)
 
 
 def _blocked_store(tmp_path):

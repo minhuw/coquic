@@ -11,7 +11,7 @@ import pytest
 
 from coquic_steward.agents.invocation import InvocationOutcome
 from coquic_steward.core.config import StewardPublicationConfig
-from coquic_steward.core.models import EffectActionKind, TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import EffectActionKind
 import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import LocalSessionInvoker, load_publication_snapshot
@@ -35,22 +35,7 @@ from coquic_steward.publication.publisher import (
 )
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.storage import TaskStore
-
-
-def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
-    try:
-        store.get(generation.task_id)
-    except KeyError:
-        store.add_task(
-            TaskSpec(
-                id=generation.task_id,
-                kind=TaskKind.custom,
-                worker=WorkerKind.custom,
-                title="publication fixture",
-                prompt="publication fixture",
-            )
-        )
-    return store.enqueue_publication(generation)
+from publication_harness import enqueue_publication as _enqueue_publication
 
 
 def test_missing_task_publication_effect_never_reaches_provider(tmp_path: Path) -> None:

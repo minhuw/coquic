@@ -65,6 +65,7 @@ from coquic_steward.publication.r2 import (
 )
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage.sqlite import DaemonPublicationAuthority
+from publication_harness import returning_composer as _returning_composer
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
@@ -688,32 +689,6 @@ def test_taskless_aggregate_effects_never_reach_provider(tmp_path) -> None:
     with pytest.raises(PublicationError):
         publisher.backfill_usage("catalog", cursor="cursor", limit=8)
     assert calls == []
-
-
-def _returning_composer(result: object):
-    def compose(
-        _source: object,
-        *,
-        task: object = None,
-        completed_runs: object = None,
-        task_id: str | None = None,
-        run_builder: object = None,
-        builder: object = None,
-        credential_sources: object = None,
-        known_secrets: object = None,
-        scanner_runner: object = None,
-        scanner_timeout: float = 30.0,
-        max_repair_passes: int = 2,
-        ocr_runner: object = None,
-        ocr_timeout: float = 30.0,
-        price_catalog: object = None,
-        generation_boundary: str | None = None,
-        publication_id: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> object:
-        return result
-
-    return _composer(compose)
 
 
 def _compose_generation(

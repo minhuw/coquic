@@ -33,22 +33,7 @@ from coquic_steward.storage.sqlite import (
     CURRENT_SCHEMA_CATALOG_DIGEST,
     SQLITE_USER_VERSION,
 )
-
-
-def _enqueue_publication(store: TaskStore, generation: PublicationGeneration):
-    try:
-        store.get(generation.task_id)
-    except KeyError:
-        store.add_task(
-            TaskSpec(
-                id=generation.task_id,
-                kind=TaskKind.custom,
-                worker=WorkerKind.custom,
-                title="publication fixture",
-                prompt="publication fixture",
-            )
-        )
-    return store.enqueue_publication(generation)
+from publication_harness import enqueue_publication as _enqueue_publication
 
 
 def _catalog_digest(connection: sqlite3.Connection) -> str:

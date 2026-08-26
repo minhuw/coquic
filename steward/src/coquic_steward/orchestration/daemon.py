@@ -115,7 +115,6 @@ from ..control_loop import (
     CurrentState,
     Cycle as ControlLoopCycle,
     PlannerRun as ControlPlannerRun,
-    ProposalDisposition as ControlProposalDisposition,
     new_id as new_control_loop_id,
     timestamp as control_timestamp,
 )
@@ -5423,49 +5422,6 @@ class StewardDaemon:
             if signal_id is not None and signal_id not in values:
                 values.append(signal_id)
         return values
-
-    def _canonical_ids_for_items(
-        self, items: list[SignalItem], item_ids: list[str]
-    ) -> list[str]:
-        selected = set(item_ids)
-        return self._canonical_signal_ids([item for item in items if item.id in selected])
-
-    def _control_loop_dispositions(
-        self,
-        planner_run,
-        planner_run_id: str,
-        items: list[SignalItem],
-        task_ids_by_dedupe: Mapping[str, str],
-    ) -> list[ControlProposalDisposition]:
-        item_by_id = {item.id: item for item in items}
-        dispositions: list[ControlProposalDisposition] = []
-        for ordinal, disposition in enumerate(planner_run.dispositions, 1):
-            proposal = getattr(disposition, "proposal", {}) or {}
-            dedupe = getattr(disposition, "dedupe_key", None)
-            task_id = task_ids_by_dedupe.get(dedupe) if dedupe else None
-            signal_ids = self._canonical_ids_for_items(
-                items,
-                [value for value in getattr(disposition, "signal_ids", []) if value in item_by_id],
-            )
-            outcome = str(getattr(disposition, "outcome", "invalid"))
-            reason_code = str(getattr(disposition, "reason_code", "invalid_output"))
-            if outcome in {"accepted", "duplicate"} and task_id is None:
-                outcome = "invalid"
-                reason_code = "missing_covering_task"
-            dispositions.append(
-                ControlProposalDisposition(
-                    proposalId=f"{planner_run_id}-proposal-{ordinal}",
-                    plannerRunId=planner_run_id,
-                    ordinal=ordinal,
-                    outcome=outcome,
-                    reasonCode=reason_code,
-                    signalIds=signal_ids,
-                    dedupeKey=dedupe,
-                    taskId=task_id,
-                    proposal=proposal,
-                )
-            )
-        return dispositions
 
     def _planner_artifact_sources(
         self,

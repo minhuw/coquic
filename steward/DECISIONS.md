@@ -47,3 +47,12 @@ fail closed.
 Consumers never infer a pipeline from elapsed time, row order, synthetic IDs, or
 create-on-read repair, and failure handling does not finalize or mutate task
 evidence while ownership is corrupt.
+
+## Retired publication build timeout
+
+Strictly reject retained `build_timeout_seconds` keys; removal before upgrade
+is required, and key-free configuration remains compatible with the previous
+release for rollback. There is no warning, alias, rewrite, migrator, timer, or
+runtime deadline. Existing scanner/OCR, network, lease, retry, and task-stage
+timeouts remain separate. Any future deadline requires an explicit cross-caller
+deadline, cancellation/cleanup, and failure/retry contract.

@@ -753,7 +753,7 @@ def main() -> int:
                 result = publisher.publish(publication.publication_id, graph(), compose_kwargs={"scanner_runner": clean_scanner})
                 if result.status is not PublicationStatus.exposed: raise RuntimeError(f"publication was not exposed: {result.status} {result.reason} {result.phase}")
                 if "published" in cases: emit_child(base_url, "published", summaries)
-                replay_cases = [case for case in cases if case in {"replay", "reopen", "reopen/replay", "reopen-replay"}]
+                replay_cases = [case for case in cases if case in {"replay", "reopen/replay"}]
                 if replay_cases:
                     if store is None: raise RuntimeError("replay requires producer state")
                     before = provider.snapshot()
@@ -767,19 +767,19 @@ def main() -> int:
                     close_store(reopened); reopened = None
                     for case in replay_cases: emit_child(base_url, case, summaries)
                 for case in cases:
-                    if case in {"unavailable", "failure", "failures"}:
+                    if case == "unavailable":
                         provider.unavailable = True
                         try: emit_child(base_url, case, summaries)
                         finally: provider.unavailable = False
-                    elif case in {"dangling-head", "dangling_head"}:
+                    elif case == "dangling-head":
                         original = provider.corrupt_dangling()
                         try: emit_child(base_url, case, summaries)
                         finally: provider.restore_dangling(original)
-                    elif case in {"private-field", "private_field"}:
+                    elif case == "private-field":
                         original = provider.corrupt_private_field()
                         try: emit_child(base_url, case, summaries)
                         finally: provider.restore_private_field(original)
-                    elif case in {"digest-mismatch", "digest_mismatch"}:
+                    elif case == "digest-mismatch":
                         public_key, (content, metadata) = next((key, value) for (bucket, key), value in provider.objects.items() if bucket == PUBLIC_BUCKET)
                         provider.objects[(PUBLIC_BUCKET, public_key)] = (content + b"corrupt", metadata)
                         try: emit_child(base_url, case, summaries)

@@ -954,24 +954,6 @@ def _format_channels(content: bytes, media_type: str) -> tuple[bytes, ...] | Rea
     return ReasonCode.unsafe_content
 
 
-def _complete_stream(content: bytes, media_type: str) -> bool:
-    """Require the format's terminal marker to be the final input byte."""
-
-    return not isinstance(_format_channels(content, media_type), ReasonCode)
-
-
-def _jpeg_complete(content: bytes) -> bool:
-    """Parse all JPEG scans and reject a suffix after EOI."""
-
-    return not isinstance(_jpeg_channels(content), ReasonCode)
-
-
-def _gif_complete(content: bytes) -> bool:
-    """Walk GIF blocks so bytes after the actual trailer cannot hide."""
-
-    return not isinstance(_gif_channels(content), ReasonCode)
-
-
 def _decode_frames(content: bytes, media_type: str) -> tuple[tuple[_FrameInspection, ...], int] | ReasonCode:
     expected_format = SUPPORTED_IMAGE_FORMATS[media_type]
     stream = io.BytesIO(content)

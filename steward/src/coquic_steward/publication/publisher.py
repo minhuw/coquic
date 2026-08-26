@@ -727,28 +727,6 @@ class CloudPublisher:
                 return False, None
             return True, operation()
 
-    def _effect_allowed(
-        self,
-        task_id: object,
-        *,
-        action: EffectActionKind,
-        action_id: str,
-        target: str,
-        payload: Mapping[str, object] | None = None,
-        reason: str = "dry-run publication effect is proposed locally",
-    ) -> bool:
-        """Ask the Store immediately before a read-only decision."""
-
-        with self._effect_admission(
-            task_id,
-            action=action,
-            action_id=action_id,
-            target=target,
-            payload=payload,
-            reason=reason,
-        ) as decision:
-            return decision.allowed
-
     @staticmethod
     def _bounded_transport_identity(key: str, object_class: R2ObjectClass) -> str:
         """Return a stable proposal identity without exposing an object key."""

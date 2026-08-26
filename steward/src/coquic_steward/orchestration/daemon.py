@@ -47,6 +47,7 @@ from ..core.models import (
     coerce_execution_mode,
 )
 from ..execution.executor import StewardExecutor
+from ..execution.publication_graph import task_publication_lifecycle
 from ..storage.sqlite import (
     DaemonPublicationAuthority,
     DaemonPublicationRevocationResult,
@@ -3173,16 +3174,13 @@ class StewardDaemon:
 
     @staticmethod
     def _terminal_publication_lifecycle(task: TaskRecord) -> str:
-        status = str(getattr(task, "status", "failed"))
-        if status == TaskStatus.cancelled.value:
-            return "cancelled"
-        if status in {
-            TaskStatus.succeeded.value,
-            TaskStatus.pushed.value,
-            TaskStatus.no_changes.value,
-        }:
-            return "completed"
-        return "failed"
+        try:
+            status = TaskStatus(getattr(task, "status", None))
+        except (TypeError, ValueError):
+            return "failed"
+        if not status.terminal:
+            return "failed"
+        return task_publication_lifecycle(status)
 
     @staticmethod
     def _terminal_publication_run_alias(task: TaskRecord, run: object) -> str | None:

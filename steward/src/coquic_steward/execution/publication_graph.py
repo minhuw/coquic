@@ -17,6 +17,24 @@ def _publication_timestamp(value: object) -> str:
     )
 
 
+def task_publication_lifecycle(status: TaskStatus | str) -> str:
+    """Map one legal task status to its public lifecycle state."""
+
+    status = TaskStatus(status)
+    if status in {
+        TaskStatus.queued,
+        TaskStatus.running,
+        TaskStatus.reviewing,
+        TaskStatus.integrating,
+    }:
+        return "active"
+    if status is TaskStatus.cancelled:
+        return "cancelled"
+    if status in {TaskStatus.failed, TaskStatus.blocked}:
+        return "failed"
+    return "completed"
+
+
 def assemble_publication_graph(
     store: TaskStore, task: TaskRecord, archive: TaskArchive
 ) -> dict[str, object]:
@@ -80,21 +98,7 @@ def assemble_publication_graph(
                 }
             )
 
-    status = TaskStatus(task.status)
-    lifecycle = (
-        "active"
-        if status in {
-            TaskStatus.queued,
-            TaskStatus.running,
-            TaskStatus.reviewing,
-            TaskStatus.integrating,
-        }
-        else "cancelled"
-        if status is TaskStatus.cancelled
-        else "failed"
-        if status in {TaskStatus.failed, TaskStatus.blocked}
-        else "completed"
-    )
+    lifecycle = task_publication_lifecycle(task.status)
     task_value = {
         "taskId": task.id,
         "title": task.spec.title,

@@ -6391,6 +6391,34 @@ def test_terminal_seal_uses_canonical_utc_timestamp(config):
     assert "+00:00" not in manifest["completedAt"]
 
 
+def test_terminal_publication_lifecycle_delegates_and_fails_closed(monkeypatch):
+    calls = []
+
+    def sentinel(status):
+        calls.append(status)
+        return "sentinel"
+
+    monkeypatch.setattr(daemon_module, "task_publication_lifecycle", sentinel)
+    daemon = object.__new__(StewardDaemon)
+
+    assert (
+        daemon._terminal_publication_lifecycle(
+            SimpleNamespace(status=TaskStatus.succeeded.value)
+        )
+        == "sentinel"
+    )
+    assert calls == [TaskStatus.succeeded]
+
+    for task in (
+        SimpleNamespace(status=TaskStatus.queued.value),
+        SimpleNamespace(),
+        SimpleNamespace(status="invalid"),
+    ):
+        calls.clear()
+        assert daemon._terminal_publication_lifecycle(task) == "failed"
+        assert calls == []
+
+
 @pytest.mark.parametrize(
     ("api", "failure"),
     [

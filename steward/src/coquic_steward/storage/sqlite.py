@@ -8701,30 +8701,6 @@ def _task_query() -> Select[tuple[TaskRow]]:
     return select(TaskRow).options(selectinload(TaskRow.validations))
 
 
-def _live_task_latch():
-    """Match only the Store-owned top-level live execution latch."""
-
-    return and_(
-        func.json_valid(TaskRow.metadata_json) == 1,
-        func.json_extract(TaskRow.metadata_json, "$.execution_mode")
-        == ExecutionMode.live.value,
-    )
-
-
-def _task_row_is_dry_run(task: TaskRow | None) -> bool:
-    """Treat a reserved dry-run latch as ongoing signal coverage."""
-
-    if task is None:
-        return False
-    try:
-        metadata = json.loads(task.metadata_json or "{}")
-        if not isinstance(metadata, dict):
-            return True
-        return execution_mode_from_metadata(metadata) is ExecutionMode.dry_run
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return True
-
-
 def _queued_dispatch_order():
     return (
         case(
@@ -8799,15 +8775,12 @@ def _count_tasks(
     *,
     statuses: list[str],
     integration: bool,
-    live_only: bool = False,
 ) -> int:
     statement = select(func.count()).select_from(TaskRow).where(TaskRow.status.in_(statuses))
     if integration:
         statement = statement.where(TaskRow.worker == WorkerKind.integration_manager.value)
     else:
         statement = statement.where(TaskRow.worker != WorkerKind.integration_manager.value)
-    if live_only:
-        statement = statement.where(_live_task_latch())
     return session.scalar(statement) or 0
 
 

@@ -3880,6 +3880,59 @@ def test_github_actions_signal_ignores_latest_non_failure(
 
     assert collection.items == []
 
+
+def test_revalidation_passes_strict_to_registered_provider(
+    config: StewardConfig, monkeypatch
+) -> None:
+    item = SignalItem(
+        id="strict-contract",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="strict-contract",
+        title="feature",
+        payload={"issue_number": 42},
+    )
+    strict_values: list[bool] = []
+
+    def stale_signal_reason(self, config, item, *, strict):
+        strict_values.append(strict)
+        return None
+
+    monkeypatch.setattr(
+        GitHubFeatureIssuesProvider, "stale_signal_reason", stale_signal_reason
+    )
+
+    assert revalidate_signal_items(config, [item], strict=False) == ([item], {})
+    assert revalidate_signal_items(config, [item], strict=True) == ([item], {})
+    assert strict_values == [False, True]
+
+
+def test_strict_revalidation_rejects_legacy_provider_signature(
+    config: StewardConfig, monkeypatch
+) -> None:
+    item = SignalItem(
+        id="legacy-provider",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="legacy-provider",
+        title="feature",
+        payload={"issue_number": 42},
+    )
+
+    def stale_signal_reason(self, config, item):
+        return None
+
+    monkeypatch.setattr(
+        GitHubFeatureIssuesProvider, "stale_signal_reason", stale_signal_reason
+    )
+
+    assert revalidate_signal_items(config, [item], strict=False) == ([item], {})
+    assert revalidate_signal_items(config, [item], strict=True) == (
+        [],
+        {item.id: "provider_unavailable"},
+    )
+
+
 @pytest.mark.parametrize(
     ("provider", "item", "response", "expected"),
     [

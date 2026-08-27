@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import inspect
 from typing import TypeAlias
 
 from ..core.config import StewardConfig
@@ -89,22 +88,7 @@ def _revalidate_signal_items(
             continue
         provider = providers.setdefault(item.provider, provider_type())
         try:
-            if strict:
-                parameters = inspect.signature(
-                    provider.stale_signal_reason
-                ).parameters.values()
-                supports_strict = any(
-                    parameter.name == "strict"
-                    or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in parameters
-                )
-                reason = (
-                    provider.stale_signal_reason(config, item, strict=True)
-                    if supports_strict
-                    else provider.stale_signal_reason(config, item)
-                )
-            else:
-                reason = provider.stale_signal_reason(config, item)
+            reason = provider.stale_signal_reason(config, item, strict=strict)
         except ProviderRevalidationError:
             reason = "provider_unavailable"
         except Exception:  # pragma: no cover - ordinary planning remains fail-open.

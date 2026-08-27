@@ -908,10 +908,16 @@ def test_live_rerun_duplicate_skips_provider_revalidation(
     )
     store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
     provider_calls: list[str] = []
+
+    def stale_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        provider_calls.append("stale")
+        return None
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: provider_calls.append("stale") or None,
+        stale_signal_reason,
     )
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
@@ -925,11 +931,16 @@ def test_live_rerun_duplicate_skips_provider_revalidation(
     assert provider_calls == ["stale", "refresh"]
 
     provider_calls.clear()
+
+    def unavailable_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        provider_calls.append("unavailable")
+        return "provider_unavailable"
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: provider_calls.append("unavailable")
-        or "provider_unavailable",
+        unavailable_signal_reason,
     )
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
@@ -1169,10 +1180,15 @@ def test_live_rerun_rejects_all_stale_without_mutation(tmp_path: Path, monkeypat
     store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
     before_tasks = [(task.id, task.status) for task in store.list_tasks()]
     before_wakeups = [(item.id, item.reason) for item in store.pending_wakeups()]
+
+    def stale_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        return "source_closed"
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: "source_closed",
+        stale_signal_reason,
     )
 
     with pytest.raises(LiveRerunRejected, match="all_source_signals_stale"):
@@ -1217,10 +1233,15 @@ def test_live_rerun_mixed_signals_rebinds_only_actionable(tmp_path: Path, monkey
     store.mark_signal_items_planned(
         [item.id for item in saved], planner_run_id="planner", task_id=source.id
     )
+
+    def stale_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        return "source_closed" if item.payload["issue_number"] == 1 else None
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: "source_closed" if item.payload["issue_number"] == 1 else None,
+        stale_signal_reason,
     )
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
@@ -1285,10 +1306,15 @@ def test_live_rerun_does_not_copy_historical_signal_payload(
         ),
     )
     store.mark_signal_items_planned([saved.id], planner_run_id="planner", task_id=source.id)
+
+    def stale_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        return None
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: None,
+        stale_signal_reason,
     )
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
@@ -1638,10 +1664,15 @@ def test_live_rerun_rejects_partial_hydration_without_mutation(
     before_tasks = [(task.id, task.status) for task in store.list_tasks()]
     before_events = [(event.kind, event.data) for event in store.events(source.id)]
     before_wakeups = [(item.id, item.reason) for item in store.pending_wakeups()]
+
+    def stale_signal_reason(self, config, item, *, strict):
+        assert strict is True
+        return None
+
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,
         "stale_signal_reason",
-        lambda self, config, item: None,
+        stale_signal_reason,
     )
     monkeypatch.setattr(
         providers.GitHubFeatureIssuesProvider,

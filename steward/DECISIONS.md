@@ -48,6 +48,23 @@ Consumers never infer a pipeline from elapsed time, row order, synthetic IDs, or
 create-on-read repair, and failure handling does not finalize or mutate task
 evidence while ownership is corrupt.
 
+## Maintained compatibility surfaces
+
+Explicit package facades and module-level `__all__` exports are compatibility
+surfaces; absence of repository callers is not deletion authority. Preserve
+archive convenience exports, `TaskStore`, exported Storage names, and schema
+aliases that identify durable rows until a separately approved transition
+names replacements and compatibility handling. The exact inventory is the
+current source definitions in `execution/__init__.py`,
+`execution/task_archive.py`, `storage/__init__.py`, and `storage/schema.py`; do
+not copy changing names or line-number matrices into this log. This policy does
+not make every internal name public.
+
+API or alias removal requires an explicit transition decision. Time-bounded
+audits belong in issues or plans, with their evidence retained in Git history;
+this policy changes no Python, exports, aliases, schemas, packaging, tests, or
+runtime behavior.
+
 ## Retired publication build timeout
 
 Strictly reject retained `build_timeout_seconds` keys; removal before upgrade

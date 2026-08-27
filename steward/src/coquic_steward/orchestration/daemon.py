@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
-from itertools import islice
 import json
 import re
 import threading
@@ -41,7 +40,6 @@ from ..core.models import (
     SignalItem,
     TaskRecord,
     TaskStatus,
-    TERMINAL_STATUSES,
     utc_now,
     WorkerKind,
     coerce_execution_mode,
@@ -129,6 +127,7 @@ from ..storage import (
     TaskStore,
     due_provider_names,
     idle_fetch_provider_names,
+    planner_task_context,
     scheduler_state,
 )
 from ..signals import (
@@ -158,7 +157,6 @@ DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 SESSION_RESUME_MAX_ATTEMPTS = 2
 PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
-PLANNER_TERMINAL_CONTEXT_LIMIT = 200
 GLOBAL_ACTIVE_TASK_ADMISSION_CAP = 16
 _BUILTIN_DOCKER_RECONCILE = DockerResourceManager.reconcile
 
@@ -341,11 +339,9 @@ def _inspection_confirms_stopped(inspection: object) -> bool:
     return True if confirmed is None else bool(confirmed)
 
 
-_ACTIVE_TASK_STATUSES = tuple(ACTIVE_STATUSES)
 _RESUMABLE_TASK_STATUSES = tuple(
     status for status in ACTIVE_STATUSES if status != TaskStatus.queued
 )
-_TERMINAL_TASK_STATUSES = tuple(TERMINAL_STATUSES)
 
 
 @dataclass
@@ -4867,25 +4863,6 @@ class StewardDaemon:
             seen.add(task.id)
             self._log(f"dispatch scheduled {task.id} {_task_label(task)}")
 
-    def _planner_task_context(self) -> tuple[list[TaskRecord], list[TaskRecord]]:
-        """Return complete active state plus bounded terminal planner history."""
-
-        active = list(self.store.iter_tasks(statuses=_ACTIVE_TASK_STATUSES))
-        terminal = list(
-            islice(
-                self.store.iter_tasks(statuses=_TERMINAL_TASK_STATUSES),
-                PLANNER_TERMINAL_CONTEXT_LIMIT,
-            )
-        )
-        context: list[TaskRecord] = []
-        seen: set[str] = set()
-        for task in [*active, *terminal]:
-            if task.id in seen:
-                continue
-            seen.add(task.id)
-            context.append(task)
-        return active, context
-
     def _planner_config_with_admission_cap(self) -> StewardConfig:
         """Keep planner verifier capacity within the global active-task cap."""
 
@@ -5238,7 +5215,7 @@ class StewardDaemon:
                 f"count={global_active_count}"
             )
             return
-        active_tasks, task_context = self._planner_task_context()
+        active_tasks, task_context = planner_task_context(self.store)
         signals = project_signals_from_items(self.config, inbox_items)
         active_count = self.store.source_active_count()
         planner_config = self._planner_config_with_admission_cap()

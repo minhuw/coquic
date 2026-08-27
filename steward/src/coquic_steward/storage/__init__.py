@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 
 from ..core.config import SignalProviderConfig, StewardConfig
 from ..core.models import (
+    ACTIVE_STATUSES,
+    TERMINAL_STATUSES,
     SchedulerPollResult,
     SchedulerProviderState,
     SchedulerState,
     SignalFetchRun,
     SignalFetchStatus,
+    TaskRecord,
 )
 from .sqlite import (
     CURRENT_SCHEMA_CATALOG_DIGEST,
@@ -35,6 +39,27 @@ from .schema import (
 )
 
 TaskStore = SQLiteTaskStore
+_PLANNER_TERMINAL_CONTEXT_LIMIT = 200
+
+
+def planner_task_context(store: TaskStore) -> tuple[list[TaskRecord], list[TaskRecord]]:
+    """Return complete active state plus bounded terminal planner history."""
+
+    active = list(store.iter_tasks(statuses=ACTIVE_STATUSES))
+    terminal = list(
+        islice(
+            store.iter_tasks(statuses=TERMINAL_STATUSES),
+            _PLANNER_TERMINAL_CONTEXT_LIMIT,
+        )
+    )
+    context: list[TaskRecord] = []
+    seen: set[str] = set()
+    for task in [*active, *terminal]:
+        if task.id in seen:
+            continue
+        seen.add(task.id)
+        context.append(task)
+    return active, context
 
 
 def scheduler_state(config: StewardConfig, store: TaskStore) -> SchedulerPollResult:
@@ -192,6 +217,7 @@ __all__ = [
     "StewardResourcePressureRow",
     "due_provider_names",
     "idle_fetch_provider_names",
+    "planner_task_context",
     "scheduler_state",
     "SchedulerPollResult",
 ]

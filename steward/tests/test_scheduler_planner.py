@@ -23,6 +23,10 @@ from coquic_steward.core.models import (
     SignalFetchRun,
     SignalFetchStatus,
     SignalItem,
+    TaskKind,
+    TaskSpec,
+    TaskStatus,
+    WorkerKind,
 )
 from coquic_steward.execution.container import PlannerContainerRuntime, SubprocessDockerClient
 from coquic_steward.execution.container_config import PlannerContainerConfig
@@ -396,6 +400,26 @@ def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) 
 
 def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
     store = TaskStore.create(config.db_path)
+    active_task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="old active planner context",
+            prompt="complete old active planner context",
+        )
+    )
+    terminal_tasks = []
+    for index in range(205):
+        terminal, _ = store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=f"terminal planner context {index}",
+                prompt="complete terminal planner context",
+            )
+        )
+        store.finish_task(terminal.id, TaskStatus.succeeded, "terminal")
+        terminal_tasks.append(terminal)
     item = _signals().items[0]
     store.ingest_signal_collection(
         SignalFetchRun(
@@ -406,9 +430,11 @@ def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
         [item],
     )
     invocations: list[object] = []
+    contexts: list[list[object]] = []
 
-    def fake_planner(_config, _signals, _tasks, **kwargs):
+    def fake_planner(_config, _signals, tasks, **kwargs):
         invocations.append(kwargs["invocation"])
+        contexts.append(list(tasks))
         return PlannerRun(
             planned=[],
             accepted_count=0,
@@ -427,12 +453,34 @@ def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
         lambda _config, items: (items, {}),
     )
     monkeypatch.setattr("coquic_steward.cli.run_planner", fake_planner)
+    monkeypatch.setattr(
+        store,
+        "list_tasks",
+        lambda **_kwargs: pytest.fail("planner used a capped task listing"),
+    )
 
     result = CliRunner().invoke(app, ["plan"])
 
     assert result.exit_code == 0
     assert len(invocations) == 1
     assert isinstance(invocations[0], FreshPlannerSession)
+    assert len(contexts) == 1
+    context = contexts[0]
+    assert context[0].id == active_task.id
+    assert len(context) == 201
+    terminal_context = [
+        task for task in context if TaskStatus(task.status).terminal
+    ]
+    assert len(terminal_context) == 200
+    expected_terminal = sorted(
+        terminal_tasks,
+        key=lambda task: (task.created_at, task.id),
+        reverse=True,
+    )[:200]
+    assert [task.id for task in terminal_context] == [
+        task.id for task in expected_terminal
+    ]
+    assert len({task.id for task in context}) == len(context)
 
 
 def test_cli_diagnostics_normalizes_task_epoch_and_reports_control_state(

@@ -47,7 +47,7 @@ from .signals import (
     project_signals_from_items,
     revalidate_signal_items,
 )
-from .storage import TaskStore
+from .storage import TaskStore, planner_task_context
 from .publication.d1 import D1PublicationClient
 from .publication.generation import _publication_compose_kwargs
 from .publication.models import ReasonCode
@@ -693,10 +693,11 @@ def plan(enqueue: bool = False) -> None:
         )
     if not actionable:
         return
+    _, task_context = planner_task_context(store)
     planner_run = run_planner(
         config,
         project_signals_from_items(config, actionable),
-        store.list_tasks(limit=200),
+        task_context,
         invocation=_configured_planner_session(config),
     )
     planned_item_ids: set[str] = set()

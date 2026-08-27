@@ -18,9 +18,10 @@ from coquic_steward.core.models import (
     WorkerKind,
     WorktreeCheckpoint,
 )
+from coquic_steward.execution.task_archive import TaskArchive
+from coquic_steward.execution.worktree import Worktrees
 from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
 from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
-from coquic_steward.execution.worktree import Worktrees
 
 
 def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> None:
@@ -33,6 +34,42 @@ def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> Non
     epoch = config.ensure_epoch()
     assert epoch["policy"] == "post-steward-2.0"
     assert config.ensure_epoch() == epoch
+
+
+def test_config_and_archive_share_the_immutable_epoch(config: StewardConfig) -> None:
+    epoch = config.ensure_epoch()
+    path = config.epoch_path
+    original_bytes = path.read_bytes()
+
+    assert TaskArchive(config).ensure_epoch() == epoch
+    assert config.ensure_epoch() == epoch
+    assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("contents", [b"not json\n", b"{}\n"])
+def test_config_rejects_invalid_epoch_without_replacement(
+    config: StewardConfig, contents: bytes
+) -> None:
+    path = config.epoch_path
+    path.write_bytes(contents)
+
+    with pytest.raises(RuntimeError):
+        config.ensure_epoch()
+
+    assert path.read_bytes() == contents
+
+
+def test_config_rejects_epoch_symlink_without_replacement(config: StewardConfig) -> None:
+    target = config.tasks_dir / "epoch-target"
+    target_bytes = b"untouched\n"
+    target.write_bytes(target_bytes)
+    config.epoch_path.symlink_to(target.name)
+
+    with pytest.raises(RuntimeError):
+        config.ensure_epoch()
+
+    assert config.epoch_path.is_symlink()
+    assert target.read_bytes() == target_bytes
 
 
 def test_task_store_direct_construction_is_rejected(config: StewardConfig) -> None:

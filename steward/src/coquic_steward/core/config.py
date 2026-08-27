@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import math
 import os
 import re
-import secrets
 import shutil
 import stat
 import tomllib
@@ -28,8 +26,6 @@ DEFAULT_ENABLED_SIGNALS = (
     "codacy",
 )
 DEFAULT_COQUIC_HOME = "~/.coquic"
-ARCHIVE_FORMAT_VERSION = "1.0"
-ARCHIVE_POLICY = "post-steward-2.0"
 DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES = {
     "github-actions:ci": 30,
     "github-actions:test": 30,
@@ -985,44 +981,9 @@ class StewardConfig:
 
     def ensure_epoch(self) -> dict[str, Any]:
         """Create or verify the single immutable post-2.0 archive epoch."""
-        self.tasks_dir.mkdir(parents=True, exist_ok=True)
-        path = self.epoch_path
-        if path.is_symlink():
-            raise RuntimeError(f"archive epoch is a symlink: {path}")
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"invalid archive epoch: {path}") from exc
-            if not _valid_epoch(data):
-                raise RuntimeError("archive epoch does not match post-steward-2.0")
-            return data
-        data = {
-            "epochId": f"epoch-{secrets.token_hex(12)}",
-            "formatVersion": ARCHIVE_FORMAT_VERSION,
-            "policy": ARCHIVE_POLICY,
-            "startedAt": _utc_timestamp(),
-            "endedAt": None,
-        }
-        temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
-        temporary.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        _fsync_file(temporary)
-        try:
-            try:
-                os.link(temporary, path)
-            except FileExistsError:
-                # Another allocator won the epoch race.  Its exact immutable
-                # bytes are authoritative and are verified on the next read.
-                pass
-        finally:
-            temporary.unlink(missing_ok=True)
-        _fsync_directory(path.parent)
-        if path.is_symlink():
-            raise RuntimeError(f"archive epoch is a symlink: {path}")
-        result = json.loads(path.read_text(encoding="utf-8"))
-        if not _valid_epoch(result):
-            raise RuntimeError("archive epoch does not match post-steward-2.0")
-        return result
+        from ..execution.task_archive import ensure_epoch as ensure_archive_epoch
+
+        return ensure_archive_epoch(self)
 
 
 def load_config(
@@ -1479,41 +1440,6 @@ def _telemetry_config(raw: object) -> TelemetryConfig:
     )
 
 
-def _utc_timestamp() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _valid_epoch(value: object) -> bool:
-    required = {"epochId", "formatVersion", "policy", "startedAt"}
-    allowed = required | {"endedAt"}
-    return (
-        isinstance(value, dict)
-        and required.issubset(value)
-        and set(value).issubset(allowed)
-        and value.get("formatVersion") == ARCHIVE_FORMAT_VERSION
-        and value.get("policy") == ARCHIVE_POLICY
-        and isinstance(value.get("epochId"), str)
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value["epochId"])
-        is not None
-        and _valid_utc_timestamp(value.get("startedAt"))
-        and value.get("endedAt") is None
-    )
-
-
-def _valid_utc_timestamp(value: object) -> bool:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        return False
-    try:
-        from datetime import datetime
-
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError:
-        return False
-    return parsed.utcoffset() is not None
-
-
 def _ensure_controlled_roots(paths: tuple[Path, ...]) -> None:
     for path in paths:
         if path.is_symlink():
@@ -1525,22 +1451,6 @@ def _ensure_controlled_roots(paths: tuple[Path, ...]) -> None:
             # A read-only fixture can still be inspected; mkdir/stat errors are
             # surfaced by the operation that needs the path.
             pass
-
-
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def default_signal_provider_config(name: str) -> SignalProviderConfig:

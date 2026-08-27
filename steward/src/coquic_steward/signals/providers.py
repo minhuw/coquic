@@ -127,6 +127,7 @@ class GitHubActionsProvider:
         *,
         strict: bool,
         hydrate: bool,
+        for_reason: bool,
         cached: SignalItem | None = None,
     ) -> tuple[str | None, SignalItem | None]:
         selected_run_id = _str_or_none(item.payload.get("run_id"))
@@ -144,30 +145,40 @@ class GitHubActionsProvider:
         if latest is None:
             return "workflow_run_missing", None
         latest_run_id = _str_or_none(latest.get("databaseId"))
+        selected_attempt = _int_or_none(item.payload.get("run_attempt"))
+        if selected_attempt is None:
+            selected_attempt = 1
+        latest_attempt = _int_or_none(latest.get("attempt"))
+        latest_status = _str_or_none(latest.get("status"))
+        latest_conclusion = _str_or_none(latest.get("conclusion"))
+        if not for_reason and strict and any(
+            value is None
+            for value in (
+                latest_run_id,
+                latest_attempt,
+                latest_status,
+                latest_conclusion,
+            )
+        ):
+            raise ProviderRevalidationError("provider_response_incomplete")
         if latest_run_id is None:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_run_id")
             return None, None
         if latest_run_id != selected_run_id:
             return "superseded_by_newer_run", None
-        selected_attempt = _int_or_none(item.payload.get("run_attempt"))
-        if selected_attempt is None:
-            selected_attempt = 1
-        latest_attempt = _int_or_none(latest.get("attempt"))
         if latest_attempt is None:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_attempt")
             return "superseded_by_newer_run", None
         if latest_attempt != selected_attempt:
             return "superseded_by_newer_run", None
-        latest_status = _str_or_none(latest.get("status"))
         if latest_status is None:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_status")
             return None, None
         if latest_status != "completed":
             return "workflow_run_not_completed", None
-        latest_conclusion = _str_or_none(latest.get("conclusion"))
         if latest_conclusion is None:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_conclusion")
@@ -197,7 +208,7 @@ class GitHubActionsProvider:
         self, config: StewardConfig, item: SignalItem, *, strict: bool = False
     ) -> str | None:
         reason, _current = self._revalidate_signal(
-            config, item, strict=strict, hydrate=strict
+            config, item, strict=strict, hydrate=strict, for_reason=True
         )
         return reason
 
@@ -208,7 +219,12 @@ class GitHubActionsProvider:
 
         cached = _cached_revalidated_signal_item(self, item)
         _reason, current = self._revalidate_signal(
-            config, item, strict=strict, hydrate=True, cached=cached
+            config,
+            item,
+            strict=strict,
+            hydrate=True,
+            for_reason=False,
+            cached=cached,
         )
         return current
 
@@ -590,8 +606,9 @@ class GitHubFeatureIssuesProvider:
             if strict:
                 raise ProviderRevalidationError("provider_response_missing_state")
             return None, None
-        if state.lower() != "open":
-            return ("source_closed", None) if for_reason else (None, None)
+        state_closed = state.lower() != "open"
+        if for_reason and state_closed:
+            return "source_closed", None
         raw_labels = decoded.get("labels")
         labels_valid = "labels" in decoded and isinstance(raw_labels, list) and not any(
             not isinstance(label, dict)
@@ -611,13 +628,13 @@ class GitHubFeatureIssuesProvider:
         if strict and current_number != issue_number:
             raise ProviderRevalidationError("provider_response_missing_issue_number")
         if not for_reason and current_number != issue_number:
-            if strict:
-                raise ProviderRevalidationError("provider_response_missing_issue_number")
             return None, None
         if strict:
             _validate_feature_issue_response(
                 decoded, config.github_repository, issue_number
             )
+        if state_closed:
+            return None, None
         labels = set(_label_names(raw_labels))
         if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
             return (

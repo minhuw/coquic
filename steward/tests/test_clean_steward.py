@@ -3988,6 +3988,111 @@ def test_strict_revalidation_hydrates_each_provider_once(
     assert current.provider == provider
 
 
+def test_strict_workflow_hydration_preserves_incomplete_response_reason(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.signals.providers import ProviderRevalidationError
+
+    item = SignalItem(
+        id="stored-ci",
+        provider="github-actions:ci",
+        kind="github-actions.ci-failure",
+        fingerprint="stored-ci-fingerprint",
+        title="old CI title",
+        payload={"run_id": "100", "run_attempt": 1},
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        calls.append(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "workflowName": "Per-Commit CI",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "attempt": 1,
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    with pytest.raises(
+        ProviderRevalidationError, match="provider_response_incomplete"
+    ):
+        GitHubActionsCiProvider().revalidated_signal_item(
+            config, item, strict=True
+        )
+
+    assert len(calls) == 1
+
+
+def test_strict_feature_hydration_validates_closed_response_identity(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.signals.providers import ProviderRevalidationError
+
+    item = SignalItem(
+        id="stored-feature",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="stored-feature-fingerprint",
+        title="old feature title",
+        links=[
+            {
+                "label": "Open GitHub issue",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+            }
+        ],
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        calls.append(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 99,
+                    "title": "Foreign issue",
+                    "url": "https://github.com/minhuw/coquic/issues/99",
+                    "body": "Foreign body",
+                    "labels": [{"name": "steward:feature"}],
+                    "state": "CLOSED",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    with pytest.raises(
+        ProviderRevalidationError, match="provider_response_missing_issue_number"
+    ):
+        GitHubFeatureIssuesProvider().revalidated_signal_item(
+            config, item, strict=True
+        )
+
+    assert len(calls) == 1
+
+
 def test_revalidate_signal_items_filters_stale_sources(
     config: StewardConfig, monkeypatch
 ) -> None:

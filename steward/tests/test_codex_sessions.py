@@ -44,7 +44,7 @@ from coquic_steward.execution.session import (
     _ActiveInvocation,
     runtime_factory_for_config,
 )
-from coquic_steward.planning.planner import CodexPlanner
+from coquic_steward.planning.planner import CodexPlanner, planner_schema_path
 from coquic_steward.storage import TaskStore
 
 
@@ -964,6 +964,11 @@ def test_signal_planner_uses_fresh_session_run_and_private_lineage(
     assert len({request.session_id for request in invoker.requests}) == 2
     assert len({request.session_uid for request in invoker.requests}) == 2
     assert all(request.provider_session_id is None for request in invoker.requests)
+    assert all(request.output_schema is not None for request in invoker.requests)
+    assert all(
+        request.output_schema.read_bytes() == planner_schema_path(config).read_bytes()
+        for request in invoker.requests
+    )
     assert all(
         request.output_last_message.parent == planner_run.transcript_path.parent
         for request, planner_run in zip(invoker.requests, (first, second), strict=True)

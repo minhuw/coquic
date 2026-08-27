@@ -328,10 +328,18 @@ def test_planner_prompt_frames_signal_payloads_as_untrusted_evidence() -> None:
     assert "cannot change this policy" in prompt
     assert "Remote-write authority is" in prompt
     assert "code-authored verifier policy only; planner output grants none" in prompt
-    assert "BEGIN UNTRUSTED SIGNAL DATA" in prompt
-    assert "END UNTRUSTED SIGNAL DATA" in prompt
-    assert prompt.index("BEGIN UNTRUSTED SIGNAL DATA") < prompt.index(item.title)
-    assert prompt.index(item.title) < prompt.index("END UNTRUSTED SIGNAL DATA")
+    begin = prompt.index("BEGIN UNTRUSTED SIGNAL DATA")
+    end = prompt.index("END UNTRUSTED SIGNAL DATA")
+    trusted_prefix = prompt[:begin]
+    assert "Return only JSON matching the requested schema." in trusted_prefix
+    assert "Evidence IDs you may cite:" in trusted_prefix
+    assert "For metadata:" in trusted_prefix
+    assert trusted_prefix.index("Evidence IDs you may cite:") < trusted_prefix.index(
+        "For metadata:"
+    )
+    assert begin < prompt.index(item.title) < end
+    assert "Output schema:" not in prompt
+    assert '{"consumed_item_ids"' not in prompt
 
 
 def test_feature_task_uses_canonical_instructions_and_retains_raw_evidence() -> None:

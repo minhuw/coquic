@@ -277,9 +277,6 @@ def render_planner_prompt(
         [
             PLANNER_SYSTEM_PROMPT.strip(),
             "",
-            "Output schema:",
-            '{"consumed_item_ids":["wi-..."],"tasks":[{"dedupe_key":"string","kind":"code-quality","worker":"code-quality-janitor","title":"string","prompt":"string","priority":"high","risk":"medium","evidence":["wi-..."],"metadata":{"selected_signal_item_ids":["wi-..."]}}]}',
-            "",
             "Evidence IDs you may cite:",
             "- any signal item id from signal_items",
             "",

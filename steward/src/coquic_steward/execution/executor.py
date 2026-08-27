@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fcntl
-import fnmatch
 import json
 import os
 import re
@@ -22,7 +21,7 @@ from ..agents import (
     render_implementation_plan_prompt,
     render_worker_prompt,
 )
-from ..core.config import StewardConfig
+from ..core.config import StewardConfig, _frozen_path_matches
 from ..core.models import (
     EffectActionKind,
     ExecutionMode,
@@ -3392,27 +3391,11 @@ def _patch_paths(patch_text: str) -> list[str]:
 def frozen_patch_paths(
     config: StewardConfig, task: TaskRecord, patch_text: str
 ) -> list[str]:
-    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
-    if not patterns:
-        return []
     return [
         path
         for path in _patch_paths(patch_text)
-        if any(_path_matches_policy(path, pattern) for pattern in patterns)
+        if _frozen_path_matches(config.path_policy, task.spec.kind, path)
     ]
-
-
-def _path_matches_policy(path: str, pattern: str) -> bool:
-    normalized_path = path.strip().replace("\\", "/")
-    normalized_pattern = pattern.strip().replace("\\", "/").rstrip("/")
-    if not normalized_path or not normalized_pattern:
-        return False
-    if any(char in normalized_pattern for char in "*?["):
-        return fnmatch.fnmatchcase(normalized_path, normalized_pattern)
-    return (
-        normalized_path == normalized_pattern
-        or normalized_path.startswith(normalized_pattern + "/")
-    )
 
 
 def _normalize_commit_subject(subject: str) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import os
@@ -642,6 +643,40 @@ class PathPolicyConfig:
         kind_value = str(kind)
         paths = [*self.frozen, *self.frozen_by_kind.get(kind_value, ())]
         return tuple(dict.fromkeys(paths))
+
+
+def _frozen_path_policy_text(
+    policy: PathPolicyConfig | None, kind: object
+) -> str:
+    if policy is None:
+        return ""
+    patterns = policy.frozen_for_kind(kind)
+    if not patterns:
+        return ""
+    lines = [
+        "Do not modify these repository paths for this task. Steward will block "
+        "patches that change them.",
+    ]
+    lines.extend(f"- {pattern}" for pattern in patterns)
+    return "\n".join(lines)
+
+
+def _frozen_path_matches(policy: PathPolicyConfig, kind: object, path: str) -> bool:
+    normalized_path = path.strip().replace("\\", "/")
+    if not normalized_path:
+        return False
+    for pattern in policy.frozen_for_kind(kind):
+        normalized_pattern = pattern.strip().replace("\\", "/").rstrip("/")
+        if not normalized_pattern:
+            continue
+        if any(char in normalized_pattern for char in "*?["):
+            if fnmatch.fnmatchcase(normalized_path, normalized_pattern):
+                return True
+        elif normalized_path == normalized_pattern or normalized_path.startswith(
+            normalized_pattern + "/"
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)

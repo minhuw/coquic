@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import fnmatch
 import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..core.config import StewardConfig
+from ..core.config import StewardConfig, _frozen_path_matches
 from ..core.models import TaskRecord
 from ..core.output_schema import write_output_schema_file
 from .worktree import FORBIDDEN_PATH_PARTS
@@ -116,17 +115,7 @@ def _allowed_plan_path(path_text: str, task: TaskRecord, config: StewardConfig) 
     forbidden = FORBIDDEN_PATH_PARTS | _ADDITIONAL_FORBIDDEN_PARTS
     if any(part in forbidden for part in path.parts):
         return False
-    return not any(
-        _matches(normalized, pattern)
-        for pattern in config.path_policy.frozen_for_kind(task.spec.kind)
-    )
-
-
-def _matches(path: str, pattern: str) -> bool:
-    normalized = pattern.strip().replace("\\", "/").rstrip("/")
-    if any(char in normalized for char in "*?["):
-        return fnmatch.fnmatchcase(path, normalized)
-    return path == normalized or path.startswith(normalized + "/")
+    return not _frozen_path_matches(config.path_policy, task.spec.kind, normalized)
 
 
 IMPLEMENTATION_PLAN_SCHEMA = {

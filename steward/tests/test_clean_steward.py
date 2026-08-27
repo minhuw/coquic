@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from coquic_steward.cli import app
-from coquic_steward.agents import CodexRunner, render_worker_prompt
+from coquic_steward.agents import (
+    CodexRunner,
+    render_implementation_plan_prompt,
+    render_worker_prompt,
+)
 from coquic_steward.agents.tool_changes import ToolChangeCapture, handle_hook
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
 from coquic_steward.agents.runner import _is_transient_codex_message
@@ -5037,6 +5041,68 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
     assert "- flake.nix" in prompt
     assert "- .github/**" in prompt
 
+
+def test_frozen_path_policy_prompts_preserve_order_and_omit_empty_policy(
+    config: StewardConfig,
+) -> None:
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            workflow=TaskWorkflow.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement the selected feature",
+            prompt="Implement the selected feature.",
+        ),
+        worktree_path=config.repo_root,
+    )
+    configured = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen=("global.txt", "duplicate.txt"),
+                frozen_by_kind={
+                    TaskKind.feature.value: (
+                        "duplicate.txt",
+                        r"nested\path/",
+                        "last.txt",
+                    )
+                },
+            ),
+        }
+    )
+    expected = "\n".join(
+        [
+            "Do not modify these repository paths for this task. Steward will block patches that change them.",
+            "- global.txt",
+            "- duplicate.txt",
+            r"- nested\path/",
+            "- last.txt",
+        ]
+    )
+    prompts = [
+        render_worker_prompt(task, configured),
+        render_implementation_plan_prompt(task, configured),
+        render_review_revision_prompt(task, {}, configured),
+        render_validation_revision_prompt(task, [], configured),
+    ]
+
+    assert all(expected in prompt for prompt in prompts)
+    empty = configured.__class__(
+        **{**configured.__dict__, "path_policy": PathPolicyConfig()}
+    )
+    assert all(
+        "Frozen path policy:" not in prompt
+        for prompt in (
+            render_worker_prompt(task, empty),
+            render_implementation_plan_prompt(task, empty),
+            render_review_revision_prompt(task, {}, empty),
+            render_validation_revision_prompt(task, [], empty),
+        )
+    )
+    assert "Frozen path policy:" not in render_review_revision_prompt(task, {}, None)
+    assert "Frozen path policy:" not in render_validation_revision_prompt(task, [], None)
+
+
 def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
     config: StewardConfig,
 ) -> None:
@@ -5418,7 +5484,7 @@ def test_worktree_reports_frozen_file_and_directory_changes(
             **config.__dict__,
             "path_policy": PathPolicyConfig(
                 frozen_by_kind={
-                    TaskKind.feature.value: ("flake.nix", ".github/**")
+                    TaskKind.feature.value: ("flake.nix", r".github\**")
                 }
             ),
         }
@@ -5544,6 +5610,47 @@ def test_git_porcelain_z_reports_rename_destination_before_source(tmp_path: Path
         "source name.txt",
         "destination -> name.txt",
     ]
+
+def test_frozen_patch_paths_preserve_matching_contract(config: StewardConfig) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={
+                    TaskKind.feature.value: (
+                        "src/locked.txt/",
+                        "docs/R*.md",
+                        r"windows\path.txt",
+                    )
+                }
+            ),
+        }
+    )
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+    patch = """\
+diff --git a/src/locked.txt b/src/locked.txt
+diff --git a/src/locked.txt/child.py b/src/locked.txt/child.py
+diff --git a/docs/README.md b/docs/README.md
+diff --git a/docs/readme.md b/docs/readme.md
+diff --git a/windows/path.txt b/windows/path.txt
+diff --git a/WINDOWS/path.txt b/WINDOWS/path.txt
+diff --git a/src/open.txt b/src/open.txt
+"""
+
+    assert frozen_patch_paths(config, task, patch) == [
+        "src/locked.txt",
+        "src/locked.txt/child.py",
+        "docs/README.md",
+        "windows/path.txt",
+    ]
+
 
 def test_frozen_patch_paths_match_renamed_files(config: StewardConfig) -> None:
     config = config.__class__(

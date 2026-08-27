@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from ..core.config import StewardConfig
+from ..core.config import StewardConfig, _frozen_path_policy_text
 from ..core.models import TaskRecord, ValidationResult, utc_now
 from ..core.subprocesses import CommandResult, run_command
 from .container import SubprocessDockerClient, ValidationContainerRuntime
@@ -319,7 +319,9 @@ def render_validation_revision_prompt(
         VALIDATION_SCOPE_CONTROL,
         "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
     ]
-    frozen = _render_frozen_paths(task, config)
+    frozen = _frozen_path_policy_text(
+        config.path_policy if config is not None else None, task.spec.kind
+    )
     if frozen:
         lines.extend(["", "Frozen path policy:", frozen])
     lines.extend(
@@ -345,19 +347,3 @@ def render_validation_revision_prompt(
         ]
     )
     return "\n".join(lines).strip()
-
-
-def _render_frozen_paths(
-    task: TaskRecord, config: StewardConfig | None
-) -> str:
-    if config is None:
-        return ""
-    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
-    if not patterns:
-        return ""
-    lines = [
-        "Do not modify these repository paths for this task. Steward will block "
-        "patches that change them.",
-    ]
-    lines.extend(f"- {pattern}" for pattern in patterns)
-    return "\n".join(lines)

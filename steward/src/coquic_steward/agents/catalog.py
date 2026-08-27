@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from ..core.config import StewardConfig
+from ..core.config import StewardConfig, _frozen_path_policy_text
 from ..core.models import (
     Priority,
     Risk,
@@ -364,7 +364,7 @@ def render_worker_prompt(
     boundary = _render_execution_boundary(task, config)
     if boundary:
         sections.extend(["", "Execution boundary:", boundary])
-    frozen = _render_frozen_paths(task, config)
+    frozen = _frozen_path_policy_text(config.path_policy, task.spec.kind)
     if frozen:
         sections.extend(["", "Frozen path policy:", frozen])
     if implementation_plan is not None:
@@ -427,7 +427,7 @@ def render_implementation_plan_prompt(task: TaskRecord, config: StewardConfig) -
     skill_text = _render_skills(config, _skills_for_task(task, agent))
     if skill_text:
         sections.extend(["", "Embedded repo skills:", skill_text])
-    frozen = _render_frozen_paths(task, config)
+    frozen = _frozen_path_policy_text(config.path_policy, task.spec.kind)
     if frozen:
         sections.extend(["", "Frozen path policy:", frozen])
     sections.extend(_render_source_context_sections(task))
@@ -601,15 +601,3 @@ def _render_execution_boundary(task: TaskRecord, config: StewardConfig) -> str:
         "changes in the worktree, run local validation, and leave integration effects "
         "to Steward's code-owned boundary."
     )
-
-
-def _render_frozen_paths(task: TaskRecord, config: StewardConfig) -> str:
-    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
-    if not patterns:
-        return ""
-    lines = [
-        "Do not modify these repository paths for this task. Steward will block "
-        "patches that change them.",
-    ]
-    lines.extend(f"- {pattern}" for pattern in patterns)
-    return "\n".join(lines)

@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from coquic_steward.agents import CodexRunner
-from coquic_steward.core.config import CodexStageConfig, StewardConfig
+from coquic_steward.core.config import (
+    CodexStageConfig,
+    PathPolicyConfig,
+    StewardConfig,
+)
 from coquic_steward.core.models import (
     CodexStage,
     TaskKind,
@@ -97,6 +101,19 @@ def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -
     generated = json.loads(json.dumps(VALID_PLAN))
     generated["steps"][0]["files"] = ["zig-out/result"]
     assert parse_implementation_plan(json.dumps(generated), task, config) is None
+
+    frozen_config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("README.md/",)}
+            ),
+        }
+    )
+    frozen = json.loads(json.dumps(VALID_PLAN))
+    frozen["steps"][0]["files"] = ["README.md"]
+    assert parse_implementation_plan(json.dumps(frozen), task, frozen_config) is None
+
 
 def test_feature_plans_then_codes_in_separate_session(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

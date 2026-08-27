@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import fnmatch
 from hashlib import sha256
 from dataclasses import dataclass
 import shutil
 import tempfile
 from pathlib import Path
 
-from ..core.config import StewardConfig
+from ..core.config import StewardConfig, _frozen_path_matches
 from ..core.models import TaskRecord
 from ..core.subprocesses import CommandResult, run_command
 
@@ -508,10 +507,11 @@ class Worktrees:
         return forbidden
 
     def frozen_paths(self, path: Path, task: TaskRecord) -> list[str]:
-        patterns = self.config.path_policy.frozen_for_kind(task.spec.kind)
-        if not patterns:
-            return []
-        return _matching_paths(_changed_paths_from_porcelain(self._status_output(path)), patterns)
+        return [
+            changed
+            for changed in _changed_paths_from_porcelain(self._status_output(path))
+            if _frozen_path_matches(self.config.path_policy, task.spec.kind, changed)
+        ]
 
     @staticmethod
     def _status_output(path: Path) -> str:
@@ -618,28 +618,6 @@ def _path_policy_status_diagnostic(output: str) -> dict[str, object]:
         "raw_prefix": repr(raw[:256]),
         "byte_length": len(raw),
     }
-
-
-def _matching_paths(paths: list[str], patterns: tuple[str, ...]) -> list[str]:
-    return [
-        path
-        for path in paths
-        if any(_path_matches_pattern(path, pattern) for pattern in patterns)
-    ]
-
-
-def _path_matches_pattern(path: str, pattern: str) -> bool:
-    normalized_path = _normalize_policy_path(path)
-    normalized_pattern = _normalize_policy_path(pattern).rstrip("/")
-    if not normalized_path or not normalized_pattern:
-        return False
-    if any(char in normalized_pattern for char in "*?["):
-        return fnmatch.fnmatchcase(normalized_path, normalized_pattern)
-    return (
-        normalized_path == normalized_pattern
-        or normalized_path.startswith(normalized_pattern + "/")
-    )
-
 
 def _commit_command(
     path: Path,

@@ -437,7 +437,6 @@ class StewardDaemon:
         self._publication_previous_callback: object | None = None
         self._publication_callback: Callable[[], None] | None = None
         self._publication_cancel: DaemonCancellation | None = None
-        self._publication_deadline: float | None = None
         self._publication_authority: DaemonPublicationAuthority | None = None
         self._publication_overhead_position = 0
         self._publication_overhead_digest: str | None = None
@@ -463,7 +462,6 @@ class StewardDaemon:
             self._control_loop_ledger,
             catalog=usage_catalog,
         )
-        self._overhead_usage = self._control_loop_usage
         self._control_loop_stop = threading.Event()
         self._control_loop_wakeup = threading.Event()
         self._control_loop_thread: threading.Thread | None = None
@@ -1836,7 +1834,6 @@ class StewardDaemon:
 
         self._publication_stop.set()
         self._publication_wakeup.set()
-        self._publication_deadline = deadline
         cancel = self._publication_cancel
         if cancel is None:
             return DaemonCancellationResult(quiescent=True)

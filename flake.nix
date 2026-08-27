@@ -168,7 +168,6 @@
           pkgs.git
           pkgs.gh
           pkgs.openssh
-          pkgs.rsync
           pkgs.tesseract
           pkgs.trufflehog
           stewardPython

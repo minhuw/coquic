@@ -8269,6 +8269,7 @@ class SQLiteTaskStore:
                     EventRow.kind.in_(
                         (
                             CleanupStatus.pending.value,
+                            CleanupStatus.retryable.value,
                             CleanupStatus.complete.value,
                         )
                     ),
@@ -8307,12 +8308,10 @@ class SQLiteTaskStore:
         statuses: Iterable[TaskStatus | str] | TaskStatus | str | None = None,
         status: TaskStatus | str | None = None,
     ) -> list[TaskRecord]:
-        """Return tasks whose latest cleanup obligation is still pending.
+        """Return tasks whose latest cleanup obligation is unresolved.
 
-        A completion only clears a pending event when it was recorded later
-        than that pending event.  Duplicate pending events therefore describe
-        one task obligation, while a later pending event re-opens an earlier
-        completed obligation.
+        Pending and retryable events open one obligation; a later completion
+        clears it.  A later opening therefore re-opens an earlier completion.
         """
 
         if status is not None:
@@ -8322,7 +8321,7 @@ class SQLiteTaskStore:
         normalized_statuses = _normalize_task_statuses(statuses)
         if normalized_statuses == ():
             return []
-        statement = _task_query().where(_cleanup_pending_predicate())
+        statement = _task_query().where(_cleanup_obligation_predicate())
         if normalized_statuses is not None:
             statement = statement.where(TaskRow.status.in_(normalized_statuses))
         statement = statement.order_by(TaskRow.created_at, TaskRow.id)
@@ -8340,7 +8339,7 @@ class SQLiteTaskStore:
     def cleanup_pending_task_ids(self, *, limit: int | None = None) -> list[str]:
         statement = (
             select(TaskRow.id)
-            .where(_cleanup_pending_predicate())
+            .where(_cleanup_obligation_predicate())
             .order_by(TaskRow.created_at, TaskRow.id)
         )
         if limit is not None:
@@ -8356,7 +8355,7 @@ class SQLiteTaskStore:
                 session.scalar(
                     select(func.count())
                     .select_from(TaskRow)
-                    .where(_cleanup_pending_predicate())
+                    .where(_cleanup_obligation_predicate())
                 )
                 or 0
             )
@@ -8366,7 +8365,7 @@ class SQLiteTaskStore:
             return (
                 session.scalar(
                     select(TaskRow.id)
-                    .where(TaskRow.id == task_id, _cleanup_pending_predicate())
+                    .where(TaskRow.id == task_id, _cleanup_obligation_predicate())
                     .limit(1)
                 )
                 is not None
@@ -8744,28 +8743,33 @@ def _normalize_task_statuses(
     return tuple(normalized)
 
 
-def _cleanup_pending_predicate():
+def _cleanup_obligation_predicate():
     """Correlate each task with its latest unresolved cleanup event."""
 
-    pending = aliased(EventRow)
+    opening = aliased(EventRow)
     complete = aliased(EventRow)
     later_completion = (
         select(1)
         .select_from(complete)
         .where(
-            complete.task_id == pending.task_id,
-            complete.kind == "cleanup_complete",
-            complete.id > pending.id,
+            complete.task_id == opening.task_id,
+            complete.kind == CleanupStatus.complete.value,
+            complete.id > opening.id,
         )
-        .correlate(pending)
+        .correlate(opening)
         .exists()
     )
     return (
         select(1)
-        .select_from(pending)
+        .select_from(opening)
         .where(
-            pending.task_id == TaskRow.id,
-            pending.kind == "cleanup_pending",
+            opening.task_id == TaskRow.id,
+            opening.kind.in_(
+                (
+                    CleanupStatus.pending.value,
+                    CleanupStatus.retryable.value,
+                )
+            ),
             ~later_completion,
         )
         .correlate(TaskRow)

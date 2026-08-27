@@ -331,15 +331,22 @@ def test_cleanup_aggregate_counts_latest_pending_obligation(tmp_path: Path) -> N
         )[0]
 
     pending = task("pending")
+    retryable = task("retryable")
     complete = task("complete")
+    retryable_complete = task("retryable complete")
     duplicate = task("duplicate")
     zero = task("zero")
     store.add_event(pending.id, "cleanup_pending", "pending")
+    store.add_event(retryable.id, "cleanup_retryable", "retryable")
     store.add_event(complete.id, "cleanup_pending", "pending")
     store.add_event(complete.id, "cleanup_complete", "complete")
+    store.add_event(retryable_complete.id, "cleanup_retryable", "retryable")
+    store.add_event(retryable_complete.id, "cleanup_complete", "complete")
     store.add_event(duplicate.id, "cleanup_pending", "pending")
     store.add_event(duplicate.id, "cleanup_pending", "duplicate")
 
-    assert store.cleanup_pending_count() == 2
+    assert store.cleanup_pending_count() == 3
+    assert store.has_cleanup_pending(retryable.id)
     assert not store.has_cleanup_pending(complete.id)
+    assert not store.has_cleanup_pending(retryable_complete.id)
     assert not store.has_cleanup_pending(zero.id)

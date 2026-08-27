@@ -4793,11 +4793,18 @@ def test_publication_recovery_enqueues_oldest_run_after_detached_pages(
     assert queued == [(oldest.id, run.id)]
 
 
-def test_cleanup_retry_uses_complete_pending_predicate(config, monkeypatch):
+@pytest.mark.parametrize("opening_kind", ["cleanup_pending", "cleanup_retryable"])
+def test_cleanup_retry_uses_complete_obligation_predicate(
+    config, monkeypatch, opening_kind
+):
     store = TaskStore.create(config.db_path)
     oldest, _ = _task(store, "oldest cleanup")
     store.finish_task(oldest.id, TaskStatus.failed, "terminal")
-    store.add_event(oldest.id, "cleanup_pending", "retry")
+    store.add_event(oldest.id, opening_kind, "retry")
+    completed, _ = _task(store, "completed cleanup")
+    store.finish_task(completed.id, TaskStatus.failed, "terminal")
+    store.add_event(completed.id, opening_kind, "completed retry")
+    store.add_event(completed.id, "cleanup_complete", "complete")
     for index in range(4):
         newer, _ = _task(store, f"newer cleanup {index}")
         store.finish_task(newer.id, TaskStatus.failed, "terminal")
@@ -4829,6 +4836,32 @@ def test_cleanup_retry_uses_complete_pending_predicate(config, monkeypatch):
     daemon._retry_cleanup_pending_tasks()
 
     assert finalized == [oldest.id]
+
+
+def test_reconcile_retries_retryable_terminal_cleanup(config):
+    store = TaskStore.create(config.db_path)
+    task, _ = _task(store, "retryable cleanup")
+    task = store.finish_task(task.id, TaskStatus.failed, "terminal")
+    store.add_event(
+        task.id,
+        "cleanup_retryable",
+        "container stop incomplete",
+        {"step": "container-stop", "error": "TimeoutError"},
+    )
+    daemon = StewardDaemon(config, store, session_supervisor=None)
+    finalized: list[str] = []
+
+    def finalize(task_id):
+        finalized.append(task_id)
+        return True
+
+    daemon.finalize_terminal_task = finalize
+
+    outcome = daemon._reconcile_task(task)
+
+    assert finalized == [task.id]
+    assert outcome.disposition == "cleaned"
+    assert outcome.detail == "pending terminal cleanup converged"
 
 
 def test_shutdown_interrupts_oldest_running_run_from_direct_query(

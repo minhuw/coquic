@@ -1419,3 +1419,35 @@ def test_health_is_not_quiescent_with_pending_archive_outbox(
     assert result.exit_code == 0
     assert payload["archivePending"] is True
     assert payload["quiescent"] is False
+
+
+def test_health_uses_canonical_retryable_cleanup_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = StewardConfig(repo_root=tmp_path, local_codex_test_harness=True)
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="retryable cleanup",
+            prompt="prompt",
+        )
+    )
+    store.add_event(task.id, "cleanup_retryable", "container stop incomplete")
+
+    def fail_scan(*_args: object, **_kwargs: object):
+        pytest.fail("health scanned task or event history")
+
+    monkeypatch.setattr(store, "list_tasks", fail_scan)
+    monkeypatch.setattr(store, "events", fail_scan)
+    monkeypatch.setattr(cli_module, "TaskStore", SimpleNamespace(open=lambda _path: store))
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: config)
+
+    result = CliRunner().invoke(cli_module.app, ["health"])
+    payload = json.loads(result.stdout)
+
+    assert result.exit_code == 0
+    assert payload["cleanupPending"] == 1
+    assert payload["quiescent"] is False

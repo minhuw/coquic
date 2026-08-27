@@ -900,12 +900,7 @@ def health() -> None:
         # that resolves or tightens task execution-mode admission latches.
         store = TaskStore.open(config.db_path)
         active_tasks = int(store.active_count())
-        for task in store.list_tasks(limit=10_000):
-            events = store.events(task.id, limit=200)
-            if any(event.kind == "cleanup_pending" for event in events) and not any(
-                event.kind == "cleanup_complete" for event in events
-            ):
-                cleanup_pending += 1
+        cleanup_pending = int(store.cleanup_pending_count())
         publication_health = publication_health_view(store)
         ledger = store.control_loop_ledger
         planner_active = bool(ledger.list_planner_runs(include_terminal=False))

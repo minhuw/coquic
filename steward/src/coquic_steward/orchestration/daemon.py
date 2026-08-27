@@ -1936,7 +1936,10 @@ class StewardDaemon:
                 ReconciliationDisposition.unchanged,
                 "terminal cleanup already complete",
             )
-        if terminal and cleanup_state is CleanupStatus.pending:
+        if terminal and cleanup_state in {
+            CleanupStatus.pending,
+            CleanupStatus.retryable,
+        }:
             if self.finalize_terminal_task(task.id):
                 return ReconciliationOutcome(
                     task.id,

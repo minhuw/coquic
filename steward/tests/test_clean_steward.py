@@ -3864,6 +3864,130 @@ def test_github_actions_signal_ignores_latest_non_failure(
 
     assert collection.items == []
 
+@pytest.mark.parametrize(
+    ("provider", "item", "response", "expected"),
+    [
+        (
+            "github-actions:ci",
+            SignalItem(
+                id="stored-ci",
+                provider="github-actions:ci",
+                kind="github-actions.ci-failure",
+                fingerprint="stored-ci-fingerprint",
+                title="old CI title",
+                payload={"run_id": "100", "run_attempt": 1},
+            ),
+            [
+                {
+                    "databaseId": 100,
+                    "workflowName": "Per-Commit CI",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "attempt": 1,
+                }
+            ],
+            ("title", "Per-Commit CI workflow failed"),
+        ),
+        (
+            "github-issues:features",
+            SignalItem(
+                id="stored-feature",
+                provider="github-issues:features",
+                kind="github-issues.feature-request",
+                fingerprint="stored-feature-fingerprint",
+                title="old feature title",
+                links=[
+                    {
+                        "label": "Open GitHub issue",
+                        "url": "https://github.com/minhuw/coquic/issues/42",
+                    }
+                ],
+                payload={
+                    "issue_number": 42,
+                    "issue_url": "https://github.com/minhuw/coquic/issues/42",
+                },
+            ),
+            {
+                "number": 42,
+                "title": "Current feature title",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+                "body": "Current feature body",
+                "labels": [{"name": "steward:feature"}],
+                "state": "OPEN",
+            },
+            ("title", "Implement #42: Current feature title"),
+        ),
+        (
+            "code-scanning",
+            SignalItem(
+                id="stored-codeql",
+                provider="code-scanning",
+                kind="code-scanning.alert",
+                fingerprint="stored-codeql-fingerprint",
+                title="old CodeQL title",
+                links=[
+                    {
+                        "label": "Open alert",
+                        "url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+                    }
+                ],
+                payload={"alert_number": 42},
+            ),
+            {
+                "number": 42,
+                "html_url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+                "url": "https://api.github.com/repos/minhuw/coquic/code-scanning/alerts/42",
+                "state": "open",
+                "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
+                "most_recent_instance": {
+                    "location": {"path": "src/main.cpp", "region": {"start_line": 12}}
+                },
+            },
+            ("payload", {"rule_id": "cpp/use-after-free"}),
+        ),
+    ],
+)
+def test_strict_revalidation_hydrates_each_provider_once(
+    config: StewardConfig,
+    monkeypatch,
+    provider: str,
+    item: SignalItem,
+    response: object,
+    expected: tuple[str, object],
+) -> None:
+    from coquic_steward.signals.collector import revalidate_signal_items_with_context
+
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        calls.append(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(response),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    result = revalidate_signal_items_with_context(config, [item], strict=True)
+
+    assert len(calls) == 1
+    assert result.stale_reasons == {}
+    current = result.refreshed[item.id]
+    assert current.id == item.id
+    assert current.fingerprint == item.fingerprint
+    if expected[0] == "title":
+        assert current.title == expected[1]
+    else:
+        assert current.payload["rule_id"] == expected[1]["rule_id"]
+    assert result.actionable == [current]
+    assert current.provider == provider
+
+
 def test_revalidate_signal_items_filters_stale_sources(
     config: StewardConfig, monkeypatch
 ) -> None:

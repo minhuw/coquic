@@ -4459,6 +4459,25 @@ def test_daemon_construction_does_not_run_startup_effects(config, monkeypatch):
     assert store.get_daemon_state() is None
 
 
+def test_startup_execution_mode_is_resolved_once_per_construction(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    calls: list[bool] = []
+    original = store.set_startup_execution_mode
+
+    def record(dry_run: bool) -> None:
+        calls.append(dry_run)
+        original(dry_run)
+
+    monkeypatch.setattr(store, "set_startup_execution_mode", record)
+
+    StewardExecutor(config, store, runner=SimpleNamespace())
+    assert calls == [config.dry_run]
+
+    calls.clear()
+    StewardDaemon(config, store)
+    assert calls == [config.dry_run]
+
+
 def test_startup_orders_validation_recovery_reconciliation_claim_and_running(
     config, monkeypatch
 ):

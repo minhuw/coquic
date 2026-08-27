@@ -410,10 +410,6 @@ class StewardDaemon:
             raise TypeError("planner_session must be a FreshPlannerSession")
         self.config = config
         self.store = store
-        # The daemon is the startup authority.  Low-level Store callers may
-        # still use the legacy live default, but a configured global policy is
-        # attached before any task is reconciled or dispatched.
-        self.store.set_startup_execution_mode(self.config.dry_run)
         self.logger = logger
         self._lifecycle_lock = threading.RLock()
         self._shutdown_event = threading.Event()

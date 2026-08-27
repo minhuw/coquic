@@ -333,6 +333,18 @@ _STORE_RECEIPT_SUFFIX = ".json"
 _STORE_RECEIPT_STATES = frozenset({"creating", "committed"})
 _DAEMON_PUBLICATION_MODE_KEY = "publication_execution_mode"
 _DAEMON_PUBLICATION_CLAIM_KEY = "publication_claim_id"
+_DAEMON_PUBLICATION_AUTHORITY_KEYS = frozenset(
+    {
+        _DAEMON_PUBLICATION_MODE_KEY,
+        "execution_mode",
+        _DAEMON_PUBLICATION_CLAIM_KEY,
+        "claim_id",
+        "publication_mode",
+        "aggregate_publication_mode",
+        "daemon_publication_mode",
+        "aggregate_publication_authority",
+    }
+)
 _DAEMON_PUBLICATION_ACTIONS = frozenset(
     {
         EffectActionKind.publication_overhead,
@@ -2577,16 +2589,7 @@ class SQLiteTaskStore:
         payload.pop("private_home_path", None)
         # These fields are Store-owned.  In particular, caller metadata must
         # never select the mode or reuse a predecessor's claim generation.
-        for key in (
-            _DAEMON_PUBLICATION_MODE_KEY,
-            "execution_mode",
-            _DAEMON_PUBLICATION_CLAIM_KEY,
-            "claim_id",
-            "publication_mode",
-            "aggregate_publication_mode",
-            "daemon_publication_mode",
-            "aggregate_publication_authority",
-        ):
+        for key in _DAEMON_PUBLICATION_AUTHORITY_KEYS:
             payload.pop(key, None)
         with _daemon_admission_guard(self.path).locked():
             with Session(self.engine) as session:
@@ -2660,14 +2663,8 @@ class SQLiteTaskStore:
                     updates.pop("instance_id", None)
                     updates.pop("lifecycle", None)
                     updates.pop("updated_at", None)
-                    updates.pop(_DAEMON_PUBLICATION_MODE_KEY, None)
-                    updates.pop("execution_mode", None)
-                    updates.pop(_DAEMON_PUBLICATION_CLAIM_KEY, None)
-                    updates.pop("claim_id", None)
-                    updates.pop("publication_mode", None)
-                    updates.pop("aggregate_publication_mode", None)
-                    updates.pop("daemon_publication_mode", None)
-                    updates.pop("aggregate_publication_authority", None)
+                    for key in _DAEMON_PUBLICATION_AUTHORITY_KEYS:
+                        updates.pop(key, None)
                     payload.update(updates)
                     now = utc_now().isoformat()
                     if row is None:
@@ -2712,19 +2709,9 @@ class SQLiteTaskStore:
         if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
             raise TypeError("daemon revocation deadline must be monotonic time")
         updates = dict(state or {})
-        for key in (
-            "instance_id",
-            "lifecycle",
-            "updated_at",
-            _DAEMON_PUBLICATION_MODE_KEY,
-            "execution_mode",
-            _DAEMON_PUBLICATION_CLAIM_KEY,
-            "claim_id",
-            "publication_mode",
-            "aggregate_publication_mode",
-            "daemon_publication_mode",
-            "aggregate_publication_authority",
-        ):
+        for key in ("instance_id", "lifecycle", "updated_at"):
+            updates.pop(key, None)
+        for key in _DAEMON_PUBLICATION_AUTHORITY_KEYS:
             updates.pop(key, None)
 
         remaining = float(deadline) - time.monotonic()

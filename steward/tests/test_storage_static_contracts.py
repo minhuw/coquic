@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 
 import coquic_steward.storage.schema as schema_module
-from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import ExecutionMode, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     OutboxValidationError,
@@ -179,3 +180,121 @@ def test_publication_count_contract_rejects_non_integer_mapping_values(
 ) -> None:
     with pytest.raises(OutboxValidationError):
         _enqueue_counts(tmp_path, {"rows": value})
+
+
+_DAEMON_AUTHORITY_KEYS = (
+    "publication_execution_mode",
+    "execution_mode",
+    "publication_claim_id",
+    "claim_id",
+    "publication_mode",
+    "aggregate_publication_mode",
+    "daemon_publication_mode",
+    "aggregate_publication_authority",
+)
+
+
+@pytest.mark.parametrize("key", _DAEMON_AUTHORITY_KEYS)
+def test_daemon_claim_filters_store_owned_state(
+    tmp_path: Path, key: str
+) -> None:
+    store = TaskStore.create(tmp_path / "daemon-claim.sqlite", dry_run=False)
+    try:
+        state = store.claim_daemon_instance(
+            "daemon-one",
+            lifecycle="running",
+            state={
+                key: "caller-selected",
+                "ordinary": "kept",
+                "provider_session_id": "private-provider",
+                "private_home_path": "private/home",
+            },
+        )
+
+        assert state["publication_execution_mode"] == ExecutionMode.live.value
+        assert state["publication_claim_id"] != "caller-selected"
+        assert state["ordinary"] == "kept"
+        assert "provider_session_id" not in state
+        assert "private_home_path" not in state
+        assert all(
+            state.get(candidate) != "caller-selected"
+            for candidate in _DAEMON_AUTHORITY_KEYS
+        )
+    finally:
+        store.engine.dispose()
+
+
+@pytest.mark.parametrize("key", _DAEMON_AUTHORITY_KEYS)
+def test_daemon_lifecycle_filters_caller_authority_state(
+    tmp_path: Path, key: str
+) -> None:
+    store = TaskStore.create(tmp_path / "daemon-lifecycle.sqlite", dry_run=False)
+    try:
+        claimed = store.claim_daemon_instance(
+            "daemon-one", lifecycle="running", state={"ordinary": "before"}
+        )
+        state = store.set_daemon_lifecycle(
+            "running",
+            instance_id="daemon-one",
+            state={
+                key: "caller-selected",
+                "ordinary": "kept",
+                "instance_id": "spoofed",
+                "lifecycle": "spoofed",
+                "updated_at": "spoofed",
+            },
+        )
+
+        assert state["instance_id"] == "daemon-one"
+        assert state["lifecycle"] == "running"
+        assert state["publication_execution_mode"] == claimed[
+            "publication_execution_mode"
+        ]
+        assert state["publication_claim_id"] == claimed["publication_claim_id"]
+        assert state["ordinary"] == "kept"
+        assert state["updated_at"] != "spoofed"
+        assert all(
+            state.get(candidate) != "caller-selected"
+            for candidate in _DAEMON_AUTHORITY_KEYS
+        )
+    finally:
+        store.engine.dispose()
+
+
+@pytest.mark.parametrize("key", _DAEMON_AUTHORITY_KEYS)
+def test_daemon_revocation_filters_authority_state_and_removes_claim(
+    tmp_path: Path, key: str
+) -> None:
+    store = TaskStore.create(tmp_path / "daemon-revocation.sqlite", dry_run=False)
+    try:
+        store.claim_daemon_instance(
+            "daemon-one", lifecycle="running", state={"ordinary": "before"}
+        )
+        result = store.revoke_daemon_publication_authority(
+            "daemon-one",
+            "stopping",
+            deadline=time.monotonic() + 1.0,
+            state={
+                key: "caller-selected",
+                "ordinary": "kept",
+                "instance_id": "spoofed",
+                "lifecycle": "spoofed",
+                "updated_at": "spoofed",
+            },
+        )
+        state = store.get_daemon_state()
+
+        assert result.revoked
+        assert state is not None
+        assert state["instance_id"] == "daemon-one"
+        assert state["lifecycle"] == "stopping"
+        assert state["publication_execution_mode"] == ExecutionMode.live.value
+        assert "publication_claim_id" not in state
+        assert state["ordinary"] == "kept"
+        assert state["updated_at"] != "spoofed"
+        assert all(
+            state.get(candidate) != "caller-selected"
+            for candidate in _DAEMON_AUTHORITY_KEYS
+        )
+    finally:
+        store.engine.dispose()

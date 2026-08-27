@@ -229,6 +229,20 @@ def test_planner_allocation_drops_reserved_metadata_and_preserves_dedupe(
     assert stored_first.spec.metadata["ordinary_metadata"] == "first"
     assert EFFECT_RESULT_METADATA_KEY not in stored_first.spec.metadata
     assert LEGACY_EFFECT_RESULT_METADATA_KEY not in stored_first.spec.metadata
+    executions = store.list_executions(first.id)
+    pipelines = store.list_pipelines(first.id)
+    assert len(executions) == len(pipelines) == 1
+    execution = executions[0]
+    pipeline = pipelines[0]
+    assert pipeline.ordinal == 1
+    assert pipeline.trigger == "initial"
+    assert pipeline.parent_pipeline_id is None
+    assert execution.task_id == pipeline.task_id == first.id
+    assert pipeline.execution_id == execution.id
+    assert execution.owning_pipeline_id == pipeline.id
+    assert [(event.kind, event.data) for event in store.events(first.id)] == [
+        ("task.created", {})
+    ]
 
     store.record_effect_applied(
         first.id,
@@ -754,6 +768,32 @@ def test_live_rerun_manual_source_is_fresh_idempotent_and_archive_immutable(tmp_
     assert first.task.dry_run_of_task_id == source.id
     assert first.task.spec.source == "rerun-live"
     assert first.task.spec.metadata[EXECUTION_MODE_METADATA_KEY] == ExecutionMode.live.value
+    executions = store.list_executions(first.task.id)
+    pipelines = store.list_pipelines(first.task.id)
+    assert len(executions) == len(pipelines) == 1
+    execution = executions[0]
+    pipeline = pipelines[0]
+    assert pipeline.ordinal == 1
+    assert pipeline.trigger == "initial"
+    assert pipeline.parent_pipeline_id is None
+    assert execution.task_id == pipeline.task_id == first.task.id
+    assert pipeline.execution_id == execution.id
+    assert execution.owning_pipeline_id == pipeline.id
+    assert [(event.kind, event.data) for event in store.events(first.task.id)] == [
+        (
+            "task.created",
+            {"source": "rerun-live", "dry_run_of_task_id": source.id},
+        ),
+        (
+            "task.live_rerun",
+            {
+                "source_task_id": source.id,
+                "selected_signal_ids": [],
+                "stale_signal_ids": [],
+                "stale_reasons": {},
+            },
+        ),
+    ]
     assert [
         path.relative_to(archive) for path in archive.rglob("*") if path.is_file()
     ]

@@ -123,7 +123,20 @@ def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConf
             prompt="prompt",
         )
     )
-    pipeline = store.list_pipelines(task.id)[0]
+    executions = store.list_executions(task.id)
+    pipelines = store.list_pipelines(task.id)
+    assert len(executions) == len(pipelines) == 1
+    execution = executions[0]
+    pipeline = pipelines[0]
+    assert pipeline.ordinal == 1
+    assert pipeline.trigger == "initial"
+    assert pipeline.parent_pipeline_id is None
+    assert execution.task_id == pipeline.task_id == task.id
+    assert pipeline.execution_id == execution.id
+    assert execution.owning_pipeline_id == pipeline.id
+    assert [(event.kind, event.data) for event in store.events(task.id)] == [
+        ("task.created", {})
+    ]
     session = store.create_session(
         task.id,
         pipeline.id,

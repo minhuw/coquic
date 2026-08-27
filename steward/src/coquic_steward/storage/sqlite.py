@@ -2319,30 +2319,11 @@ class SQLiteTaskStore:
                         created_at=now,
                         updated_at=now,
                     )
-                    execution = TaskExecution(
-                        id=new_execution_id(),
-                        task_id=task_id,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    pipeline = TaskPipeline(
-                        id=new_pipeline_id(),
-                        task_id=task_id,
-                        execution_id=execution.id,
-                        ordinal=1,
-                        trigger="initial",
-                        started_at=now,
-                        updated_at=now,
-                    )
-                    session.add(
-                        task_to_row(
-                            record,
-                            dedupe_key=lineage_dedupe,
-                            path_codec=self.path_codec,
-                        )
-                    )
-                    session.add(
-                        event_to_row(
+                    self._add_initial_task_ledger(
+                        session,
+                        record,
+                        dedupe_key=lineage_dedupe,
+                        events=(
                             Event(
                                 task_id=task_id,
                                 kind="task.created",
@@ -2352,11 +2333,6 @@ class SQLiteTaskStore:
                                     "dry_run_of_task_id": source_task_id,
                                 },
                             ),
-                            path_codec=self.path_codec,
-                        )
-                    )
-                    session.add(
-                        event_to_row(
                             Event(
                                 task_id=task_id,
                                 kind="task.live_rerun",
@@ -2368,19 +2344,9 @@ class SQLiteTaskStore:
                                     "stale_reasons": reasons,
                                 },
                             ),
-                            path_codec=self.path_codec,
-                        )
+                        ),
+                        now=now,
                     )
-                    session.flush()
-                    execution_row = execution_to_row(
-                        execution, path_codec=self.path_codec
-                    )
-                    pipeline_row = pipeline_to_row(pipeline)
-                    session.add(execution_row)
-                    session.flush()
-                    session.add(pipeline_row)
-                    session.flush()
-                    execution_row.owning_pipeline_id = pipeline.id
                     now_text = now.isoformat()
                     for row in signal_rows:
                         row.planned_task_id = task_id
@@ -2432,6 +2398,49 @@ class SQLiteTaskStore:
     create_live_rerun_task = allocate_live_rerun
     enqueue_live_rerun = allocate_live_rerun
 
+    def _add_initial_task_ledger(
+        self,
+        session: Session,
+        record: TaskRecord,
+        *,
+        dedupe_key: str | None,
+        events: Iterable[Event],
+        now: datetime,
+    ) -> None:
+        session.add(
+            task_to_row(
+                record,
+                dedupe_key=dedupe_key,
+                path_codec=self.path_codec,
+            )
+        )
+        for item in events:
+            session.add(event_to_row(item, path_codec=self.path_codec))
+        session.flush()
+
+        execution = TaskExecution(
+            id=new_execution_id(),
+            task_id=record.id,
+            created_at=now,
+            updated_at=now,
+        )
+        execution_row = execution_to_row(execution, path_codec=self.path_codec)
+        session.add(execution_row)
+        session.flush()
+
+        pipeline = TaskPipeline(
+            id=new_pipeline_id(),
+            task_id=record.id,
+            execution_id=execution.id,
+            ordinal=1,
+            trigger="initial",
+            started_at=now,
+            updated_at=now,
+        )
+        session.add(pipeline_to_row(pipeline))
+        session.flush()
+        execution_row.owning_pipeline_id = pipeline.id
+
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
     ) -> tuple[TaskRecord, bool]:
@@ -2447,39 +2456,22 @@ class SQLiteTaskStore:
             metadata["dedupe_key"] = dedupe_key
         spec = spec.model_copy(update={"metadata": metadata}, deep=True)
         record = TaskRecord(spec=spec)
-        row = task_to_row(record, dedupe_key=dedupe_key, path_codec=self.path_codec)
-        event_row = event_to_row(
-            Event(task_id=record.id, kind="task.created", message=record.spec.title),
-            path_codec=self.path_codec,
-        )
         now = utc_now()
-        execution = TaskExecution(
-            id=new_execution_id(),
-            task_id=record.id,
-            created_at=now,
-            updated_at=now,
-        )
-        pipeline = TaskPipeline(
-            id=new_pipeline_id(),
-            task_id=record.id,
-            execution_id=execution.id,
-            ordinal=1,
-            trigger="initial",
-            started_at=now,
-            updated_at=now,
-        )
-        execution_row = execution_to_row(execution, path_codec=self.path_codec)
-        pipeline_row = pipeline_to_row(pipeline)
         try:
             with Session(self.engine) as session, session.begin():
-                session.add(row)
-                session.add(event_row)
-                session.flush()
-                session.add(execution_row)
-                session.flush()
-                session.add(pipeline_row)
-                session.flush()
-                execution_row.owning_pipeline_id = pipeline.id
+                self._add_initial_task_ledger(
+                    session,
+                    record,
+                    dedupe_key=dedupe_key,
+                    events=(
+                        Event(
+                            task_id=record.id,
+                            kind="task.created",
+                            message=record.spec.title,
+                        ),
+                    ),
+                    now=now,
+                )
         except IntegrityError:
             if dedupe_key is None:
                 raise
@@ -4665,39 +4657,19 @@ class SQLiteTaskStore:
                     stored_spec = spec.model_copy(update={"metadata": metadata}, deep=True)
                     record = TaskRecord(spec=stored_spec)
                     now = utc_now()
-                    execution = TaskExecution(
-                        id=new_execution_id(),
-                        task_id=record.id,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    pipeline = TaskPipeline(
-                        id=new_pipeline_id(),
-                        task_id=record.id,
-                        execution_id=execution.id,
-                        ordinal=1,
-                        trigger="initial",
-                        started_at=now,
-                        updated_at=now,
-                    )
-                    execution_row = execution_to_row(execution, path_codec=self.path_codec)
-                    session.add(task_to_row(record, dedupe_key=dedupe_key, path_codec=self.path_codec))
-                    session.add(
-                        event_to_row(
+                    self._add_initial_task_ledger(
+                        session,
+                        record,
+                        dedupe_key=dedupe_key,
+                        events=(
                             Event(
                                 task_id=record.id,
                                 kind="task.created",
                                 message=record.spec.title,
                             ),
-                            path_codec=self.path_codec,
-                        )
+                        ),
+                        now=now,
                     )
-                    session.flush()
-                    session.add(execution_row)
-                    session.flush()
-                    session.add(pipeline_to_row(pipeline))
-                    session.flush()
-                    execution_row.owning_pipeline_id = pipeline.id
                     created_records.append(record)
                     selected_records.append((record, True))
                     task_ids_by_dedupe[dedupe_key] = record.id

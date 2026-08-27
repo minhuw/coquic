@@ -301,9 +301,6 @@ class _HttpxD1HandoffStream:
         self._active_operations = 0
         self._operations_complete = threading.Event()
         self._operations_complete.set()
-        self._active_writes = 0
-        self._writes_complete = threading.Event()
-        self._writes_complete.set()
 
     def _raise_if_cancelled(self) -> None:
         with self._adapter._lock:
@@ -335,22 +332,16 @@ class _HttpxD1HandoffStream:
                     # established socket shutdown path instead of racing the
                     # handoff fence.
                     self._write_started = True
-                    self._active_writes += 1
-                    self._writes_complete.clear()
         if cancelled:
             self._raise_if_cancelled()
 
-    def _end_operation(self, *, writes: bool = False) -> None:
+    def _end_operation(self) -> None:
         with self._adapter._lock:
             self._active_operations = max(0, self._active_operations - 1)
             if self._active_operations == 0:
                 self._operations_complete.set()
                 if self._closed:
                     self._adapter._handoff_streams.pop(id(self), None)
-            if writes:
-                self._active_writes = max(0, self._active_writes - 1)
-                if self._active_writes == 0:
-                    self._writes_complete.set()
 
     def _wait_for_operations(self, deadline: float | None = None) -> bool:
         if deadline is None:
@@ -362,9 +353,6 @@ class _HttpxD1HandoffStream:
         if remaining <= 0:
             return False
         return self._operations_complete.wait(timeout=remaining)
-
-    def _wait_for_writes(self) -> None:
-        self._writes_complete.wait()
 
     def close(self) -> None:
         with self._adapter._lock:
@@ -405,7 +393,7 @@ class _HttpxD1HandoffStream:
             self._stream.write(buffer, timeout=timeout)
             self._raise_if_cancelled()
         finally:
-            self._end_operation(writes=True)
+            self._end_operation()
 
     def start_tls(self, *args: object, **kwargs: object) -> object:
         self._begin_operation()

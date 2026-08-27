@@ -451,14 +451,6 @@ class _TrustedProcess(subprocess.Popen[str]):
         )
 
 
-def _timeout_text(value: str | bytes | None) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return ""
-
-
 def _failure_message(result: CommandResult) -> str:
     return (
         f"command failed with {result.returncode}: {' '.join(result.args)}\n"

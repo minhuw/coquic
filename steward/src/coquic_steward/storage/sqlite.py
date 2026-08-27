@@ -7863,10 +7863,26 @@ class SQLiteTaskStore:
     def record_iteration_patch(
         self, task_id: str, iteration: int, patch_path: Path
     ) -> None:
-        item = self.get_iteration(task_id, iteration)
-        item.patch_path = patch_path
-        item.updated_at = utc_now()
-        self._upsert_iteration(item)
+        with Session(self.engine) as session, session.begin():
+            task = session.get(TaskRow, task_id)
+            if task is None:
+                raise KeyError(task_id)
+            self._require_execution_owner(session, task_id)
+            row = session.scalar(
+                select(TaskIterationRow).where(
+                    TaskIterationRow.task_id == task_id,
+                    TaskIterationRow.iteration == iteration,
+                )
+            )
+            if row is None:
+                raise KeyError(f"{task_id}:{iteration}")
+            now = utc_now().isoformat()
+            encoded_path = self.path_codec.dump(patch_path)
+            row.patch_path = encoded_path
+            row.updated_at = now
+            task.patch_path = encoded_path
+            task.updated_at = now
+        self._notify_change()
 
     def start_iteration_review(
         self,

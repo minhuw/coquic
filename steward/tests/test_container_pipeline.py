@@ -96,14 +96,18 @@ def _passing_gates(
     on_gate_result=None,
     command_runner=None,
 ):
+    command = ["fake-gate"]
+    if on_gate_start is not None:
+        on_gate_start(0, "pipeline.txt", command)
     output = config.logs_dir / task_id / "pipeline.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("ok\n", encoding="utf-8")
-    return [
-        ValidationResult(
-            command=["fake-gate"], cwd=cwd, passed=True, exit_code=0, output_path=output
-        )
-    ]
+    validation = ValidationResult(
+        command=command, cwd=cwd, passed=True, exit_code=0, output_path=output
+    )
+    if on_gate_result is not None:
+        on_gate_result(0, validation)
+    return [validation]
 
 
 def test_advance_once_is_idempotent_and_stops_at_ready_to_seal(config, monkeypatch) -> None:

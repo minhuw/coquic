@@ -104,11 +104,15 @@ def passing_durable_gates(
     on_gate_result=None,
     command_runner=None,
 ):
+    command = ["fake-gate"]
+    if on_gate_start is not None:
+        on_gate_start(0, "gate.txt", command)
     output = config.logs_dir / task_id / (label or "durable") / "gate.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("ok\n", encoding="utf-8")
-    return [
-        ValidationResult(
-            command=["fake-gate"], cwd=cwd, passed=True, exit_code=0, output_path=output
-        )
-    ]
+    validation = ValidationResult(
+        command=command, cwd=cwd, passed=True, exit_code=0, output_path=output
+    )
+    if on_gate_result is not None:
+        on_gate_result(0, validation)
+    return [validation]

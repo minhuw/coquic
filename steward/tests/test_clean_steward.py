@@ -135,6 +135,18 @@ def _advance_durable(
 ) -> list[object]:
     return [executor.advance_once(task_id) for _ in range(steps)]
 
+
+def _callback_gate_results(
+    results: list[ValidationResult], *, on_gate_start=None, on_gate_result=None
+) -> list[ValidationResult]:
+    for position, validation in enumerate(results):
+        if on_gate_start is not None:
+            on_gate_start(position, validation.output_path.name, validation.command)
+        if on_gate_result is not None:
+            on_gate_result(position, validation)
+    return results
+
+
 def _durable_push_setup(
     config: StewardConfig,
     tmp_path: Path,
@@ -5908,11 +5920,15 @@ def test_executor_blocks_frozen_path_written_by_validation(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
     executor = StewardExecutor(config, store)
@@ -5968,11 +5984,15 @@ def test_executor_marks_task_validation_running_before_gates(
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
     executor = StewardExecutor(config, store)
@@ -6041,9 +6061,128 @@ def test_executor_records_validation_results_incrementally(
             .order_by(ValidationRow.position)
             .all()
         )
-    assert [json.loads(row.command_json) for row in rows][-2:] == [["gate-0"], ["gate-1"]]
-    assert {row.iteration for row in rows} == {0}
-    assert rows[-1].position == rows[-2].position + 1
+    assert [json.loads(row.command_json) for row in rows] == [["gate-0"], ["gate-1"]]
+    assert [row.position for row in rows] == [0, 1]
+    assert [row.iteration for row in rows] == [0, 0]
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        reopened_rows = reopened.get(task.id).validations
+        assert [item.command for item in reopened_rows] == [["gate-0"], ["gate-1"]]
+        assert [item.iteration for item in reopened_rows] == [0, 0]
+    finally:
+        reopened.engine.dispose()
+
+
+def test_executor_persists_completed_gate_before_interruption(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=config.transcripts_dir / task.id / "worker" / "codex.jsonl",
+        worker_last_message_path=config.transcripts_dir / task.id / "worker" / "last-message.md",
+    )
+
+    def interrupted_gates(
+        configured,
+        task_id,
+        cwd,
+        *,
+        label=None,
+        on_gate_start=None,
+        on_gate_result=None,
+        command_runner=None,
+    ):
+        command = ["gate-0"]
+        output = configured.logs_dir / task_id / (label or "validation") / "gate-0.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("gate 0\n", encoding="utf-8")
+        if on_gate_start is not None:
+            on_gate_start(0, "gate-0.txt", command)
+        validation = ValidationResult(
+            command=command,
+            cwd=cwd,
+            passed=True,
+            exit_code=0,
+            output_path=output,
+        )
+        if on_gate_result is not None:
+            on_gate_result(0, validation)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", interrupted_gates
+    )
+    executor = StewardExecutor(config, store)
+    with pytest.raises(KeyboardInterrupt):
+        executor._run_gates_for_iteration(task.id, config.repo_root, 0)
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        saved = reopened.get(task.id)
+        assert len(saved.validations) == 1
+        assert saved.validations[0].command == ["gate-0"]
+        finished = [
+            event
+            for event in reopened.events(task.id)
+            if event.kind == "validation.command_finished"
+        ]
+        assert len(finished) == 1
+        assert finished[0].data["position"] == 0
+    finally:
+        reopened.engine.dispose()
+
+
+def test_record_iteration_patch_updates_task_and_iteration_pointers(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=config.transcripts_dir / task.id / "worker" / "codex.jsonl",
+        worker_last_message_path=config.transcripts_dir / task.id / "worker" / "last-message.md",
+    )
+    patch_path = config.patches_dir / task.id / "iteration-0.patch"
+
+    assert store.get(task.id).patch_path is None
+    store.record_iteration_patch(task.id, 0, patch_path)
+
+    saved = store.get(task.id)
+    iteration = store.get_iteration(task.id, 0)
+    assert saved.patch_path == patch_path
+    assert iteration.patch_path == patch_path
+    assert saved.updated_at == iteration.updated_at
+
+    with Session(store.engine) as session:
+        task_row = session.get(TaskRow, task.id)
+        iteration_row = session.query(TaskIterationRow).filter_by(task_id=task.id).one()
+    assert task_row is not None
+    assert task_row.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
+    assert iteration_row.patch_path == task_row.patch_path
+    assert iteration_row.updated_at == task_row.updated_at
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        assert reopened.get(task.id).patch_path == patch_path
+        assert reopened.get_iteration(task.id, 0).patch_path == patch_path
+    finally:
+        reopened.engine.dispose()
+
 
 def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
     worktree = Path("/task/worktree")
@@ -6436,7 +6575,11 @@ def test_durable_validation_blocks_frozen_path_before_commit(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
-        return [ValidationResult(command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output)]
+        return _callback_gate_results(
+            [ValidationResult(command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output)],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
     assert not drive_durable(executor, integration.id)
@@ -6457,7 +6600,11 @@ def test_durable_validation_blocks_frozen_path_before_repair_child(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("failed\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
-        return [ValidationResult(command=["fake"], cwd=cwd, passed=False, exit_code=1, output_path=output)]
+        return _callback_gate_results(
+            [ValidationResult(command=["fake"], cwd=cwd, passed=False, exit_code=1, output_path=output)],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
     assert not drive_durable(executor, integration.id)
@@ -7002,12 +7149,16 @@ def test_durable_integration_validation_failure_creates_repair_child(
         output = configured.logs_dir / task_id / "integration-failed.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("integration gate failed\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=False, exit_code=1,
-                output_path=output, summary="integration gate failed"
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake"], cwd=cwd, passed=False, exit_code=1,
+                    output_path=output, summary="integration gate failed"
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
     outcomes = _advance_durable(executor, integration.id, 3)
@@ -7117,16 +7268,20 @@ def test_executor_routes_validation_failure_to_durable_child_pipeline(
         output = configured.logs_dir / task_id / "validation-failed.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("validation failed\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake-validation"],
-                cwd=cwd,
-                passed=False,
-                exit_code=1,
-                output_path=output,
-                summary="validation failed",
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake-validation"],
+                    cwd=cwd,
+                    passed=False,
+                    exit_code=1,
+                    output_path=output,
+                    summary="validation failed",
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
     executor = StewardExecutor(config, store)
@@ -7155,12 +7310,16 @@ def test_executor_blocks_unchanged_validation_revision(
         output = configured.logs_dir / task_id / "validation-failed.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("same failure\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
-                output_path=output, summary="same failure"
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
+                    output_path=output, summary="same failure"
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
     executor = StewardExecutor(config, store)
@@ -7190,13 +7349,17 @@ def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
         if gate_runs == 1:
             (cwd / "README.md").write_text("gate repaired\n", encoding="utf-8")
         output.write_text("failed\n" if gate_runs == 1 else "ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake-format"], cwd=cwd, passed=gate_runs > 1,
-                exit_code=0 if gate_runs > 1 else 1, output_path=output,
-                summary="ok" if gate_runs > 1 else "formatted files"
-            )
-        ]
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake-format"], cwd=cwd, passed=gate_runs > 1,
+                    exit_code=0 if gate_runs > 1 else 1, output_path=output,
+                    summary="ok" if gate_runs > 1 else "formatted files"
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
     executor = StewardExecutor(config, store)
@@ -7214,15 +7377,21 @@ def test_executor_blocks_repeated_patch_and_validation_failure(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
+    def repeated_failure_gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "failure.txt"
+        return _callback_gate_results(
+            [
+                ValidationResult(
+                    command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
+                    output_path=output, summary="same failure"
+                )
+            ],
+            on_gate_start=_kwargs.get("on_gate_start"),
+            on_gate_result=_kwargs.get("on_gate_result"),
+        )
+
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates",
-        lambda configured, task_id, cwd, **_kwargs: [
-            ValidationResult(
-                command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
-                output_path=(configured.logs_dir / task_id / "failure.txt"),
-                summary="same failure"
-            )
-        ],
+        "coquic_steward.execution.executor.run_gates", repeated_failure_gates
     )
     output = config.logs_dir / task.id / "failure.txt"
     output.parent.mkdir(parents=True, exist_ok=True)

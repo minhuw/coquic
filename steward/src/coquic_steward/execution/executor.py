@@ -1099,9 +1099,6 @@ class StewardExecutor:
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": [self._validation_evidence(item) for item in validations]})
         self._archive_bytes(task, pipeline, f"patches/iteration-{iteration}.patch", patch_path.read_bytes())
-        task.patch_path = patch_path
-        task.validations.extend(validations)
-        self.store.save(task)
         pipeline = self.store.update_pipeline_identity(
             pipeline.id,
             base_identity=base,

@@ -351,7 +351,6 @@ class StewardExecutor:
             else runner or CodexRunner(config)
         )
         self.worktrees = Worktrees(config)
-        self._latest_failed_validations: dict[str, list[ValidationResult]] = {}
 
     # ------------------------------------------------------------------
     # Durable pipeline execution
@@ -3423,18 +3422,6 @@ def _normalize_commit_subject(subject: str) -> str:
 def _safe_filename(value: object) -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value))
     return text.strip("-.")[:96] or "action"
-
-
-def _summarize_validations(validations: list[ValidationResult]) -> str:
-    failed = [validation for validation in validations if not validation.passed]
-    if not failed:
-        return "validation passed"
-    first = failed[0]
-    command = " ".join(first.command)
-    summary = first.summary.strip().splitlines()[-1:] or [""]
-    suffix = f": {summary[0]}" if summary[0] else ""
-    more = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-    return f"{command} exited {first.exit_code}{suffix}{more}"
 
 
 @contextmanager

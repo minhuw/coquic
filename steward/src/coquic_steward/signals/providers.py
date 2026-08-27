@@ -619,7 +619,7 @@ class GitHubFeatureIssuesProvider:
         if strict and not labels_valid:
             raise ProviderRevalidationError(
                 "provider_response_missing_labels"
-                if "labels" not in decoded
+                if for_reason and "labels" not in decoded
                 else "provider_response_invalid_labels"
             )
         if not for_reason and not labels_valid:

@@ -4093,6 +4093,62 @@ def test_strict_feature_hydration_validates_closed_response_identity(
     assert len(calls) == 1
 
 
+def test_strict_feature_hydration_uses_invalid_labels_for_missing_labels(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.signals.providers import ProviderRevalidationError
+
+    item = SignalItem(
+        id="stored-feature",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="stored-feature-fingerprint",
+        title="old feature title",
+        links=[
+            {
+                "label": "Open GitHub issue",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+            }
+        ],
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        calls.append(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 42,
+                    "title": "Current feature title",
+                    "url": "https://github.com/minhuw/coquic/issues/42",
+                    "body": "Current feature body",
+                    "state": "CLOSED",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    with pytest.raises(
+        ProviderRevalidationError, match="provider_response_invalid_labels"
+    ):
+        GitHubFeatureIssuesProvider().revalidated_signal_item(
+            config, item, strict=True
+        )
+
+    assert len(calls) == 1
+
+
 def test_revalidate_signal_items_filters_stale_sources(
     config: StewardConfig, monkeypatch
 ) -> None:

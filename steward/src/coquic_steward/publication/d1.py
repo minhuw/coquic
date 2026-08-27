@@ -25,10 +25,15 @@ import httpx
 
 from .envelope import (
     EnvelopeError,
+    _COST_FIELDS,
     _GLOBAL,
+    _GLOBAL_VALUE_FIELDS,
     _INVOCATION,
+    _SAFE_INTEGER_MAX,
     _SUMMARY,
+    _TOKEN_FIELDS,
     _TURN,
+    _USAGE_FIELDS,
     usage_metadata_digest,
     validate_publication_envelope,
 )
@@ -190,23 +195,9 @@ class UsageBackfillReceipt:
     blocked_reason: str | None = None
 
 
-_TOKEN_FIELDS = ("promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens")
-_COST_FIELDS = ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd")
-_USAGE_FIELDS = _TOKEN_FIELDS + _COST_FIELDS
 _TOKEN_DB_FIELDS = ("prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens")
 _COST_DB_FIELDS = ("uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd")
-_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 _GLOBAL_KEY_FIELDS = ("periodKind", "periodKey", "model", "ownershipClass")
-_GLOBAL_VALUE_FIELDS = (
-    "coverage",
-    "coveredInvocations",
-    "expectedInvocations",
-    "knownTokenSubtotal",
-    "knownCostSubtotalMicroUsd",
-    *_USAGE_FIELDS,
-    "priceProvenanceDigest",
-    "aggregateOnly",
-)
 
 
 def _invalid(code: D1ErrorCode = D1ErrorCode.invalid_request) -> None:

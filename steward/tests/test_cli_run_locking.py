@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+import coquic_steward.cli as cli_module
 from coquic_steward.cli import app, daemon as daemon_cli_command, run as run_cli_command
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.lifecycle import ShutdownResult
@@ -84,6 +85,26 @@ def _assert_lock_held(config) -> None:
     with pytest.raises(DaemonAlreadyRunning):
         with acquire_daemon_lock(config):
             pass
+
+
+def test_cli_context_preserves_explicit_runtime_authority(repo, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("STEWARD_RELEASE_ID", raising=False)
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        "[steward]\nlocal_codex_test_harness = false\n\n"
+        "[steward.container]\nenabled = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STEWARD_CONFIG_PATH", str(config_path))
+    expected = load_config()
+    TaskStore.create(expected.db_path).engine.dispose()
+
+    store, config = cli_module._context()
+    store.engine.dispose()
+
+    assert config.container.enabled is False
+    assert config.local_codex_test_harness is False
 
 
 def test_daemon_lock_inode_persists_after_release(repo, monkeypatch) -> None:
@@ -468,6 +489,10 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
 def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     config = load_config()
+    (config.coquic_home / "steward.toml").write_text(
+        "[steward]\nlocal_codex_test_harness = true\n",
+        encoding="utf-8",
+    )
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
     started = []
@@ -502,6 +527,10 @@ def test_cli_rejects_removed_web_command() -> None:
 def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     config = load_config()
+    (config.coquic_home / "steward.toml").write_text(
+        "[steward]\nlocal_codex_test_harness = true\n",
+        encoding="utf-8",
+    )
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
 
@@ -517,7 +546,7 @@ def test_cli_daemon_once_reopens_exact_store_in_new_process(
     monkeypatch.chdir(repo)
     coquic_home.mkdir(parents=True, exist_ok=True)
     (coquic_home / "steward.toml").write_text(
-        "[steward]\ndry_run = true\n\n[steward.signals]\nenabled = []\n",
+        "[steward]\ndry_run = true\nlocal_codex_test_harness = true\n\n[steward.signals]\nenabled = []\n",
         encoding="utf-8",
     )
     config = load_config()
@@ -657,6 +686,7 @@ def test_cli_daemon_exits_when_push_preflight_fails(
         """
 [steward]
 dry_run = false
+local_codex_test_harness = true
 git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"

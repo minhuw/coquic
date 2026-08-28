@@ -1110,6 +1110,24 @@ def load_config(
         deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
     )
+    if os.getenv("STEWARD_RELEASE_ID"):
+        image_digests = (
+            config.daemon_image_digest,
+            config.task_image_digest,
+            config.validation_image_digest,
+        )
+        if (
+            not config.deployment.enabled
+            or not config.container.enabled
+            or config.local_codex_test_harness
+            or not all(_valid_sha256_digest(value) for value in image_digests)
+        ):
+            raise ValueError(
+                "STEWARD_RELEASE_ID requires a production runtime: "
+                "deployment.enabled=true, container.enabled=true, "
+                "local_codex_test_harness=false, and immutable SHA-256 daemon, "
+                "task, and validation image IDs"
+            )
     config.ensure_dirs()
     return config
 

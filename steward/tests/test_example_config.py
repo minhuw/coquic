@@ -18,6 +18,7 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
 
     assert config.scheduler_wait_interval_sec == 1.0
     assert config.dry_run is True
+    assert config.local_codex_test_harness is True
     assert config.control_loop_dir == config.coquic_home / "control-loop"
     assert config.tasks_dir == config.coquic_home / "tasks"
     assert config.publication.enabled is False
@@ -382,27 +383,28 @@ def test_explicit_runtime_repository_loads_config_outside_a_checkout(
     assert config.repo_root == repo.resolve()
 
 
-def test_compose_release_environment_selects_exact_runtime_pair(
-    repo: Path, tmp_path: Path, monkeypatch
+def _write_compose_config(
+    config_path: Path,
+    home: Path,
+    canonical: Path,
+    *,
+    container_enabled: bool = True,
+    deployment_enabled: bool = True,
+    local_codex_test_harness: bool = False,
 ) -> None:
-    home = tmp_path / "deployment-home"
-    canonical = home / "repository"
-    home.mkdir()
-    shutil.copytree(repo, canonical)
-    config_path = tmp_path / "deployment.toml"
     config_path.write_text(
         f"""
 [steward]
-local_codex_test_harness = true
+local_codex_test_harness = {str(local_codex_test_harness).lower()}
 
 [steward.container]
-enabled = true
+enabled = {str(container_enabled).lower()}
 repository_host_path = {str(canonical)!r}
 state_host_path = {str(home)!r}
 codex_api_key_path = "/run/secrets/codex-api"
 
 [steward.deployment]
-enabled = true
+enabled = {str(deployment_enabled).lower()}
 home = {str(home)!r}
 repository = {str(canonical)!r}
 min_free_bytes = 100
@@ -412,18 +414,77 @@ recovery_owned_docker_bytes = 500
 """,
         encoding="utf-8",
     )
-    daemon_id = "sha256:" + "a" * 64
-    task_id = "sha256:" + "b" * 64
+
+
+def _set_compose_image_environment(monkeypatch) -> None:
     monkeypatch.setenv("STEWARD_RELEASE_ID", "release-compose")
-    monkeypatch.setenv("STEWARD_DAEMON_IMAGE", daemon_id)
-    monkeypatch.setenv("STEWARD_TASK_IMAGE", task_id)
+    monkeypatch.setenv("STEWARD_DAEMON_IMAGE", "sha256:" + "a" * 64)
+    monkeypatch.setenv("STEWARD_TASK_IMAGE", "sha256:" + "b" * 64)
+    monkeypatch.setenv("STEWARD_VALIDATION_IMAGE", "sha256:" + "c" * 64)
+
+
+def test_compose_release_environment_selects_exact_runtime_pair(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "deployment-home"
+    canonical = home / "repository"
+    home.mkdir()
+    shutil.copytree(repo, canonical)
+    config_path = tmp_path / "deployment.toml"
+    _write_compose_config(config_path, home, canonical)
+    _set_compose_image_environment(monkeypatch)
 
     config = load_config(repo_root=canonical, config_path=config_path)
 
-    assert config.daemon_image == config.daemon_image_digest == daemon_id
-    assert config.task_image == config.task_image_digest == task_id
-    assert config.container.image == config.container.image_digest == task_id
+    assert config.local_codex_test_harness is False
+    assert config.daemon_image_digest == "sha256:" + "a" * 64
+    assert config.task_image_digest == "sha256:" + "b" * 64
+    assert config.validation_image_digest == "sha256:" + "c" * 64
+    assert config.container.image_digest == config.task_image_digest
     assert config.deployment.release_id == "release-compose"
+
+
+@pytest.mark.parametrize(
+    "unsafe_runtime",
+    (
+        "deployment_disabled",
+        "container_disabled",
+        "harness_enabled",
+        "daemon_image_missing",
+        "task_image_missing",
+        "validation_image_missing",
+    ),
+)
+def test_compose_release_environment_rejects_unsafe_runtime(
+    repo: Path, tmp_path: Path, monkeypatch, unsafe_runtime: str
+) -> None:
+    home = tmp_path / "deployment-home"
+    canonical = home / "repository"
+    home.mkdir()
+    shutil.copytree(repo, canonical)
+    config_path = tmp_path / "deployment.toml"
+    _write_compose_config(
+        config_path,
+        home,
+        canonical,
+        container_enabled=unsafe_runtime != "container_disabled",
+        deployment_enabled=unsafe_runtime != "deployment_disabled",
+        local_codex_test_harness=unsafe_runtime == "harness_enabled",
+    )
+    _set_compose_image_environment(monkeypatch)
+    missing_image = {
+        "daemon_image_missing": "STEWARD_DAEMON_IMAGE",
+        "task_image_missing": "STEWARD_TASK_IMAGE",
+        "validation_image_missing": "STEWARD_VALIDATION_IMAGE",
+    }.get(unsafe_runtime)
+    if missing_image is not None:
+        monkeypatch.delenv(missing_image)
+
+    with pytest.raises(
+        ValueError, match="STEWARD_RELEASE_ID requires a production runtime"
+    ):
+        load_config(repo_root=canonical, config_path=config_path)
+
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     config = load_config(repo_root=repo)

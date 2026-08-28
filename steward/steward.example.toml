@@ -6,6 +6,8 @@ codex_bin = "codex"
 # codex_model = "gpt-5.6-terra"
 # codex_reasoning_effort = "medium"
 codex_sandbox = "workspace-write"
+# Local Codex execution is test-only and must be selected explicitly.
+local_codex_test_harness = true
 daemon_image = "coquic-steward-daemon"
 # daemon_image_digest = "sha256:<64 lowercase hex characters>"
 validation_image = "coquic-steward-validation"

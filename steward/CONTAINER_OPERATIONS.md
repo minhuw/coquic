@@ -103,11 +103,53 @@ or applies an unreviewed provider change.
    private environment (the checked-in example uses
    `/srv/coquic-steward/private/runtime/steward.toml`) from
    `steward/steward.example.toml`. Compose mounts that file in the daemon at
-   `/etc/coquic-steward/steward.toml`. Set every non-secret publication value
-   explicitly; the account, database, buckets, R2 endpoint, public URL, and
-   staging root are required before enabling the section:
+   `/etc/coquic-steward/steward.toml`. The production override must include
+   the runtime boundary and every non-secret publication value:
 
    ```toml
+   [steward]
+   codex_bin = "codex"
+   codex_sandbox = "workspace-write"
+   runtime_protocol = "task-container-v1"
+   validation_runtime = "validation-container-v1"
+   local_codex_test_harness = false
+   dry_run = false
+
+   [steward.container]
+   enabled = true
+   image = "coquic-steward-task"
+   repository_host_path = "/srv/coquic-steward/repository"
+   state_host_path = "/srv/coquic-steward"
+   codex_api_key_path = "/run/secrets/codex-api-key"
+   docker_bin = "docker"
+   network = "bridge"
+
+   [steward.deployment]
+   enabled = true
+   home = "/srv/coquic-steward"
+   repository = "/srv/coquic-steward/repository"
+   docker_socket = "/var/run/docker.sock"
+   host_uid = 1000
+   host_gid = 1000
+   docker_gid = 999
+   expected_remote = "origin"
+   expected_branch = "main"
+   compose_project = "coquic-steward"
+   codex_credential_path = "/run/secrets/codex-api-key"
+   github_credential_path = "/run/secrets/github-identity"
+   # Compose supplies release_id, daemon_image_id, task_image_id, and
+   # validation_image_id from STEWARD_RELEASE_ID and the three immutable
+   # STEWARD_*_IMAGE values; do not replace them with mutable image tags.
+   stop_grace_seconds = 45
+   max_pids = 512
+   max_memory_bytes = 4294967296
+   max_log_bytes = 67108864
+   max_scratch_bytes = 8589934592
+   min_free_bytes = 1073741824
+   max_owned_docker_bytes = 4294967296
+   recovery_free_bytes = 2147483648
+   recovery_owned_docker_bytes = 3221225472
+
    [steward.publication]
    enabled = true
    account_id = "<cloudflare-account-id>"
@@ -121,6 +163,11 @@ or applies an unreviewed provider change.
    public_base_url = "https://<public-r2-host>/"
    staging_root = "/srv/coquic-steward/private/publication-staging"
    ```
+
+   The checked-in example is intentionally local-safe: it disables the
+   container and deployment sections and enables the test harness. Copying it
+   without this production override is intentionally rejected when Compose
+   supplies `STEWARD_RELEASE_ID`.
 
    Replace the example host prefix in `staging_root` when `COQUIC_HOME` is
    different, and create that real, non-symlink directory with mode `0700`

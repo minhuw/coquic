@@ -107,12 +107,6 @@ _PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 def _context(*, resolve_execution_modes: bool = True) -> tuple[TaskStore, StewardConfig]:
     config = load_config()
-    # A repository with no explicit container section is the historical local
-    # CLI fixture. Production launches opt into the strict container boundary.
-    if not config.container.enabled and not config.local_codex_test_harness:
-        config = config.__class__(
-            **{**config.__dict__, "local_codex_test_harness": True}
-        )
     if resolve_execution_modes:
         store = TaskStore.open(config.db_path, dry_run=config.dry_run)
     else:

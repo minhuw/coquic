@@ -143,13 +143,12 @@ def validate_ssh_remote(value: str) -> str:
         ):
             raise ValueError("Git remote must be a credential-free SSH URL")
         return value
-    if "::" in value:
-        raise ValueError("Git remote must be a credential-free SSH URL")
     match = _SCP_REMOTE.fullmatch(value)
     if (
         match is None
         or match.group("host").startswith("-")
         or (match.group("user") is not None and match.group("user").startswith("-"))
+        or "::" in value.replace(match.group("host"), "", 1)
         or _SCP_CREDENTIAL_FRAGMENT.search(match.group("path")) is not None
     ):
         raise ValueError("Git remote must be a credential-free SSH URL")

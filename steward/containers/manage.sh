@@ -118,8 +118,6 @@ if "://" in value:
     ):
         raise SystemExit(1)
 else:
-    if "::" in value:
-        raise SystemExit(1)
     scp = re.compile(
         r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[^\s\x00-\x1f]+)$"
     )
@@ -131,6 +129,7 @@ else:
         match is None
         or match.group("host").startswith("-")
         or (match.group("user") is not None and match.group("user").startswith("-"))
+        or "::" in value.replace(match.group("host"), "", 1)
         or credentials.search(match.group("path")) is not None
     ):
         raise SystemExit(1)

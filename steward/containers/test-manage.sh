@@ -370,6 +370,12 @@ PY
       export STEWARD_MANAGE_FAKE=1
       git -C "$home/repository" remote set-url origin "$remote"
     done
+    ipv6_remote='git@[::1]:org/repo.git'
+    git -C "$home/repository" remote set-url origin "$ipv6_remote"
+    export COQUIC_REMOTE_URL="$ipv6_remote"
+    "$manage" bootstrap >/dev/null
+    git -C "$home/repository" remote set-url origin "$remote"
+    export COQUIC_REMOTE_URL="$remote"
     git -C "$home/repository" remote set-url origin 'git@github.com:minhuw/coquic.git'
     git -C "$home/repository" config --local remote.origin.pushurl 'file:///tmp/forbidden.git'
     export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'

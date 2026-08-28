@@ -109,6 +109,7 @@ def test_git_environment_quotes_paths_and_sets_strict_ssh_options(
     (
         "git@github.com:minhuw/coquic.git",
         "git@github.com:org/repo@branch:variant.git",
+        "git@[::1]:minhuw/coquic.git",
         "ssh://git@github.com/minhuw/coquic.git",
         "ssh://github.com:2222/minhuw/coquic.git",
         "ssh://[::1]/minhuw/coquic.git",

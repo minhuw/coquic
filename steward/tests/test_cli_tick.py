@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from coquic_steward.cli import app
 from coquic_steward.core.config import load_config
+from coquic_steward.orchestration import StewardDaemon
 from coquic_steward.storage import TaskStore
 
 
@@ -55,6 +56,50 @@ def test_tick_rejects_invalid_max_dispatch(repo, monkeypatch, value: str) -> Non
     assert result.exit_code == 2
     assert "Invalid value for '--max-dispatch'" in result.output
     assert TaskStore.open(load_config().db_path).pending_wakeups() == []
+
+
+def test_cli_tick_options_restrict_reopened_daemon_cycle(repo, monkeypatch) -> None:
+    result = _invoke_tick(
+        repo,
+        monkeypatch,
+        "--no-plan",
+        "--no-dispatch",
+        "--max-dispatch",
+        "2",
+    )
+    assert result.exit_code == 0, result.output
+
+    config = load_config()
+    config = config.__class__(
+        **{**config.__dict__, "local_codex_test_harness": True}
+    )
+    store = TaskStore.open(config.db_path)
+    daemon = StewardDaemon(config, store)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        daemon,
+        "_fetch_signals",
+        lambda *_args: calls.append("fetch"),
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_plan_until_idle",
+        lambda *_args: calls.append("plan"),
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_dispatch_queued",
+        lambda *_args, **_kwargs: calls.append("dispatch"),
+    )
+
+    daemon.run_cycle()
+
+    assert calls == []
+    assert store.pending_wakeups() == []
+    assert [event.kind for event in store.events("daemon")] == [
+        "scheduler.manual_applied"
+    ]
 
 
 def test_tick_does_not_run_a_cycle_or_acquire_daemon_lock(repo, monkeypatch) -> None:

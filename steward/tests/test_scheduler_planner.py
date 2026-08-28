@@ -2053,6 +2053,156 @@ def test_daemon_fetches_selected_providers_from_force_wakeup(
     assert result.signal_fetches == 0
     assert store.pending_wakeups() == []
 
+def test_daemon_merges_manual_options_and_respects_caller_limit(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    first = store.request_wakeup(
+        "scheduler.manual", {"plan": True, "dispatch": True, "max_dispatch": 5}
+    )
+    second = store.request_wakeup(
+        "scheduler.manual", {"plan": True, "dispatch": True, "max_dispatch": 2}
+    )
+    daemon = StewardDaemon(config, store)
+    dispatch_calls: list[tuple[bool, int | None]] = []
+
+    monkeypatch.setattr(daemon, "_fetch_signals", lambda *_args: None)
+    monkeypatch.setattr(daemon, "_plan_until_idle", lambda *_args: None)
+    monkeypatch.setattr(
+        daemon,
+        "_dispatch_queued",
+        lambda _result, *, plan, max_dispatch: dispatch_calls.append(
+            (plan, max_dispatch)
+        ),
+    )
+
+    daemon.run_cycle(plan=True, dispatch=True, max_dispatch=3)
+
+    assert dispatch_calls == [(True, 2)]
+    event = next(
+        event
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+        if event.kind == "scheduler.manual_applied"
+    )
+    assert event.data == {
+        "wakeup_ids": [first.id, second.id],
+        "plan": True,
+        "dispatch": True,
+        "max_dispatch": 2,
+        "invalid_fields": [],
+    }
+
+
+def test_daemon_manual_options_cannot_widen_caller_restrictions(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    wakeup = store.request_wakeup(
+        "scheduler.manual", {"plan": True, "dispatch": True, "max_dispatch": 10}
+    )
+    daemon = StewardDaemon(config, store)
+    calls: list[str] = []
+
+    monkeypatch.setattr(daemon, "_fetch_signals", lambda *_args: calls.append("fetch"))
+    monkeypatch.setattr(daemon, "_plan_until_idle", lambda *_args: calls.append("plan"))
+    monkeypatch.setattr(
+        daemon,
+        "_dispatch_queued",
+        lambda *_args, **_kwargs: calls.append("dispatch"),
+    )
+
+    daemon.run_cycle(plan=False, dispatch=False, max_dispatch=3)
+
+    assert calls == []
+    event = next(
+        event
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+        if event.kind == "scheduler.manual_applied"
+    )
+    assert event.data == {
+        "wakeup_ids": [wakeup.id],
+        "plan": False,
+        "dispatch": False,
+        "max_dispatch": 3,
+        "invalid_fields": [],
+    }
+
+
+def test_daemon_malformed_manual_options_fail_closed(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    wakeup = store.request_wakeup(
+        "scheduler.manual",
+        {"plan": "yes", "dispatch": None, "max_dispatch": "many"},
+    )
+    daemon = StewardDaemon(config, store)
+    calls: list[str] = []
+
+    monkeypatch.setattr(daemon, "_fetch_signals", lambda *_args: calls.append("fetch"))
+    monkeypatch.setattr(daemon, "_plan_until_idle", lambda *_args: calls.append("plan"))
+    monkeypatch.setattr(
+        daemon,
+        "_dispatch_queued",
+        lambda *_args, **_kwargs: calls.append("dispatch"),
+    )
+
+    daemon.run_cycle(plan=True, dispatch=True, max_dispatch=4)
+
+    assert calls == []
+    event = next(
+        event
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+        if event.kind == "scheduler.manual_applied"
+    )
+    assert event.data == {
+        "wakeup_ids": [wakeup.id],
+        "plan": False,
+        "dispatch": False,
+        "max_dispatch": 4,
+        "invalid_fields": ["plan", "dispatch", "max_dispatch"],
+    }
+
+
+def test_daemon_plan_false_consumes_and_audits_signal_fetch_without_fetching(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    manual = store.request_wakeup(
+        "scheduler.manual", {"plan": False, "dispatch": False, "max_dispatch": None}
+    )
+    fetch = store.request_wakeup("signal.fetch", {"providers": ["codacy"]})
+    daemon = StewardDaemon(config, store)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        lambda *_args, **_kwargs: pytest.fail("signal fetch should be suppressed"),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args, **_kwargs: pytest.fail("planning should be suppressed"),
+    )
+
+    result = daemon.run_cycle(plan=True, dispatch=True, reason="wakeup")
+
+    assert result.signal_fetches == 0
+    assert result.planned == 0
+    assert result.dispatched == 0
+    assert store.pending_wakeups() == []
+    event = next(
+        event
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+        if event.kind == "scheduler.manual_applied"
+    )
+    assert event.data == {
+        "wakeup_ids": [manual.id, fetch.id],
+        "plan": False,
+        "dispatch": False,
+        "max_dispatch": None,
+        "invalid_fields": [],
+    }
+
+
 def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
 

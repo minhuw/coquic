@@ -4643,11 +4643,19 @@ class StewardDaemon:
             wakeups = self.store.pending_wakeups(limit=200)
             if wakeups:
                 self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
-            explicit_fetch_providers = _fetch_providers_from_wakeups(
-                self.config, wakeups
+            plan, dispatch, max_dispatch, manual_event = _merge_manual_cycle_options(
+                wakeups,
+                plan=plan,
+                dispatch=dispatch,
+                max_dispatch=max_dispatch,
             )
-            if explicit_fetch_providers:
-                fetch_providers = explicit_fetch_providers
+            if manual_event is not None:
+                self.store.add_event(
+                    DAEMON_EVENT_TASK_ID,
+                    "scheduler.manual_applied",
+                    "manual scheduler options applied",
+                    manual_event,
+                )
             self._log(
                 "cycle start "
                 f"reason={reason} "
@@ -4657,6 +4665,11 @@ class StewardDaemon:
                 f"max_dispatch={max_dispatch or '-'}"
             )
             if plan:
+                explicit_fetch_providers = _fetch_providers_from_wakeups(
+                    self.config, wakeups
+                )
+                if explicit_fetch_providers:
+                    fetch_providers = explicit_fetch_providers
                 requeued = self.store.requeue_failed_signal_items()
                 if requeued:
                     self.store.add_event(
@@ -5622,6 +5635,65 @@ def wait_for_scheduler_event(
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_MISSING_MANUAL_OPTION = object()
+_MAX_MANUAL_INVALID_FIELDS = 32
+
+
+def _merge_manual_cycle_options(
+    wakeups,
+    *,
+    plan: bool,
+    dispatch: bool,
+    max_dispatch: int | None,
+) -> tuple[bool, bool, int | None, dict[str, object] | None]:
+    manual_wakeups = [
+        wakeup for wakeup in wakeups if wakeup.reason == "scheduler.manual"
+    ]
+    if not manual_wakeups:
+        return plan, dispatch, max_dispatch, None
+
+    manual_limits: list[int] = []
+    invalid_fields: list[str] = []
+    for wakeup in manual_wakeups:
+        data = wakeup.data if isinstance(wakeup.data, Mapping) else {}
+        requested_plan = data.get("plan", _MISSING_MANUAL_OPTION)
+        if not isinstance(requested_plan, bool):
+            plan = False
+            invalid_fields.append("plan")
+        else:
+            plan = plan and requested_plan
+        requested_dispatch = data.get("dispatch", _MISSING_MANUAL_OPTION)
+        if not isinstance(requested_dispatch, bool):
+            dispatch = False
+            invalid_fields.append("dispatch")
+        else:
+            dispatch = dispatch and requested_dispatch
+        requested_limit = data.get("max_dispatch")
+        if requested_limit is None:
+            continue
+        if (
+            isinstance(requested_limit, bool)
+            or not isinstance(requested_limit, int)
+            or requested_limit < 1
+        ):
+            dispatch = False
+            invalid_fields.append("max_dispatch")
+        else:
+            manual_limits.append(requested_limit)
+
+    limits = [limit for limit in [max_dispatch, *manual_limits] if limit is not None]
+    effective_limit = min(limits) if limits else None
+    return plan, dispatch, effective_limit, {
+        "wakeup_ids": [wakeup.id for wakeup in wakeups],
+        "plan": plan,
+        "dispatch": dispatch,
+        "max_dispatch": effective_limit,
+        "invalid_fields": list(dict.fromkeys(invalid_fields))[
+            :_MAX_MANUAL_INVALID_FIELDS
+        ],
+    }
 
 
 def _fetch_providers_from_wakeups(config: StewardConfig, wakeups) -> list[str]:

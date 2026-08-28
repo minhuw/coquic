@@ -23,6 +23,7 @@ from coquic_steward.core.models import (
     WorkerKind,
 )
 from coquic_steward.execution import StewardExecutor
+from coquic_steward.execution.session import LocalSessionInvoker
 from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
@@ -105,6 +106,26 @@ def test_cli_context_preserves_explicit_runtime_authority(repo, monkeypatch) -> 
 
     assert config.container.enabled is False
     assert config.local_codex_test_harness is False
+
+
+def test_standalone_planner_requires_explicit_runtime_boundary(tmp_path) -> None:
+    local = StewardConfig(
+        repo_root=tmp_path,
+        local_codex_test_harness=True,
+        task_image_digest=None,
+    )
+    assert isinstance(
+        cli_module._configured_planner_session(local).invoker,
+        LocalSessionInvoker,
+    )
+
+    productionless = StewardConfig(
+        repo_root=tmp_path,
+        local_codex_test_harness=False,
+        task_image_digest=None,
+    )
+    with pytest.raises(ValueError, match="requires explicit"):
+        cli_module._configured_planner_session(productionless)
 
 
 def test_daemon_lock_inode_persists_after_release(repo, monkeypatch) -> None:

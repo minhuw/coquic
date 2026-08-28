@@ -118,11 +118,16 @@ def _context(*, resolve_execution_modes: bool = True) -> tuple[TaskStore, Stewar
 def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
     """Build the fresh one-shot boundary used by standalone planning."""
 
-    if config.task_image_digest and not config.local_codex_test_harness:
+    if config.local_codex_test_harness:
+        return FreshPlannerSession(config)
+    if config.task_image_digest:
         session = planner_session_for_config(config)
         bind_deployment_identity(session.invoker.runtime, config)
         return session
-    return FreshPlannerSession(config)
+    raise ValueError(
+        "standalone planning requires explicit local_codex_test_harness=true "
+        "or a task-container image digest"
+    )
 
 
 def _current_publication_source(

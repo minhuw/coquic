@@ -362,13 +362,23 @@ PY
     for remote_url in \
       'https://github.com/minhuw/coquic.git' \
       'ssh://git:password@github.com/minhuw/coquic.git' \
-      'git:password@github.com:minhuw/coquic.git'; do
+      'git:password@github.com:minhuw/coquic.git' \
+      'ext::/bin/sh'; do
       git -C "$home/repository" remote set-url origin "$remote_url"
       unset STEWARD_MANAGE_FAKE
       expect_bootstrap_refusal "remote $remote_url" 'credential-free SSH'
       export STEWARD_MANAGE_FAKE=1
       git -C "$home/repository" remote set-url origin "$remote"
     done
+    git -C "$home/repository" remote set-url origin 'git@github.com:minhuw/coquic.git'
+    git -C "$home/repository" config --local remote.origin.pushurl 'file:///tmp/forbidden.git'
+    export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'
+    unset STEWARD_MANAGE_FAKE
+    expect_bootstrap_refusal 'unsafe production pushurl' 'credential-free SSH'
+    export STEWARD_MANAGE_FAKE=1
+    git -C "$home/repository" config --local --unset-all remote.origin.pushurl
+    git -C "$home/repository" remote set-url origin "$remote"
+    export COQUIC_REMOTE_URL="$remote"
     second="$(cat "$home/private/deployment/current")"
     [[ "$first" == "$second" && -d "$home/repository/.git" && ! -e "$home/steward.sqlite" ]]
     cp "$home/private/deployment/operation.journal" "$tmp/journal.before"

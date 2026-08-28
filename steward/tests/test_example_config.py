@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from coquic_steward.core.config import StewardDeploymentConfig, load_config
+from coquic_steward.core.config import (
+    StewardConfig,
+    StewardDeploymentConfig,
+    load_config,
+)
 from coquic_steward.core.models import TaskKind
-from coquic_steward.orchestration.preflight import run_preflight
+from coquic_steward.orchestration import preflight as preflight_module
+from coquic_steward.orchestration.preflight import (
+    StewardPreflightError,
+    run_preflight,
+)
 
 
 def test_steward_example_config_loads_with_publication_settings(repo: Path) -> None:
@@ -57,6 +66,52 @@ def test_telemetry_rejects_unknown_keys(
 
     with pytest.raises(ValueError, match=rf"telemetry has unsupported keys: {key}"):
         load_config(repo_root=repo, config_path=config_path)
+
+
+def test_production_remote_push_rejects_pushurl_before_network(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "remote.origin.pushurl",
+            "file:///tmp/forbidden.git",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    home = tmp_path / "home"
+    deployment = StewardDeploymentConfig(
+        enabled=True,
+        home=home,
+        repository=home / "repository",
+        min_free_bytes=1,
+        max_owned_docker_bytes=2,
+        recovery_free_bytes=2,
+        recovery_owned_docker_bytes=1,
+    )
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=False,
+        deployment=deployment,
+    )
+    commands: list[list[str]] = []
+    original_run_command = preflight_module.run_command
+
+    def recording_run_command(command, cwd, **kwargs):
+        commands.append(command)
+        return original_run_command(command, cwd, **kwargs)
+
+    monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
+    with pytest.raises(StewardPreflightError, match="credential-free SSH"):
+        preflight_module.preflight_remote_push(config)
+    assert not any(command[:2] == ["git", "fetch"] for command in commands)
 
 
 def test_enabled_publication_runs_preflight_without_deployment_credentials(

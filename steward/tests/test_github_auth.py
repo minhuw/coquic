@@ -111,6 +111,7 @@ def test_git_environment_quotes_paths_and_sets_strict_ssh_options(
         "git@github.com:org/repo@branch:variant.git",
         "ssh://git@github.com/minhuw/coquic.git",
         "ssh://github.com:2222/minhuw/coquic.git",
+        "ssh://[::1]/minhuw/coquic.git",
     ),
 )
 def test_validate_ssh_remote_accepts_credential_free_transports(remote: str) -> None:
@@ -126,6 +127,7 @@ def test_validate_ssh_remote_accepts_credential_free_transports(remote: str) -> 
         "ssh://-oProxyCommand=evil@github.com/minhuw/coquic.git",
         "git:password@github.com:minhuw/coquic.git",
         "-oProxyCommand=evil@github.com:minhuw/coquic.git",
+        "ext::/bin/sh",
         "/srv/coquic.git",
     ),
 )

@@ -118,6 +118,8 @@ if "://" in value:
     ):
         raise SystemExit(1)
 else:
+    if "::" in value:
+        raise SystemExit(1)
     scp = re.compile(
         r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[^\s\x00-\x1f]+)$"
     )
@@ -573,12 +575,26 @@ validate_repository() {
   local repository_path="${1:-$repository}"
   [[ -d "$repository_path/.git" || -f "$repository_path/.git" ]] || die 'canonical repository is not a Git checkout'
   local remote branch dirty expected_url actual_url
-  local -a worktree_paths=()
+  local -a remote_urls=() push_urls=() worktree_paths=()
   remote="${STEWARD_EXPECTED_REMOTE:-origin}"
   branch="${STEWARD_EXPECTED_BRANCH:-main}"
-  actual_url="$(git -C "$repository_path" config --get "remote.$remote.url" || true)"
-  [[ -n "$actual_url" ]] || die 'expected Git remote is missing'
-  validate_ssh_remote "$actual_url"
+  mapfile -d '' -t remote_urls < <(
+    git -C "$repository_path" config --null --get-all "remote.$remote.url" || true
+  )
+  ((${#remote_urls[@]} > 0)) || die 'expected Git remote is missing'
+  for actual_url in "${remote_urls[@]}"; do
+    validate_ssh_remote "$actual_url"
+  done
+  mapfile -d '' -t push_urls < <(
+    git -C "$repository_path" config --null --get-all "remote.$remote.pushurl" || true
+  )
+  if ((${#push_urls[@]} == 0)); then
+    push_urls=("${remote_urls[@]}")
+  fi
+  for actual_url in "${push_urls[@]}"; do
+    validate_ssh_remote "$actual_url"
+  done
+  actual_url="${remote_urls[0]}"
   expected_url="${COQUIC_REMOTE_URL:-}"
   if [[ -n "$expected_url" && "$actual_url" != "$expected_url" ]]; then
     die 'canonical repository remote does not match the configured remote'

@@ -164,34 +164,7 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
         assert path is not None
         if deployment.host_uid is not None and path.lstat().st_uid != deployment.host_uid:
             raise StewardPreflightError(f"preflight failed: {label} owner is mismatched")
-    remote_names = tuple(
-        dict.fromkeys((deployment.expected_remote, config.git_remote))
-    )
-    for remote_name in remote_names:
-        remote = run_command(
-            ["git", "config", "--get", f"remote.{remote_name}.url"],
-            cwd=repository,
-        )
-        if not remote.ok or remote.stdout.strip() == "":
-            label = (
-                "expected Git remote"
-                if remote_name == deployment.expected_remote
-                else "configured Git remote"
-            )
-            raise StewardPreflightError(
-                f"preflight failed: {label} is unavailable"
-            )
-        try:
-            validate_ssh_remote(remote.stdout.strip())
-        except ValueError as exc:
-            label = (
-                "expected Git remote"
-                if remote_name == deployment.expected_remote
-                else "configured Git remote"
-            )
-            raise StewardPreflightError(
-                f"preflight failed: {label} must be credential-free SSH"
-            ) from exc
+    _validate_remote_policy(config, repository)
     branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repository)
     if not branch.ok or branch.stdout.strip() != deployment.expected_branch:
         raise StewardPreflightError("preflight failed: repository is detached or on the wrong branch")
@@ -201,6 +174,50 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
     worktree = run_command(["git", "worktree", "list", "--porcelain"], cwd=repository)
     if not worktree.ok or not worktree.stdout.startswith(f"worktree {repository}\n"):
         raise StewardPreflightError("preflight failed: repository worktree identity is ambiguous")
+
+
+def _validate_remote_policy(config: StewardConfig, repository: Path) -> None:
+    deployment = config.deployment
+    remote_names = tuple(
+        dict.fromkeys((deployment.expected_remote, config.git_remote))
+    )
+    for remote_name in remote_names:
+        fetch_urls = _git_remote_config_values(
+            repository, f"remote.{remote_name}.url"
+        )
+        label = (
+            "expected Git remote"
+            if remote_name == deployment.expected_remote
+            else "configured Git remote"
+        )
+        if not fetch_urls:
+            raise StewardPreflightError(
+                f"preflight failed: {label} is unavailable"
+            )
+        push_urls = _git_remote_config_values(
+            repository, f"remote.{remote_name}.pushurl"
+        )
+        for remote_url in (*fetch_urls, *(push_urls or fetch_urls)):
+            try:
+                validate_ssh_remote(remote_url)
+            except ValueError as exc:
+                raise StewardPreflightError(
+                    f"preflight failed: {label} must be credential-free SSH"
+                ) from exc
+
+
+def _git_remote_config_values(repository: Path, key: str) -> tuple[str, ...]:
+    result = run_command(["git", "config", "--null", "--get-all", key], cwd=repository)
+    if result.ok:
+        values = result.stdout.split("\0")
+        if values and values[-1] == "":
+            values.pop()
+        return tuple(values)
+    if result.returncode == 1 and not result.stdout:
+        return ()
+    raise StewardPreflightError(
+        "preflight failed: Git remote configuration is unavailable"
+    )
 
 
 def _check_executable(
@@ -319,6 +336,8 @@ def _validate_container_host_mapping(config: StewardConfig) -> None:
 def preflight_remote_push(config: StewardConfig) -> bool:
     if config.dry_run:
         return False
+    if config.deployment.enabled:
+        _validate_remote_policy(config, config.repo_root)
     fetch = run_command(
         ["git", "fetch", "--quiet", config.git_remote, config.main_branch],
         cwd=config.repo_root,

@@ -3,24 +3,36 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.orm import Session
+
+from coquic_steward.control_loop import ControlLoopLedger
 from coquic_steward.core.config import StewardConfig, load_config
+from coquic_steward.core.lifecycle import InvalidTaskTransition
 from coquic_steward.core.models import (
     PipelineCursorPhase,
     PipelinePhase,
+    Priority,
     TaskKind,
+    TaskRecord,
     TaskSpec,
     TaskStatus,
     WorkerKind,
     WorktreeCheckpoint,
+    new_scheduler_wakeup_id,
+    new_signal_fetch_id,
+    new_task_id,
+    utc_now,
 )
 from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.execution.worktree import Worktrees
 from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
+from coquic_steward.storage.schema import TaskIterationRow, TaskRow
 from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
 
 
@@ -1193,3 +1205,361 @@ def test_checkpoint_recovery_binds_durable_runtime_identity(
         path, replace(identity, runtime_version="runtime-wrong")
     )
     assert not worktrees.validate_checkpoint(config.worktrees_dir, identity)
+
+def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "coquic_steward.core.models.utc_now",
+        lambda: datetime(2026, 6, 23, 12, 34, 56, 789, tzinfo=timezone.utc),
+    )
+
+    ids = [
+        new_task_id(),
+        new_signal_fetch_id(),
+        new_scheduler_wakeup_id(),
+    ]
+
+    parts = [value.rsplit("-", 2) for value in ids]
+
+    assert [(prefix, timestamp) for prefix, timestamp, _ in parts] == [
+        ("task", "20260623123456"),
+        ("signal-fetch", "20260623123456"),
+        ("wakeup", "20260623123456"),
+    ]
+    assert all(len(random_suffix) == 8 for _, _, random_suffix in parts)
+
+def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    spec = TaskSpec(
+        kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"
+    )
+
+    first, created = store.add_task(spec, dedupe_key="same")
+    second, duplicate_created = store.add_task(spec, dedupe_key="same")
+
+    assert created
+    assert not duplicate_created
+    assert first.id == second.id
+    assert store.get(first.id).status == TaskStatus.queued
+
+def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
+    changes = 0
+
+    def on_change() -> None:
+        nonlocal changes
+        changes += 1
+
+    store = TaskStore.create(config.db_path, on_change=on_change)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    before = changes
+
+    store.start_worker(task.id, "worker started")
+
+    assert changes > before
+    assert store.get(task.id).status == TaskStatus.running
+
+def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.update_status(task.id, TaskStatus.running, "started")
+    make_task_stale(store, task.id)
+
+    assert store.touch_active_task(task.id)
+    assert store.get(task.id).updated_at > utc_now() - timedelta(minutes=1)
+
+    store.update_status(task.id, TaskStatus.failed, "failed")
+    make_task_stale(store, task.id)
+    assert not store.touch_active_task(task.id)
+    assert store.get(task.id).updated_at < utc_now() - timedelta(minutes=10)
+
+def test_store_rejects_invalid_task_status_transition(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    with pytest.raises(InvalidTaskTransition):
+        store.start_review(task.id, "review started")
+
+    assert store.get(task.id).status == TaskStatus.queued
+
+def test_store_allows_integration_conflict_to_return_to_worker(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.start_worker(task.id, "worker started")
+    store.start_integration(task.id, "integration queued")
+
+    store.start_worker(task.id, "addressing integration conflict revision 1")
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.running
+    assert saved.summary == "addressing integration conflict revision 1"
+
+def test_store_save_does_not_overwrite_lifecycle_state(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    stale = store.get(task.id)
+    store.start_worker(task.id, "worker started")
+    stale.summary = "stale queued object"
+    stale.worktree_path = config.worktrees_dir / "stale"
+
+    store.save(stale)
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.running
+    assert saved.summary == "worker started"
+    assert saved.worktree_path == config.worktrees_dir / "stale"
+
+def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    normal, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="normal",
+            prompt="normal",
+            priority=Priority.urgent,
+        )
+    )
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="integrate",
+            prompt="integrate",
+            priority=Priority.low,
+        )
+    )
+
+    queued = store.queued_tasks()
+
+    assert [task.id for task in queued] == [integration.id, normal.id]
+
+def test_store_dispatch_snapshot_is_bounded_and_deterministic(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+
+    def add(
+        task_id: str,
+        *,
+        worker: WorkerKind,
+        kind: TaskKind,
+        priority: Priority,
+    ) -> TaskRecord:
+        task, _ = store.add_task(
+            TaskSpec(
+                id=task_id,
+                kind=kind,
+                worker=worker,
+                title=task_id,
+                prompt=task_id,
+                priority=priority,
+            )
+        )
+        return task
+
+    integration_b = add(
+        "task-integration-b",
+        worker=WorkerKind.integration_manager,
+        kind=TaskKind.integration,
+        priority=Priority.high,
+    )
+    integration_a = add(
+        "task-integration-a",
+        worker=WorkerKind.integration_manager,
+        kind=TaskKind.integration,
+        priority=Priority.high,
+    )
+    source_b = add(
+        "task-source-b",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.urgent,
+    )
+    source_a = add(
+        "task-source-a",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.urgent,
+    )
+    active_source = add(
+        "task-active-source",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.low,
+    )
+    store.start_worker(active_source.id, "running")
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE tasks SET created_at = ? WHERE id IN (?, ?, ?, ?, ?)",
+            (
+                "2026-01-01T00:00:00+00:00",
+                integration_b.id,
+                integration_a.id,
+                source_b.id,
+                source_a.id,
+                active_source.id,
+            ),
+        )
+
+    snapshot = store.dispatch_snapshot(
+        source_limit=1,
+        integration_limit=2,
+        resumable_limit=1,
+    )
+
+    assert [task.id for task in snapshot.queued_tasks] == [
+        integration_a.id,
+        integration_b.id,
+        source_a.id,
+    ]
+    assert [task.id for task in snapshot.resumable_tasks] == [active_source.id]
+    assert snapshot.source_active_count == 1
+    assert snapshot.integration_active_count == 0
+    assert source_b.id not in {task.id for task in snapshot.queued_tasks}
+
+def test_store_marks_task_running_when_revision_iteration_begins(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
+    )
+    store.start_worker(task.id, "worker started")
+    store.start_review(task.id, "review started")
+
+    store.begin_iteration(
+        task.id,
+        1,
+        "Review revision 1",
+        worker_name="worker-revision-1",
+        worker_prompt_path=config.prompts_dir / task.id / "worker-revision-1.md",
+        worker_transcript_path=config.transcripts_dir
+        / task.id
+        / "worker-revision-1"
+        / "codex.jsonl",
+        worker_last_message_path=config.transcripts_dir
+        / task.id
+        / "worker-revision-1"
+        / "last-message.md",
+        running_summary="addressing review revision 1",
+    )
+
+    saved = store.get(task.id)
+    events = store.events(task.id)
+    assert saved.status == TaskStatus.running
+    assert saved.summary == "addressing review revision 1"
+    assert events[-1].kind == "task.status"
+    assert events[-1].message == "running"
+    assert events[-1].data["source"] == "begin_iteration"
+
+def make_task_stale(store: TaskStore, task_id: str, *, minutes: int = 30) -> None:
+    old = utc_now() - timedelta(minutes=minutes)
+    with Session(store.engine) as session, session.begin():
+        row = session.get(TaskRow, task_id)
+        assert row is not None
+        row.updated_at = old.isoformat()
+
+def test_record_iteration_patch_updates_task_and_iteration_pointers(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=config.transcripts_dir / task.id / "worker" / "codex.jsonl",
+        worker_last_message_path=config.transcripts_dir / task.id / "worker" / "last-message.md",
+    )
+    patch_path = config.patches_dir / task.id / "iteration-0.patch"
+
+    assert store.get(task.id).patch_path is None
+    store.record_iteration_patch(task.id, 0, patch_path)
+
+    saved = store.get(task.id)
+    iteration = store.get_iteration(task.id, 0)
+    assert saved.patch_path == patch_path
+    assert iteration.patch_path == patch_path
+    assert saved.updated_at == iteration.updated_at
+
+    with Session(store.engine) as session:
+        task_row = session.get(TaskRow, task.id)
+        iteration_row = session.query(TaskIterationRow).filter_by(task_id=task.id).one()
+    assert task_row is not None
+    assert task_row.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
+    assert iteration_row.patch_path == task_row.patch_path
+    assert iteration_row.updated_at == task_row.updated_at
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        assert reopened.get(task.id).patch_path == patch_path
+        assert reopened.get_iteration(task.id, 0).patch_path == patch_path
+    finally:
+        reopened.engine.dispose()
+
+def test_store_records_in_progress_iteration_review(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    last = worker.parent / "last-message.md"
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=worker,
+        worker_last_message_path=last,
+    )
+
+    store.start_iteration_review(
+        task.id,
+        0,
+        reviewer_name="reviewer-0",
+        reviewer_prompt_path=config.prompts_dir / task.id / "reviewer-0.md",
+        reviewer_transcript_path=config.transcripts_dir
+        / task.id
+        / "reviewer-0"
+        / "codex.jsonl",
+        reviewer_last_message_path=config.transcripts_dir
+        / task.id
+        / "reviewer-0"
+        / "last-message.md",
+        review_run=0,
+    )
+
+    iteration = store.get_iteration(task.id, 0)
+    assert iteration.reviewer_name == "reviewer-0"
+    assert iteration.reviewer_completed is False
+    assert (
+        iteration.reviewer_transcript_path
+        == config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
+    )
+
+def test_runtime_has_raw_archive_peers(config: StewardConfig) -> None:
+    config.ensure_dirs()
+    assert config.tasks_dir.parent == config.control_loop_dir.parent
+    assert config.control_loop_dir.name == "control-loop"
+    assert config.tasks_dir.name == "tasks"
+
+def test_store_initializes_private_control_loop_ledger(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    assert isinstance(store.control_loop_ledger, ControlLoopLedger)
+    assert store.control_loop_ledger.epoch_id == config.ensure_epoch()["epochId"]

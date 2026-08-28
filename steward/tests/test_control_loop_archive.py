@@ -578,3 +578,11 @@ def test_full_audit_requires_ledger_authority(tmp_path: Path) -> None:
 
     with pytest.raises(ArchiveValidationError):
         archive.full_audit()
+
+def test_archive_rejects_symlink_root(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    root = tmp_path / "control-loop"
+    root.symlink_to(target, target_is_directory=True)
+    with pytest.raises((ValueError, RuntimeError)):
+        ControlLoopArchive(root)

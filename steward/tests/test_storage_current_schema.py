@@ -12,9 +12,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
 import coquic_steward.storage.sqlite as sqlite_module
-from coquic_steward.core.models import TaskKind, TaskSpec, TaskWorkflow, WorkerKind
+from coquic_steward.core.models import (
+    Priority,
+    Risk,
+    TaskKind,
+    TaskSpec,
+    TaskWorkflow,
+    WorkerKind,
+    utc_now,
+)
 from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
@@ -29,6 +38,8 @@ from coquic_steward.storage import (
     StoreRecoveryResult,
     TaskStore,
 )
+from coquic_steward.core.config import StewardConfig
+from coquic_steward.storage.schema import EventRow, TaskIterationRow, TaskRow, ValidationRow
 from coquic_steward.storage.sqlite import (
     CURRENT_SCHEMA_CATALOG_DIGEST,
     SQLITE_USER_VERSION,
@@ -904,3 +915,252 @@ def test_recover_rolls_back_lease_and_health_changes_on_failure(
         assert after_health.cleanup_pending_bytes == before_health.cleanup_pending_bytes
     finally:
         reopened.engine.dispose()
+
+def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.ci,
+            worker=WorkerKind.ci_doctor,
+            title="CI",
+            prompt="fix",
+            priority=Priority.high,
+            risk=Risk.medium,
+        )
+    )
+
+    reopened = TaskStore.open(config.db_path)
+    saved = reopened.get(task.id)
+    assert saved.spec.title == "CI"
+    assert reopened.count_events("task.created") == 1
+
+def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> None:
+    from coquic_steward.core.models import ValidationResult
+
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.worktrees_dir / task.id
+    task.transcript_path = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    task.last_message_path = (
+        config.transcripts_dir / task.id / "worker" / "last-message.md"
+    )
+    task.patch_path = config.patches_dir / task.id / "iteration-0.patch"
+    task.spec.metadata = {
+        "source_patch_path": str(task.patch_path),
+        "source_worktree_path": str(task.worktree_path),
+        "note": "patches/looks-like-text",
+    }
+    validation_log = config.logs_dir / task.id / "iteration-0" / "validation.txt"
+    task.validations.append(
+        ValidationResult(
+            command=["fake"],
+            cwd=config.repo_root,
+            passed=True,
+            exit_code=0,
+            output_path=validation_log,
+        )
+    )
+    store.save(task)
+    store.add_event(
+        task.id,
+        "artifact.ready",
+        str(task.patch_path),
+        {
+            "patch_path": str(task.patch_path),
+            "failed": [{"output_path": str(validation_log)}],
+            "note": "patches/looks-like-text",
+        },
+    )
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=task.transcript_path,
+        worker_last_message_path=task.last_message_path,
+    )
+    store.record_iteration_patch(task.id, 0, task.patch_path)
+
+    with Session(store.engine) as session:
+        row = session.get(TaskRow, task.id)
+        assert row is not None
+        validation = session.query(ValidationRow).filter_by(task_id=task.id).one()
+        iteration = session.query(TaskIterationRow).filter_by(task_id=task.id).one()
+        assert row.worktree_path == f"worktrees/{task.id}"
+        assert row.transcript_path == f"steward/transcripts/{task.id}/worker/codex.jsonl"
+        assert row.last_message_path == f"steward/transcripts/{task.id}/worker/last-message.md"
+        assert row.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
+        assert json.loads(row.metadata_json) == {
+            "execution_mode": "live",
+            "note": "patches/looks-like-text",
+            "source_patch_path": f"steward/patches/{task.id}/iteration-0.patch",
+            "source_worktree_path": f"worktrees/{task.id}",
+        }
+        assert validation.output_path == f"steward/logs/{task.id}/iteration-0/validation.txt"
+        assert validation.cwd == str(config.repo_root)
+        assert iteration.worker_prompt_path == f"steward/prompts/{task.id}/worker.md"
+        assert iteration.worker_transcript_path == f"steward/transcripts/{task.id}/worker/codex.jsonl"
+        assert iteration.worker_last_message_path == f"steward/transcripts/{task.id}/worker/last-message.md"
+        assert iteration.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
+        event = session.query(EventRow).filter_by(kind="artifact.ready").one()
+        assert event.message == f"steward/patches/{task.id}/iteration-0.patch"
+        assert json.loads(event.data_json) == {
+            "failed": [{"output_path": f"steward/logs/{task.id}/iteration-0/validation.txt"}],
+            "note": "patches/looks-like-text",
+            "patch_path": f"steward/patches/{task.id}/iteration-0.patch",
+        }
+
+    reopened = TaskStore.open(config.db_path)
+    saved = reopened.get(task.id)
+    iteration = reopened.get_iteration(task.id, 0)
+    assert saved.worktree_path == config.worktrees_dir / task.id
+    assert saved.transcript_path == config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    assert saved.spec.metadata["source_patch_path"] == str(task.patch_path)
+    assert saved.spec.metadata["source_worktree_path"] == str(task.worktree_path)
+    assert saved.spec.metadata["note"] == "patches/looks-like-text"
+    assert saved.validations[0].output_path == validation_log
+    assert saved.validations[0].cwd == config.repo_root
+    event_data = next(
+        event.data for event in reopened.events(task.id) if event.kind == "artifact.ready"
+    )
+    event = next(event for event in reopened.events(task.id) if event.kind == "artifact.ready")
+    assert event.message == str(task.patch_path)
+    assert event_data["patch_path"] == str(task.patch_path)
+    assert event_data["failed"][0]["output_path"] == str(validation_log)
+    assert event_data["note"] == "patches/looks-like-text"
+    assert iteration.worker_prompt_path == config.prompts_dir / task.id / "worker.md"
+    assert iteration.patch_path == config.patches_dir / task.id / "iteration-0.patch"
+
+def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: Path) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    external = tmp_path / "external-worktree"
+    task.worktree_path = external
+
+    store.save(task)
+
+    with Session(store.engine) as session:
+        row = session.get(TaskRow, task.id)
+        assert row is not None
+        assert row.worktree_path == str(external)
+    assert TaskStore.open(config.db_path).get(task.id).worktree_path == external
+
+def test_store_ignores_historic_relative_path_root(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    historic = config.state_dir / "logs" / task.id / "historic.txt"
+    historic.parent.mkdir(parents=True, exist_ok=True)
+    historic.write_text("historic\n", encoding="utf-8")
+    relative = f"logs/{task.id}/historic.txt"
+    current = config.db_path.parent / relative
+
+    with Session(store.engine) as session, session.begin():
+        row = session.get(TaskRow, task.id)
+        assert row is not None
+        row.patch_path = relative
+        row.metadata_json = json.dumps({"source_patch_path": relative})
+
+    reopened = TaskStore.open(config.db_path)
+    saved = reopened.get(task.id)
+    assert saved.patch_path == current
+    assert saved.patch_path != historic
+    assert saved.spec.metadata["source_patch_path"] == str(current)
+
+def test_store_open_preserves_existing_absolute_state_paths(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    absolute_patch = config.patches_dir / task.id / "iteration-0.patch"
+    with Session(store.engine) as session, session.begin():
+        row = session.get(TaskRow, task.id)
+        assert row is not None
+        row.patch_path = str(absolute_patch)
+        row.metadata_json = json.dumps(
+            {
+                "source_patch_path": str(absolute_patch),
+                "source_worktree_path": str(config.worktrees_dir / task.id),
+            }
+        )
+        session.add(
+            TaskIterationRow(
+                task_id=task.id,
+                iteration=0,
+                label="Initial attempt",
+                worker_name="worker",
+                worker_prompt_path=str(config.prompts_dir / task.id / "worker.md"),
+                worker_transcript_path=str(
+                    config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+                ),
+                worker_last_message_path=str(
+                    config.transcripts_dir / task.id / "worker" / "last-message.md"
+                ),
+                patch_path=str(absolute_patch),
+                started_at=utc_now().isoformat(),
+                updated_at=utc_now().isoformat(),
+            )
+        )
+        session.add(
+            ValidationRow(
+                task_id=task.id,
+                iteration=0,
+                position=0,
+                command_json="[]",
+                cwd=str(config.worktrees_dir / task.id),
+                passed=True,
+                exit_code=0,
+                output_path=str(config.logs_dir / task.id / "validation.txt"),
+                summary="",
+                started_at=utc_now().isoformat(),
+                completed_at=utc_now().isoformat(),
+            )
+        )
+        session.add(
+            EventRow(
+                task_id=task.id,
+                kind="artifact.ready",
+                message=str(absolute_patch),
+                created_at=utc_now().isoformat(),
+                data_json=json.dumps({"patch_path": str(absolute_patch)}),
+            )
+        )
+
+    reopened = TaskStore.open(config.db_path)
+
+    with Session(reopened.engine) as session:
+        row = session.get(TaskRow, task.id)
+        iteration = session.query(TaskIterationRow).filter_by(task_id=task.id).one()
+        validation = session.query(ValidationRow).filter_by(task_id=task.id).one()
+        event = session.query(EventRow).filter_by(task_id=task.id, kind="artifact.ready").one()
+        assert row is not None
+        assert row.patch_path == str(absolute_patch)
+        assert json.loads(row.metadata_json) == {
+            "source_patch_path": str(absolute_patch),
+            "source_worktree_path": str(config.worktrees_dir / task.id),
+        }
+        assert iteration.worker_prompt_path == str(
+            config.prompts_dir / task.id / "worker.md"
+        )
+        assert iteration.patch_path == str(absolute_patch)
+        assert validation.cwd == str(config.worktrees_dir / task.id)
+        assert validation.output_path == str(
+            config.logs_dir / task.id / "validation.txt"
+        )
+        assert event.message == str(absolute_patch)
+        assert json.loads(event.data_json) == {"patch_path": str(absolute_patch)}
+    assert reopened.get(task.id).patch_path == absolute_patch
+    assert reopened.get(task.id).spec.metadata["source_patch_path"] == str(absolute_patch)
+    assert (
+        reopened.get_iteration(task.id, 0).worker_transcript_path
+        == config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    )
+    assert reopened.get(task.id).validations[0].cwd == config.worktrees_dir / task.id
+    assert reopened.events(task.id)[1].message == str(absolute_patch)
+    assert reopened.events(task.id)[1].data["patch_path"] == str(absolute_patch)

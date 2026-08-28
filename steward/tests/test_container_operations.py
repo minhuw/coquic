@@ -10,9 +10,13 @@ import pytest
 from typer.testing import CliRunner
 
 import coquic_steward.cli as cli_module
-from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
+from coquic_steward.core.config import (
+    StewardConfig,
+    StewardDeploymentConfig,
+    StewardLimits,
+)
 from coquic_steward.core.lifecycle import DockerResourceManager
-from coquic_steward.core.subprocesses import CommandResult
+from coquic_steward.core.subprocesses import CommandResult, run_command
 from coquic_steward.execution.container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
@@ -38,6 +42,7 @@ from coquic_steward.execution.session import (
 from coquic_steward.execution.validation import (
     MAX_VALIDATION_OUTPUT_BYTES,
     _docker_validation_runner,
+    default_gates,
     run_validation,
 )
 from coquic_steward.core.models import OwnedDockerUsage, TaskKind, TaskSpec, WorkerKind
@@ -1451,3 +1456,150 @@ def test_health_uses_canonical_retryable_cleanup_count(
     assert result.exit_code == 0
     assert payload["cleanupPending"] == 1
     assert payload["quiescent"] is False
+
+def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
+    worktree = Path("/task/worktree")
+    prefix = [
+        "nix",
+        "develop",
+        "--ignore-env",
+        "--keep-env-var",
+        "HOME",
+        "git+file:///task/worktree#lint",
+        "-c",
+        "bash",
+        "/task/worktree/scripts/run-validation-with-index.sh",
+    ]
+    commands = [command for _, command in default_gates(worktree)]
+
+    assert all(command[: len(prefix)] == prefix for command in commands)
+    assert commands[0][len(prefix) :] == [
+        "git",
+        "diff",
+        "--cached",
+        "--check",
+        "HEAD",
+        "--",
+    ]
+    assert commands[1][len(prefix) :] == [
+        "nix",
+        "flake",
+        "check",
+        "--no-build",
+        "--no-update-lock-file",
+        ".",
+    ]
+    assert commands[2][len(prefix) :] == ["zig", "build", "test"]
+    assert commands[3][len(prefix) :] == [
+        "env",
+        "COQUIC_CLANG_TIDY_IN_NIX=1",
+        "pre-commit",
+        "run",
+        "--all-files",
+    ]
+
+def test_validation_index_includes_untracked_files_without_mutating_worker_index(
+    repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-validation-with-index.sh"
+    )
+    (repo / "README.md").write_text("staged\n", encoding="utf-8")
+    run_command(["git", "add", "README.md"], cwd=repo, check=True)
+    (repo / "new.cpp").write_text("int value;   \n", encoding="utf-8")
+    cached_before = run_command(
+        ["git", "diff", "--cached", "--binary", "HEAD", "--"],
+        cwd=repo,
+        check=True,
+    ).stdout
+
+    whitespace = run_command(
+        [
+            "bash",
+            str(runner),
+            "git",
+            "diff",
+            "--cached",
+            "--check",
+            "HEAD",
+            "--",
+        ],
+        cwd=repo,
+    )
+    listed = run_command(
+        [
+            "bash",
+            str(runner),
+            "git",
+            "ls-files",
+            "--error-unmatch",
+            "new.cpp",
+        ],
+        cwd=repo,
+        check=True,
+    )
+
+    assert not whitespace.ok
+    assert "new.cpp:1: trailing whitespace" in whitespace.stdout
+    assert listed.stdout.strip() == "new.cpp"
+    assert run_command(
+        ["git", "diff", "--cached", "--binary", "HEAD", "--"],
+        cwd=repo,
+        check=True,
+    ).stdout == cached_before
+    assert "?? new.cpp" in run_command(
+        ["git", "status", "--short"], cwd=repo, check=True
+    ).stdout
+
+def test_run_validation_applies_configured_timeout(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.core.subprocesses import CommandResult
+    from coquic_steward.execution.validation import run_validation
+
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(validation_timeout_minutes=2),
+        }
+    )
+    observed: dict[str, object] = {}
+
+    def fake_run_command(
+        command, cwd, *, timeout=None, max_output_bytes=None, **_kwargs
+    ):
+        observed["command"] = command
+        observed["cwd"] = cwd
+        observed["timeout"] = timeout
+        observed["max_output_bytes"] = max_output_bytes
+        return CommandResult(
+            args=command,
+            cwd=cwd,
+            returncode=124,
+            stdout="",
+            stderr="command timed out",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation.run_command", fake_run_command
+    )
+
+    result = run_validation(
+        config,
+        "task-1",
+        config.repo_root,
+        "slow.txt",
+        ["slow-command"],
+    )
+
+    assert observed == {
+        "command": ["slow-command"],
+        "cwd": config.repo_root,
+        "timeout": 120,
+        "max_output_bytes": MAX_VALIDATION_OUTPUT_BYTES,
+    }
+    assert result.exit_code == 124
+    assert not result.passed
+    assert "command timed out" in result.output_path.read_text(encoding="utf-8")

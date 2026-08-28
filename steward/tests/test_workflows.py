@@ -21,6 +21,7 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.execution import StewardExecutor
 from coquic_steward.execution.implementation_plan import parse_implementation_plan
+from coquic_steward.execution.review import parse_review, review_approved
 from coquic_steward.storage import TaskStore
 from durable_harness import drive_durable, passing_durable_gates, write_durable_codex
 
@@ -244,3 +245,73 @@ def test_invalid_feature_plan_retries_without_coding(
     assert store.get(task.id).status == TaskStatus.blocked
     assert len(store.plan_runs(task.id)) == 2
     assert store.iterations(task.id) == []
+
+def test_review_verdict_uses_structured_output() -> None:
+    approved = parse_review(
+        json.dumps(
+            {
+                "verdict": "approve",
+                "summary": "No findings.",
+                "findings": [],
+                "validation_gaps": [],
+                "remaining_risk": "",
+            }
+        )
+    )
+    blocked = parse_review(
+        json.dumps(
+            {
+                "verdict": "block",
+                "summary": "Unsafe patch.",
+                "findings": [
+                    {
+                        "severity": "high",
+                        "title": "Incorrect behavior",
+                        "file": "src/main.zig",
+                        "line": 10,
+                        "detail": "The patch changes unrelated behavior.",
+                        "recommendation": "Keep the change scoped.",
+                    }
+                ],
+                "validation_gaps": [],
+                "remaining_risk": "Needs another pass.",
+            }
+        )
+    )
+
+    assert approved is not None
+    assert review_approved(approved)
+    approved_with_gap = approved | {"validation_gaps": ["zig build test was not run"]}
+    assert review_approved(approved_with_gap)
+    assert blocked is not None
+    assert not review_approved(blocked)
+    assert parse_review("APPROVE\n\nNo blocking findings.") is None
+    assert (
+        parse_review(
+            json.dumps(
+                {
+                    "verdict": "block",
+                    "summary": "Review not completed.",
+                    "findings": [
+                        {
+                            "severity": "critical",
+                            "title": "Invalid premature response",
+                            "file": "",
+                            "line": None,
+                            "detail": (
+                                "Internal error: accidentally attempted final "
+                                "response prematurely."
+                            ),
+                            "recommendation": (
+                                "Ignore this response; continuing review would "
+                                "be required."
+                            ),
+                        }
+                    ],
+                    "validation_gaps": ["Review not completed."],
+                    "remaining_risk": "Review not completed.",
+                }
+            )
+        )
+        is None
+    )

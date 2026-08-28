@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import selectors
 import signal
@@ -15,13 +16,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from coquic_steward.agents import CodexRunner
+from coquic_steward.agents.diagnostics import diagnostics_for_paths
 from coquic_steward.agents.invocation import (
     InvocationOutcome,
     InvocationRequest,
     JsonlStream,
     stream_process,
 )
-from coquic_steward.core.config import StewardConfig
+from coquic_steward.agents.runner import _is_transient_codex_message
+from coquic_steward.agents.tool_changes import ToolChangeCapture
+from coquic_steward.core.config import StewardConfig, StewardLimits
 from coquic_steward.core.models import (
     CodexStage,
     ProjectSignals,
@@ -997,3 +1002,315 @@ def test_production_construction_rejects_local_codex_fallback(
         StewardExecutor(production, store)
     with pytest.raises(ValueError, match="task-container"):
         CodexPlanner(production)
+
+def test_codex_planner_selects_explicit_runner_boundaries(
+    config: StewardConfig,
+) -> None:
+    default_planner = CodexPlanner(config)
+    assert isinstance(default_planner.runner, CodexRunner)
+
+    explicit_runner = CodexRunner(config)
+    explicit_planner = CodexPlanner(config, runner=explicit_runner)
+    assert explicit_planner.runner is explicit_runner
+
+    class MethodLookalike:
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("unsupported planner lookalike was invoked")
+
+    class NestedRunner:
+        def __init__(self) -> None:
+            self.runner = explicit_runner
+
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=MethodLookalike())
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=NestedRunner())
+
+    supervisor = SessionSupervisor(
+        config,
+        TaskStore.create(config.db_path),
+        require_boundary=False,
+    )
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=supervisor)
+    with pytest.raises(ValueError, match="either runner or invocation"):
+        CodexPlanner(
+            config,
+            runner=explicit_runner,
+            invocation=FreshPlannerSession(config),
+        )
+
+def test_codex_runner_places_resume_options_before_session(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_model": "gpt-5.6-terra",
+            "codex_reasoning_effort": "medium",
+        }
+    )
+    runner = CodexRunner(config)
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+    last_message = tmp_path / "last.md"
+
+    args = runner._args(
+        config.repo_root,
+        last_message,
+        output_schema=schema,
+        resume_session="planner-thread-1",
+    )
+
+    assert args[:3] == [config.codex_bin, "exec", "resume"]
+    assert args[-2:] == ["planner-thread-1", "-"]
+    assert args.index("--output-schema") < args.index("planner-thread-1")
+    assert args[args.index("--model") + 1] == "gpt-5.6-terra"
+    assert 'model_reasoning_effort="medium"' in args
+    assert args.index("--config") < args.index("planner-thread-1")
+    assert "--cd" not in args
+    assert "--sandbox" not in args
+
+def test_codex_runner_review_uses_structured_exec(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{tmp_path / "args.txt"}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'printf \'{"verdict":"approve","summary":"ok","findings":[],"validation_gaps":[],"remaining_risk":""}\\n\' > "$last"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    runner = CodexRunner(config)
+    task, _ = TaskStore.create(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    schema = tmp_path / "review.schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+
+    result = runner.run_review(task, "review prompt", config.repo_root, output_schema=schema)
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
+
+    assert result.completed
+    assert args[:2] == ["exec", "--json"]
+    assert "review" not in args
+    assert args[-1] == "-"
+    assert args.index("--cd") < args.index("--output-last-message")
+    assert "--skip-git-repo-check" not in args
+    assert "/reviewer/" in args[args.index("--output-last-message") + 1]
+    assert args[args.index("--output-schema") + 1] == str(schema)
+
+def test_codex_review_failure_uses_stderr_summary(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'printf "error: bad review invocation\\n" >&2\n'
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    task, _ = TaskStore.create(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    schema = tmp_path / "review.schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+
+    result = CodexRunner(config).run_review(task, "review prompt", config.repo_root, output_schema=schema)
+
+    assert not result.completed
+    assert result.exit_code == 2
+    assert result.final_message == "error: bad review invocation"
+    assert result.diagnostics["status"] == "failed"
+    assert result.diagnostics["last_error"] == "error: bad review invocation"
+
+def test_codex_diagnostics_detect_missing_last_message(tmp_path: Path) -> None:
+    transcript = tmp_path / "codex.jsonl"
+    last_message = tmp_path / "last-message.md"
+    transcript.write_text(
+        '{"type":"thread.started","thread_id":"thread-1"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.started","item":{"id":"item_0","type":"command_execution","status":"in_progress","command":"date"}}\n',
+        encoding="utf-8",
+    )
+
+    diagnostics = diagnostics_for_paths(
+        transcript_path=transcript,
+        last_message_path=last_message,
+        completed=False,
+    )
+
+    assert diagnostics.status == "abandoned"
+    assert diagnostics.last_message_present is False
+    assert diagnostics.thread_id == "thread-1"
+    assert diagnostics.last_item_type == "command_execution"
+    assert diagnostics.last_item_status == "in_progress"
+
+def test_codex_review_uses_review_timeout(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "cat >/dev/null\n"
+        "sleep 5\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "limits": StewardLimits(
+                worker_timeout_minutes=10,
+                review_timeout_minutes=0,
+            ),
+        }
+    )
+    config.ensure_dirs()
+    task, _ = TaskStore.create(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    schema = tmp_path / "review.schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+
+    result = CodexRunner(config).run_review(
+        task, "review prompt", config.repo_root, output_schema=schema
+    )
+
+    assert not result.completed
+    assert result.exit_code == 124
+    assert "timed out after 0 minute(s)" in result.final_message
+
+def test_codex_runner_writes_prompt_and_transcript(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'done\\n' > \"$last\"\n"
+        'printf \'{"message":"done"}\\n\'\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+
+    result = CodexRunner(config).run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert result.final_message == "done\n"
+    assert result.transcript_path.exists()
+
+def test_codex_runner_retries_transient_failure_and_resumes(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    count = tmp_path / "count.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'count=$(cat "{count}" 2>/dev/null || printf 0)\n'
+        "count=$((count + 1))\n"
+        f'printf "%s" "$count" > "{count}"\n'
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'stream disconnected before completion\\n' > \"$last\"\n"
+        "  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-transient\"}'\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'done\\n' > \"$last\"\n"
+        "printf '%s\\n' '{\"message\":\"done\"}'\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    task = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "coquic_steward.agents.runner.time.sleep", lambda delay: delays.append(delay)
+    )
+
+    result = CodexRunner(config).run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert result.thread_id == "thread-transient"
+    assert result.diagnostics["retry_count"] == 1
+    retry = result.diagnostics["retries"][0]
+    assert retry["attempt"] == 1
+    assert retry["next_attempt"] == 2
+    assert Path(retry["transcript_path"]).exists()
+    assert Path(retry["last_message_path"]).read_text(encoding="utf-8") == (
+        "stream disconnected before completion\n"
+    )
+    archived_context = Path(retry["tool_changes_path"]) / "context.json"
+    assert ToolChangeCapture.from_context(archived_context).summary.state == "unavailable"
+    assert delays == [5.0]
+    assert "exec resume" in calls.read_text(encoding="utf-8").splitlines()[1]
+    assert "thread-transient" in calls.read_text(encoding="utf-8").splitlines()[1]
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Selected model is at capacity. Please try a different model.",
+        "unexpected status 503 Service Unavailable",
+        "HTTP status 502",
+        "Could not resolve host: cch.example.test",
+    ],
+)
+def test_codex_transient_failure_classification(message: str) -> None:
+    assert _is_transient_codex_message(message)
+
+def test_codex_does_not_retry_deterministic_failure() -> None:
+    assert not _is_transient_codex_message("invalid output schema")
+    assert not _is_transient_codex_message("maximum output tokens exceeded")
+
+def test_codex_runner_reports_missing_codex_executable(config: StewardConfig) -> None:
+    config = config.__class__(
+        **{**config.__dict__, "codex_bin": "/missing/codex-for-steward-test"}
+    )
+    config.ensure_dirs()
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+
+    result = CodexRunner(config).run(task, "hello", config.repo_root)
+
+    assert not result.completed
+    assert result.exit_code == 127
+    assert "unable to start Codex executable" in result.final_message
+    transcript = result.transcript_path.read_text(encoding="utf-8")
+    event = json.loads(transcript)
+    assert event["type"] == "stderr"
+    assert "unable to start Codex executable" in event["text"]

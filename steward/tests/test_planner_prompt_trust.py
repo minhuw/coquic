@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from coquic_steward.agents import render_implementation_plan_prompt, render_worker_prompt
 from coquic_steward.core.models import (
     EFFECT_RESULT_METADATA_KEY,
     EXECUTION_MODE_METADATA_KEY,
@@ -14,6 +15,10 @@ from coquic_steward.core.models import (
     Risk,
     SignalItem,
     TaskKind,
+    TaskRecord,
+    TaskSpec,
+    TaskWorkflow,
+    ValidationResult,
     WorkerKind,
 )
 from coquic_steward.agents.catalog import (
@@ -21,7 +26,8 @@ from coquic_steward.agents.catalog import (
     PLANNER_DISPATCH_POLICY,
     REMOTE_WRITE_AUTHORITY,
 )
-from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.config import PathPolicyConfig, StewardConfig
+from coquic_steward.planning import CodexPlanner, PLANNER_SYSTEM_PROMPT, planner_schema_path
 from coquic_steward.planning.planner import (
     PLANNER_OUTPUT_SCHEMA,
     render_planner_prompt,
@@ -30,6 +36,9 @@ from coquic_steward.planning.verifier import (
     ActiveTaskSummary,
     PlanVerifier,
 )
+from coquic_steward.execution.review import render_review_revision_prompt
+from coquic_steward.execution.validation import render_validation_revision_prompt
+from coquic_steward.storage import TaskStore
 
 
 REPOSITORY = "minhuw/coquic"
@@ -440,3 +449,437 @@ def test_non_feature_proposal_keeps_planner_authored_fields() -> None:
     assert spec.metadata["ordinary_metadata"] == "preserve me"
     selected = spec.metadata["source_context"]["selected_signal_items"][0]
     assert selected["payload"]["issue_url"] == ISSUE_URL
+
+def test_codex_planner_prompt_includes_active_tasks(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    captured_prompt = tmp_path / "prompt.txt"
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {tmp_path / 'args.txt'}\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        f"cat > {captured_prompt}\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'printf \'{"tasks":[]}\\n\' > "$last"\n'
+        'printf \'{"type":"thread.started","thread_id":"planner-thread-1"}\\n\'\n'
+        'printf \'{"message":"{\\"tasks\\":[] }"}\\n\'\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    active, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.interop,
+            worker=WorkerKind.interop_doctor,
+            title="Debug failed interop run 100",
+            prompt="fix interop",
+        ),
+        dedupe_key="interop:100",
+    )
+
+    result = CodexPlanner(config).run(
+        ProjectSignals(
+            repository="minhuw/coquic",
+            items=[
+                SignalItem(
+                    id="wi-interop-100",
+                    provider="github-actions:interop",
+                    kind="github-actions.interop-failure",
+                    fingerprint="wi-interop-100",
+                    title="Interop workflow failed",
+                    payload={
+                        "run_id": "100",
+                        "workflow_name": "Interop",
+                        "workflow_file": "interop.yml",
+                    },
+                )
+            ],
+        ),
+        [active],
+    )
+
+    assert result.planned == []
+    prompt = captured_prompt.read_text(encoding="utf-8")
+    assert PLANNER_SYSTEM_PROMPT.strip() in prompt
+    assert "active_tasks" in prompt
+    assert "Debug failed interop run 100" in prompt
+    assert "interop:100" in prompt
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+    assert "resume" not in args
+    assert "--output-schema" in args
+    assert str(planner_schema_path(config)) in args
+    assert not (config.state_dir / "planner-thread.txt").exists()
+
+    result = CodexPlanner(config).run(
+        ProjectSignals(repository="minhuw/coquic"),
+        [],
+    )
+
+    assert result.planned == []
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
+    assert "resume" not in args
+    assert "planner-thread-1" not in args
+    assert args.count("--output-schema") == 2
+
+def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.code_quality,
+            worker=WorkerKind.code_quality_janitor,
+            title="CodeQL",
+            prompt="fix CodeQL",
+            metadata={
+                "source_context": {
+                    "selected_signal_item_ids": ["wi-codeql-1"],
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-codeql-1",
+                            "provider": "code-scanning",
+                            "kind": "code-scanning.alert",
+                            "payload": {"rule_id": "cpp/use-after-free"},
+                            "location": {"path": "src/main.cpp", "line": 12},
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "External writes are denied at the trusted effect boundary" in prompt
+    assert "bounded, validated proposals" in prompt
+    assert "Authoritative source context:" in prompt
+    assert "cpp/use-after-free" in prompt
+    assert "src/main.cpp" in prompt
+    assert "single source of truth" in prompt
+    assert "Do not fetch a broad or unknown issue list" in prompt
+
+def test_worker_prompt_highlights_workflow_signal_guidance(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.ci,
+            worker=WorkerKind.ci_doctor,
+            title="Debug failed Test run 100",
+            prompt="Debug the selected Test workflow run.",
+            metadata={
+                "source_context": {
+                    "selected_signal_item_ids": ["wi-github-actions-test-1"],
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-github-actions-test-1",
+                            "provider": "github-actions:test",
+                            "kind": "github-actions.test-failure",
+                            "payload": {
+                                "run_id": "100",
+                                "workflow_file": "test.yml",
+                                "worker_context": {
+                                    "workflow_file": "test.yml",
+                                    "recommended_task_kind": "ci",
+                                    "recommended_worker": "ci-doctor",
+                                    "workflow_purpose": "Build and unit-test CoQUIC.",
+                                    "investigation_steps": [
+                                        "Inspect the selected run id for the Build or Test step that failed."
+                                    ],
+                                    "local_validation": [
+                                        "nix develop -c zig build test"
+                                    ],
+                                    "scope_limits": [
+                                        "Commit and push remain Steward integration responsibilities."
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Selected source guidance:" in prompt
+    assert "recommended_worker: ci-doctor" in prompt
+    assert "workflow_file: test.yml" in prompt
+    assert "nix develop -c zig build test" in prompt
+    assert "Authoritative source context:" in prompt
+
+def test_worker_prompt_highlights_feature_issue_signal_guidance(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={
+                    TaskKind.feature.value: ("flake.nix", ".github/**")
+                }
+            ),
+        }
+    )
+    config.ensure_dirs()
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.feature_implementer,
+            title="Implement #42 Add QUIC DATAGRAM send API",
+            prompt="Implement the selected GitHub issue.",
+            metadata={
+                "source_context": {
+                    "selected_signal_item_ids": ["wi-feature-42"],
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-feature-42",
+                            "provider": "github-issues:features",
+                            "kind": "github-issues.feature-request",
+                            "payload": {
+                                "issue_number": 42,
+                                "issue_url": "https://github.com/minhuw/coquic/issues/42",
+                                "issue_title": "Add QUIC DATAGRAM send API",
+                                "body_excerpt": "Expose an application-facing datagram sender.",
+                                "worker_context": {
+                                    "recommended_task_kind": "feature",
+                                    "recommended_worker": "feature-implementer",
+                                    "issue_purpose": "Implement a scoped feature request.",
+                                    "implementation_steps": [
+                                        "Open or fetch only the selected issue to confirm it is still open.",
+                                        "Steward comments on and closes the selected issue only after the reviewed patch is pushed to main.",
+                                    ],
+                                    "local_validation": [
+                                        "nix develop -c zig build test"
+                                    ],
+                                    "scope_limits": [
+                                        "Do not close, label, comment on, or otherwise mutate GitHub issues from the worker."
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Selected source guidance:" in prompt
+    assert "recommended_task_kind: feature" in prompt
+    assert "recommended_worker: feature-implementer" in prompt
+    assert "issue_purpose: Implement a scoped feature request." in prompt
+    assert "implementation_steps:" in prompt
+    assert "Open or fetch only the selected issue" in prompt
+    assert "Steward comments on and closes the selected issue" in prompt
+    assert "Authoritative source context:" in prompt
+    assert "https://github.com/minhuw/coquic/issues/42" in prompt
+    assert "Do not fetch a broad or unknown issue list" in prompt
+    assert "gh-issue-implementation" not in prompt
+    assert "Scope control:" in prompt
+    assert "Make the smallest coherent patch" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "Do not create GitHub issues, Steward tasks, commits, pushes" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "Steward will block patches that change them" in prompt
+    assert "- flake.nix" in prompt
+    assert "- .github/**" in prompt
+
+def test_frozen_path_policy_prompts_preserve_order_and_omit_empty_policy(
+    config: StewardConfig,
+) -> None:
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            workflow=TaskWorkflow.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement the selected feature",
+            prompt="Implement the selected feature.",
+        ),
+        worktree_path=config.repo_root,
+    )
+    configured = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen=("global.txt", "duplicate.txt"),
+                frozen_by_kind={
+                    TaskKind.feature.value: (
+                        "duplicate.txt",
+                        r"nested\path/",
+                        "last.txt",
+                    )
+                },
+            ),
+        }
+    )
+    expected = "\n".join(
+        [
+            "Do not modify these repository paths for this task. Steward will block patches that change them.",
+            "- global.txt",
+            "- duplicate.txt",
+            r"- nested\path/",
+            "- last.txt",
+        ]
+    )
+    prompts = [
+        render_worker_prompt(task, configured),
+        render_implementation_plan_prompt(task, configured),
+        render_review_revision_prompt(task, {}, configured),
+        render_validation_revision_prompt(task, [], configured),
+    ]
+
+    assert all(expected in prompt for prompt in prompts)
+    empty = configured.__class__(
+        **{**configured.__dict__, "path_policy": PathPolicyConfig()}
+    )
+    assert all(
+        "Frozen path policy:" not in prompt
+        for prompt in (
+            render_worker_prompt(task, empty),
+            render_implementation_plan_prompt(task, empty),
+            render_review_revision_prompt(task, {}, empty),
+            render_validation_revision_prompt(task, [], empty),
+        )
+    )
+    assert "Frozen path policy:" not in render_review_revision_prompt(task, {}, None)
+    assert "Frozen path policy:" not in render_validation_revision_prompt(task, [], None)
+
+def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.issue_implementer,
+            title="Implement #42",
+            prompt="Implement the selected GitHub issue.",
+            metadata={
+                "source_context": {
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-feature-42",
+                            "provider": "github-issues:features",
+                            "kind": "github-issues.feature-request",
+                            "payload": {"issue_number": 42},
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Worker: Issue Implementer" in prompt
+    assert "gh-issue-implementation" not in prompt
+    assert "change GitHub issues" in prompt
+
+def test_review_revision_prompt_keeps_repairs_scoped(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.feature_implementer,
+            title="Implement strict 0-RTT policy",
+            prompt="Implement the selected feature.",
+        )
+    )[0]
+    review = {
+        "verdict": "block",
+        "summary": "Backend work is too broad.",
+        "findings": [
+            {
+                "severity": "high",
+                "title": "Requires new backend ticket storage",
+                "file": "src/quic/crypto/tls_adapter_boringssl.cpp",
+                "line": 42,
+                "detail": "The fix requires a backend feature.",
+                "recommendation": "Split the backend prerequisite.",
+            }
+        ],
+        "validation_gaps": [],
+        "remaining_risk": "",
+    }
+
+    prompt = render_review_revision_prompt(task, review, config)
+
+    assert "Revision scope control:" in prompt
+    assert "Fix only findings that can be addressed within the original task boundary" in prompt
+    assert "report a follow-up task proposal" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "Do not add unrelated tooling changes" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "- flake.nix" in prompt
+
+def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: (".clang-tidy",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    task = TaskStore.create(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.feature_implementer,
+            title="Implement strict 0-RTT policy",
+            prompt="Implement the selected feature.",
+        )
+    )[0]
+    validation = ValidationResult(
+        command=["nix", "develop", "-c", "pre-commit", "run", "--all-files"],
+        cwd=config.repo_root,
+        passed=False,
+        exit_code=1,
+        output_path=config.logs_dir / "pre-commit.txt",
+        summary="clang-tidy failed in repo-wide tooling",
+    )
+
+    prompt = render_validation_revision_prompt(task, [validation], config)
+
+    assert "Validation repair scope control:" in prompt
+    assert "Do not change repo-wide tooling" in prompt
+    assert "report a follow-up task proposal" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "nix develop -c pre-commit run --all-files" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "- .clang-tidy" in prompt

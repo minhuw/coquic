@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 
-from coquic_steward.core.models import ValidationResult
+from coquic_steward.core.config import PathPolicyConfig, StewardConfig, StewardLimits
+from coquic_steward.core.models import TaskKind, TaskSpec, ValidationResult, WorkerKind
 from coquic_steward.execution import StewardExecutor
 from coquic_steward.orchestration import StewardDaemon
+from coquic_steward.storage import TaskStore
 
 
 def drive_durable(
@@ -116,3 +119,98 @@ def passing_durable_gates(
     if on_gate_result is not None:
         on_gate_result(0, validation)
     return [validation]
+
+def _advance_durable(
+    executor: StewardExecutor, task_id: str, steps: int
+) -> list[object]:
+    return [executor.advance_once(task_id) for _ in range(steps)]
+
+def _callback_gate_results(
+    results: list[ValidationResult], *, on_gate_start=None, on_gate_result=None
+) -> list[ValidationResult]:
+    for position, validation in enumerate(results):
+        if on_gate_start is not None:
+            on_gate_start(position, validation.output_path.name, validation.command)
+        if on_gate_result is not None:
+            on_gate_result(position, validation)
+    return results
+
+def _durable_push_setup(
+    config: StewardConfig,
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    issue_numbers: tuple[int, ...] = (),
+    dry_run: bool = False,
+    frozen_paths: tuple[str, ...] = (),
+    max_main_pushes_per_day: int | None = None,
+):
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"],
+        cwd=config.repo_root,
+        check=True,
+    )
+    fake = write_durable_codex(tmp_path, change="durable push change")
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "git_remote": "origin",
+            "dry_run": dry_run,
+            "limits": (
+                StewardLimits(
+                    **{
+                        **config.limits.__dict__,
+                        "max_main_pushes_per_day": max_main_pushes_per_day,
+                    }
+                )
+                if max_main_pushes_per_day is not None
+                else config.limits
+            ),
+            "path_policy": (
+                PathPolicyConfig(
+                    frozen_by_kind={TaskKind.integration.value: frozen_paths}
+                )
+                if frozen_paths
+                else config.path_policy
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path, dry_run=dry_run)
+    selected = [
+        {
+            "kind": "github-issues.feature-request",
+            "payload": {"issue_number": number},
+        }
+        for number in issue_numbers
+    ]
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Feature source",
+            prompt="Implement the selected feature",
+            metadata={"source_context": {"selected_signal_items": selected}},
+        )
+    )
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate feature",
+            prompt="Integrate the feature",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", passing_durable_gates
+    )
+    return config, store, source, integration, StewardExecutor(config, store)

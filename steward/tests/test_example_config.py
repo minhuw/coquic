@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from coquic_steward.core.config import StewardDeploymentConfig, load_config
+from coquic_steward.core.models import TaskKind
 from coquic_steward.orchestration.preflight import run_preflight
 
 
@@ -422,3 +424,275 @@ recovery_owned_docker_bytes = 500
     assert config.task_image == config.task_image_digest == task_id
     assert config.container.image == config.container.image_digest == task_id
     assert config.deployment.release_id == "release-compose"
+
+def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
+    config = load_config(repo_root=repo)
+    assert config.repo_root == repo
+    assert config.steward_home == coquic_home / "steward"
+    assert config.state_dir == coquic_home / "steward"
+    assert config.db_path == coquic_home / "steward.sqlite"
+    assert config.db_path.name == "steward.sqlite"
+    assert config.worktrees_dir == coquic_home / "worktrees"
+    assert config.tasks_dir == coquic_home / "tasks"
+    assert config.private_root == coquic_home / "private"
+    assert config.transcripts_dir == config.state_dir / "transcripts"
+    assert config.dry_run is True
+    assert config.enabled_signals == (
+        "github-actions:ci",
+        "github-actions:test",
+        "github-actions:duvet",
+        "github-actions:nightly-ci",
+        "github-actions:deploy-demo",
+        "github-actions:interop",
+        "github-actions:perf",
+        "github-issues:features",
+        "code-scanning",
+        "codacy",
+    )
+    assert config.signal_providers["github-actions:ci"].poll_interval_minutes == 30
+    assert config.signal_providers["github-actions:test"].poll_interval_minutes == 30
+    assert config.signal_providers["github-actions:duvet"].poll_interval_minutes == 1440
+    assert (
+        config.signal_providers["github-actions:nightly-ci"].idle_poll_interval_minutes
+        == 1440
+    )
+    assert config.signal_providers["github-issues:features"].poll_interval_minutes == 360
+    assert config.signal_providers["code-scanning"].poll_interval_minutes == 360
+    assert config.signal_providers["codacy"].poll_interval_minutes == 360
+
+def test_config_selects_enabled_signals(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.signals]
+enabled = ["codacy"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.enabled_signals == ("codacy",)
+
+def test_config_reads_signal_provider_polling(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.signals]
+enabled = ["codacy"]
+
+[steward.signals.codacy]
+poll_interval_minutes = 720
+error_retry_minutes = 45
+idle_poll_interval_minutes = 5
+suppression_hours = 12
+max_items = 25
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+    provider = config.signal_providers["codacy"]
+
+    assert provider.poll_interval_minutes == 720
+    assert provider.error_retry_minutes == 45
+    assert provider.idle_poll_interval_minutes == 5
+    assert provider.suppression_hours == 12
+    assert provider.max_items == 25
+
+def test_config_reads_global_and_kind_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = [".github/**", "flake.nix"]
+
+[steward.path_policy.feature]
+frozen = [".clang-tidy", "scripts/run-clang-tidy.sh"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.path_policy.frozen == (".github/**", "flake.nix")
+    assert config.path_policy.frozen_for_kind(TaskKind.feature) == (
+        ".github/**",
+        "flake.nix",
+        ".clang-tidy",
+        "scripts/run-clang-tidy.sh",
+    )
+    assert config.path_policy.frozen_for_kind(TaskKind.ci) == (
+        ".github/**",
+        "flake.nix",
+    )
+
+def test_example_config_freezes_validation_gate_runner(repo: Path) -> None:
+    config = load_config(
+        repo_root=repo,
+        config_path=Path(__file__).resolve().parents[1] / "steward.example.toml",
+    )
+
+    assert "scripts/run-validation-with-index.sh" in config.path_policy.frozen
+
+def test_config_rejects_absolute_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = ["/etc/passwd"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="repository-relative"):
+        load_config(repo_root=repo, config_path=config_path)
+
+def test_config_rejects_blank_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = [""]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_config(repo_root=repo, config_path=config_path)
+
+def test_config_rejects_blank_kind_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy.feature]
+frozen = ["   "]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_config(repo_root=repo, config_path=config_path)
+
+def test_config_reads_review_timeout_limit(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.limits]
+review_timeout_minutes = 7
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.limits.review_timeout_minutes == 7
+
+def test_config_reads_validation_timeout_limit(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.limits]
+validation_timeout_minutes = 9
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.limits.validation_timeout_minutes == 9
+
+def test_config_resolves_codex_bin_from_path(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    config_path = tmp_path / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+codex_bin = "codex"
+github_repository = "minhuw/coquic"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.codex_bin == str(fake)
+
+def test_config_reads_codex_model_and_reasoning_effort(
+    repo: Path, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "medium"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.codex_model == "gpt-5.6-terra"
+    assert config.codex_reasoning_effort == "medium"
+
+def test_config_reads_only_global_file_by_default(
+    repo: Path, coquic_home: Path
+) -> None:
+    global_config = coquic_home / "steward.toml"
+    global_config.parent.mkdir(parents=True, exist_ok=True)
+    global_config.write_text(
+        """
+[steward]
+codex_sandbox = "read-only"
+github_repository = "minhuw/global"
+
+[steward.signals]
+enabled = ["codacy"]
+""",
+        encoding="utf-8",
+    )
+    repo_config = repo / "steward" / "steward.toml"
+    repo_config.parent.mkdir(parents=True, exist_ok=True)
+    repo_config.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo)
+
+    assert config.codex_sandbox == "read-only"
+    assert config.github_repository == "minhuw/global"
+    assert config.enabled_signals == ("codacy",)

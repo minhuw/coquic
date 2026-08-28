@@ -44,8 +44,11 @@ from coquic_steward.execution.worktree import (
     _changed_paths_from_porcelain,
 )
 from coquic_steward.execution import Worktrees
+from coquic_steward.execution import executor as executor_module
+from coquic_steward.execution import worktree as worktree_module
 from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
 from coquic_steward.orchestration import StewardDaemon
+from coquic_steward.orchestration import daemon as daemon_module
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
@@ -1353,7 +1356,7 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert worktrees.has_changes(path)
 
 def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
-    config: StewardConfig, tmp_path: Path
+    config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
     remote = tmp_path / "origin.git"
     upstream = tmp_path / "upstream"
@@ -1402,8 +1405,32 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    original_run_command = worktree_module.run_command
+    ssh_command = "ssh -i /tmp/strict-ssh"
 
+    def recording_run_command(command, cwd, *, env=None, **kwargs):
+        commands.append((command, env))
+        return original_run_command(command, cwd, env=env, **kwargs)
+
+    monkeypatch.setattr(
+        worktree_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+    )
+    monkeypatch.setattr(worktree_module, "run_command", recording_run_command)
     path, _ = Worktrees(push_config).create(task)
+
+    fetch_env = next(
+        env for command, env in commands if command[:2] == ["git", "fetch"]
+    )
+    assert fetch_env == {
+        "GIT_SSH_COMMAND": ssh_command,
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    worktree_add_env = next(
+        env for command, env in commands if command[:3] == ["git", "worktree", "add"]
+    )
+    assert worktree_add_env is None
 
     worktree_head = run_command(
         ["git", "rev-parse", "HEAD"], cwd=path, check=True
@@ -1414,6 +1441,72 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     assert worktree_head == remote_head
     assert (path / "README.md").read_text(encoding="utf-8") == "remote\n"
     assert not (path / "LOCAL.md").exists()
+
+def test_worktree_reset_authenticates_fetch_but_not_local_reset(
+    config: StewardConfig, monkeypatch
+) -> None:
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    ssh_command = "ssh -i /tmp/strict-ssh"
+
+    def fake_run_command(command, cwd, *, env=None, **_kwargs):
+        commands.append((command, env))
+        return CommandResult(command, cwd, 0, "", "")
+
+    monkeypatch.setattr(
+        worktree_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+    )
+    monkeypatch.setattr(worktree_module, "run_command", fake_run_command)
+
+    Worktrees(config).reset_to_main(config.repo_root)
+
+    assert commands[0][1] == {
+        "GIT_SSH_COMMAND": ssh_command,
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert commands[1][0][:2] == ["git", "reset"]
+    assert commands[1][1] is None
+
+
+def test_executor_remote_fetch_authenticates_but_local_checks_do_not(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    ssh_command = "ssh -i /tmp/strict-ssh"
+
+    def fake_run_command(command, cwd, *, env=None, **_kwargs):
+        commands.append((command, env))
+        stdout = "remote-tip\n" if command[1:2] == ["rev-parse"] else ""
+        return CommandResult(command, cwd, 0, stdout, "")
+
+    monkeypatch.setattr(
+        executor_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+    )
+    monkeypatch.setattr(executor_module, "run_command", fake_run_command)
+
+    assert executor._latest_main_identity(config.repo_root, dry_run=False) == "remote-tip"
+    assert executor._commit_reachable(config.repo_root, "commit")
+
+    fetch_envs = [
+        env for command, env in commands if command[:2] == ["git", "fetch"]
+    ]
+    assert fetch_envs == [
+        {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    ] * 2
+    local_envs = [
+        env
+        for command, env in commands
+        if command[:2] == ["git", "rev-parse"]
+        or command[:2] == ["git", "merge-base"]
+    ]
+    assert local_envs == [None, None]
+
 
 def test_commit_all_skips_hooks_only_for_the_validated_tree(
     config: StewardConfig, tmp_path: Path
@@ -2707,6 +2800,9 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
 
     commands: list[list[str]] = []
     real_command = run_command
+    daemon_commands: list[tuple[list[str], dict[str, str] | None]] = []
+    real_daemon_command = daemon_module.run_command
+    ssh_command = "ssh -i /tmp/strict-ssh"
 
     def command(argv, cwd, *, timeout=None, **_kwargs):
         if argv and argv[0] == "gh":
@@ -2714,7 +2810,15 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
             return CommandResult(argv, cwd, 0, "", "")
         return real_command(argv, cwd, timeout=timeout, **_kwargs)
 
+    def daemon_command(argv, cwd, *, env=None, **kwargs):
+        daemon_commands.append((argv, env))
+        return real_daemon_command(argv, cwd, env=env, **kwargs)
+
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
+    monkeypatch.setattr(
+        daemon_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+    )
+    monkeypatch.setattr(daemon_module, "run_command", daemon_command)
     daemon = StewardDaemon(config, store)
     task = store.get(integration.id)
     pipeline = store.list_pipelines(integration.id)[0]
@@ -2731,10 +2835,22 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
     assert outcome.disposition.value == "ingested"
     assert store.get(integration.id).status == TaskStatus.pushed
     assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+    assert daemon._reconcile_commit_and_remote(task, Path(task.worktree_path)) is None
     assert [item[:3] for item in commands] == [
         ["gh", "issue", "comment"],
         ["gh", "issue", "close"],
     ]
+    expected_remote_env = {
+        "GIT_SSH_COMMAND": ssh_command,
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert [
+        env for argv, env in daemon_commands if argv[:2] == ["git", "fetch"]
+    ] == [expected_remote_env] * 2
+    assert [
+        env for argv, env in daemon_commands if argv[:2] == ["git", "merge-base"]
+    ] == [None] * 2
     transcript = store.get(integration.id).transcript_path
     assert transcript is not None and "issue_closed: #42" in transcript.read_text(encoding="utf-8")
     assert executor.advance_once(integration.id).status == "ready_to_seal"

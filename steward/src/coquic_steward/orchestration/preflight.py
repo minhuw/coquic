@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.github_auth import validate_ssh_remote
+from ..core.github_auth import git_environment, validate_ssh_remote
 from ..core.subprocesses import CommandResult, run_command
 from ..control_loop import ArchiveError, ControlLoopArchive
 
@@ -342,7 +342,7 @@ def preflight_remote_push(config: StewardConfig) -> bool:
         ["git", "fetch", "--quiet", config.git_remote, config.main_branch],
         cwd=config.repo_root,
         timeout=PREFLIGHT_TIMEOUT_SECONDS,
-        env=_NONINTERACTIVE_GIT_ENV,
+        env={**git_environment(config), **_NONINTERACTIVE_GIT_ENV},
     )
     if not fetch.ok:
         raise _preflight_error(config, "fetch remote main", fetch)
@@ -374,7 +374,7 @@ def preflight_remote_push(config: StewardConfig) -> bool:
         ],
         cwd=config.repo_root,
         timeout=PREFLIGHT_TIMEOUT_SECONDS,
-        env=_NONINTERACTIVE_GIT_ENV,
+        env={**git_environment(config), **_NONINTERACTIVE_GIT_ENV},
     )
     if not dry_run.ok:
         raise _preflight_error(config, "dry-run push to main", dry_run)

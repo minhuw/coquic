@@ -31,6 +31,7 @@ from coquic_steward.core.models import (
     CleanupStatus,
     DaemonLifecycleState,
     CodexStage,
+    ExecutionMode,
     PipelineCursorPhase,
     TaskKind,
     TaskSpec,
@@ -4379,6 +4380,55 @@ class FakeSupervisor(SessionSupervisor):
         if self.remove_failures:
             self.remove_failures -= 1
             raise RuntimeError("injected remove failure")
+
+
+def test_persisted_push_reconciliation_authenticates_fetch_only(
+    config, monkeypatch
+):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    task = SimpleNamespace(id="persisted-task")
+    commit = "a" * 40
+    events = [
+        SimpleNamespace(
+            kind="pipeline.commit", data={"commit": commit, "tree": "tree-id"}
+        ),
+        SimpleNamespace(kind="pipeline.push", data={"commit": commit}),
+    ]
+    monkeypatch.setattr(store, "events", lambda _task_id: events)
+    monkeypatch.setattr(
+        store, "task_execution_mode", lambda _task_id: ExecutionMode.live
+    )
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    ssh_command = "ssh -i /tmp/strict-ssh"
+
+    def fake_run_command(command, cwd, *, env=None, **_kwargs):
+        commands.append((command, env))
+        stdout = "tree-id\n" if command[1:2] == ["rev-parse"] else ""
+        return SimpleNamespace(ok=True, stdout=stdout)
+
+    monkeypatch.setattr(
+        daemon_module,
+        "git_environment",
+        lambda _config: {"GIT_SSH_COMMAND": ssh_command},
+    )
+    monkeypatch.setattr(daemon_module, "run_command", fake_run_command)
+
+    assert daemon._reconcile_commit_and_remote(task, config.repo_root) is None
+
+    fetch_env = next(
+        env for command, env in commands if command[:2] == ["git", "fetch"]
+    )
+    assert fetch_env == {
+        "GIT_SSH_COMMAND": ssh_command,
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert [
+        env
+        for command, env in commands
+        if command[:2] in (["git", "cat-file"], ["git", "rev-parse"], ["git", "merge-base"])
+    ] == [None, None, None]
 
 
 def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):

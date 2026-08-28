@@ -22,7 +22,7 @@ from ..agents import (
     render_worker_prompt,
 )
 from ..core.config import StewardConfig, _frozen_path_matches
-from ..core.github_auth import github_cli_environment
+from ..core.github_auth import git_environment, github_cli_environment
 from ..core.models import (
     EffectActionKind,
     ExecutionMode,
@@ -93,6 +93,12 @@ from ..core.lifecycle import (
     coarse_phase,
     require_pipeline_transition,
 )
+
+
+_NONINTERACTIVE_GIT_ENV = {
+    "GCM_INTERACTIVE": "never",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 
 def _path_policy_status_event_data(
@@ -2108,6 +2114,7 @@ class StewardExecutor:
             fetched = run_command(
                 ["git", "fetch", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
+                env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
             )
             if not fetched.ok:
                 return None
@@ -2506,7 +2513,11 @@ class StewardExecutor:
 
     def _commit_reachable(self, worktree: Path, commit: str) -> bool:
         remote = f"{self.config.git_remote}/{self.config.main_branch}"
-        fetched = run_command(["git", "fetch", self.config.git_remote, self.config.main_branch], cwd=worktree)
+        fetched = run_command(
+            ["git", "fetch", self.config.git_remote, self.config.main_branch],
+            cwd=worktree,
+            env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+        )
         if not fetched.ok:
             return False
         result = run_command(["git", "merge-base", "--is-ancestor", commit, remote], cwd=worktree)

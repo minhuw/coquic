@@ -31,6 +31,7 @@ from coquic_steward.orchestration import (
     TickResult,
     acquire_daemon_lock,
 )
+from coquic_steward.orchestration import preflight as preflight_module
 from coquic_steward.storage import TaskStore
 
 
@@ -392,7 +393,7 @@ def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
         pass
 
 def test_daemon_preflights_push_main_remote(
-    config: StewardConfig, tmp_path: Path
+    config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     remote = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True)
@@ -413,10 +414,42 @@ def test_daemon_preflights_push_main_remote(
     )
     config.ensure_dirs()
     logs: list[str] = []
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    original_run_command = preflight_module.run_command
+    ssh_command = "ssh -i /tmp/strict-ssh"
 
+    def recording_run_command(command, cwd, **kwargs):
+        commands.append((command, kwargs.get("env")))
+        return original_run_command(command, cwd, **kwargs)
+
+    monkeypatch.setattr(
+        preflight_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+    )
+    monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
     daemon = StewardDaemon(config, TaskStore.create(config.db_path), logger=logs.append)
     daemon.startup_reconcile()
 
+    expected_remote_env = {
+        "GIT_SSH_COMMAND": ssh_command,
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    remote_commands = [
+        (command, env)
+        for command, env in commands
+        if command[:2] in (["git", "fetch"], ["git", "push"])
+    ]
+    assert [env for _command, env in remote_commands] == [
+        expected_remote_env,
+        expected_remote_env,
+    ]
+    local_commands = [
+        (command, env)
+        for command, env in commands
+        if command[:2] in (["git", "rev-parse"], ["git", "rev-list"])
+        or command[1:2] == ["commit-tree"]
+    ]
+    assert all("GIT_SSH_COMMAND" not in (env or {}) for _command, env in local_commands)
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
 
 def test_daemon_preflight_rejects_divergent_local_main(

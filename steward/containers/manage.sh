@@ -83,6 +83,16 @@ validate_credentials() {
   check_host_credential "${GIT_KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}" known_hosts 'Git known-hosts'
 }
 
+git_ssh_command() {
+  local key_path="${GIT_SSH_KEY_PATH:-$home/private/credentials/git-ssh-key}"
+  local known_hosts_path="${GIT_KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}"
+  local escaped_key escaped_known_hosts
+  printf -v escaped_key '%q' "$key_path"
+  printf -v escaped_known_hosts '%q' "$known_hosts_path"
+  printf 'ssh -F /dev/null -o IdentityFile=none -i %s -o IdentityFile=%s -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=%s -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes' \
+    "$escaped_key" "$escaped_key" "$escaped_known_hosts"
+}
+
 validate_ssh_remote() {
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 && "$1" == /* ]]; then
     return 0
@@ -642,7 +652,8 @@ bootstrap() {
     [[ -z "$unexpected" ]] || die 'repository parent contains unexpected state'
     local clone_tmp="$deployment/bootstrap-repository.tmp"
     journal clone pending '' bootstrap-repository.tmp
-    git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
+    GIT_SSH_COMMAND="$(git_ssh_command)" GIT_SSH_VARIANT=ssh \
+      git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
     validate_repository "$clone_tmp"
     [[ ! -e "$repository" ]] || die 'repository appeared while bootstrap was cloning'
     mv -- "$clone_tmp" "$repository"

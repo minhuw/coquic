@@ -187,6 +187,49 @@ expect_bootstrap_refusal_without_release_mutation() {
   [[ "$before" == "$after" ]]
 }
 
+check_clone_ssh_contract() (
+  local ssh_dir="$tmp/ssh-bin" ssh_log="$tmp/ssh.args"
+  mkdir -p "$ssh_dir"
+  cat >"$ssh_dir/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$SSH_SHIM_LOG"
+exit 42
+SH
+  chmod 755 "$ssh_dir/ssh"
+  export SSH_SHIM_LOG="$ssh_log"
+  export PATH="$ssh_dir:$PATH"
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'
+  export GIT_SSH_COMMAND='ssh -i /ambient-key -o UserKnownHostsFile=/ambient-known-hosts'
+  export SSH_AUTH_SOCK="$tmp/ambient-agent"
+  unset GIT_SSH
+  if "$manage" bootstrap >"$tmp/clone.output" 2>&1; then
+    cat "$tmp/clone.output" >&2
+    printf 'expected intercepted clone to fail\n' >&2
+    exit 1
+  fi
+  [[ -s "$ssh_log" ]]
+  [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
+  for argument in \
+    -F /dev/null \
+    IdentityFile=none \
+    -i "$GIT_SSH_KEY_PATH" \
+    "IdentityFile=$GIT_SSH_KEY_PATH" \
+    IdentitiesOnly=yes \
+    IdentityAgent=none \
+    "UserKnownHostsFile=$GIT_KNOWN_HOSTS_PATH" \
+    GlobalKnownHostsFile=/dev/null \
+    StrictHostKeyChecking=yes \
+    BatchMode=yes; do
+    grep -Fqx -- "$argument" "$ssh_log"
+  done
+  ! grep -Fqx -- /ambient-key "$ssh_log"
+  ! grep -Fqx -- UserKnownHostsFile=/ambient-known-hosts "$ssh_log"
+  rm -rf "$home/private/deployment/bootstrap-repository.tmp"
+  printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
+  chmod 600 "$home/private/deployment/operation.journal"
+)
+
 expect_build_source_refusal() {
   local label="$1" expected="$2" output before after
   before="$(release_snapshot)"
@@ -430,6 +473,7 @@ PY
     check_build_source_contract
     unset STEWARD_MANAGE_FAKE
     expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
+    check_clone_ssh_contract
     export STEWARD_MANAGE_FAKE=1
     check_credential_refusals
     unset COQUIC_REMOTE_URL

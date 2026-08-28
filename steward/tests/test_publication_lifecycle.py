@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from coquic_steward.agents.invocation import InvocationOutcome
-from coquic_steward.core.config import StewardPublicationConfig
 from coquic_steward.core.models import EffectActionKind
 import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import StewardExecutor
@@ -35,6 +34,7 @@ from coquic_steward.publication.publisher import (
 )
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.storage import TaskStore
+from publication_harness import enabled_publication_config as _enabled_publication_config
 from publication_harness import enqueue_publication as _enqueue_publication
 
 
@@ -82,33 +82,6 @@ class _Worktrees:
         if self.removed:
             raise RuntimeError("integration worktree removed")
         return "patch"
-
-def _publication_config(tmp_path: Path, credential: str) -> StewardPublicationConfig:
-    paths = []
-    for name, value in (
-        ("d1-token", credential),
-        ("r2-access-key", "configured-access-key-value"),
-        ("r2-secret-key", "configured-secret-key-value"),
-    ):
-        path = tmp_path / name
-        path.write_text(value + "\n", encoding="utf-8")
-        path.chmod(0o600)
-        paths.append(path)
-    staging = tmp_path / "publication-staging"
-    staging.mkdir(mode=0o700)
-    return StewardPublicationConfig(
-        enabled=True,
-        account_id="a" * 32,
-        d1_database_id="00000000-0000-4000-8000-000000000000",
-        d1_token_path=paths[0],
-        r2_endpoint="https://example.r2.cloudflarestorage.com",
-        r2_access_key_id_path=paths[1],
-        r2_secret_access_key_path=paths[2],
-        public_bucket="publication-public",
-        private_bucket="publication-private",
-        public_base_url="https://publication.example.test",
-        staging_root=staging,
-    )
 
 def _publication_graph(title: str) -> dict[str, object]:
     task_id = "task-publication-preflight"
@@ -308,7 +281,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
     from coquic_steward.publication.generation import compose_publication_generation
 
     credential = "synthetic-credential-value"
-    config = _publication_config(tmp_path, credential)
+    config = _enabled_publication_config(tmp_path, credential)
     graph = _publication_graph("terminal-credential")
     graph["task"]["lifecycleState"] = "completed"
     graph["task"]["completedAt"] = "2026-07-28T12:00:01Z"
@@ -405,7 +378,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     from coquic_steward.publication.generation import compose_publication_generation
 
     credential = "synthetic-worker-credential"
-    config = _publication_config(tmp_path, credential)
+    config = _enabled_publication_config(tmp_path, credential)
     graph = _publication_graph("worker-credential")
     graph["runs"][0].documents["codex.jsonl"] = graph["runs"][0].documents[
         "codex.jsonl"
@@ -517,7 +490,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     tmp_path: Path, older_reason: str
 ) -> None:
     credential = "synthetic-restart-ordering-credential"
-    config = _publication_config(tmp_path, credential)
+    config = _enabled_publication_config(tmp_path, credential)
     base_graph = _publication_graph("restart-ordering")
 
     def rewrite(value: object, replacements: dict[str, str]) -> object:
@@ -695,7 +668,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
     tmp_path: Path,
 ) -> None:
     credential = "synthetic-restart-provider-credential"
-    config = _publication_config(tmp_path, credential)
+    config = _enabled_publication_config(tmp_path, credential)
     base_graph = _publication_graph("restart-provider-ordering")
 
     def rewrite(value: object, replacements: dict[str, str]) -> object:

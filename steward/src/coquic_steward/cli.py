@@ -651,12 +651,54 @@ def daemon(
         with acquire_daemon_lock(config):
             daemon_ = StewardDaemon(config, store, logger=typer.echo)
             if once:
-                daemon_.startup_reconcile()
-                result: TickResult = daemon_.tick(
-                    plan=not no_plan,
-                    dispatch=not no_dispatch,
-                    max_dispatch=max_dispatch,
-                )
+                result: TickResult | None = None
+                primary_error: BaseException | None = None
+                shutdown_result: ShutdownResult | None = None
+                shutdown_error: BaseException | None = None
+                try:
+                    daemon_.startup_reconcile()
+                    result = daemon_.tick(
+                        plan=not no_plan,
+                        dispatch=not no_dispatch,
+                        max_dispatch=max_dispatch,
+                    )
+                except BaseException as exc:
+                    primary_error = exc
+                finally:
+                    try:
+                        shutdown_result = daemon_.shutdown()
+                    except BaseException as exc:
+                        shutdown_error = exc
+                        typer.echo(
+                            "Steward daemon shutdown incomplete; owned containers may still be running.",
+                            err=True,
+                        )
+                    else:
+                        if shutdown_result.state.value != "stopped":
+                            typer.echo(
+                                "Steward daemon shutdown incomplete; owned containers may still be running.",
+                                err=True,
+                            )
+
+                if (
+                    shutdown_error is None
+                    and shutdown_result is not None
+                    and shutdown_result.state.value == "stopped"
+                ):
+                    try:
+                        store._finalize_exact_store()
+                    except BaseException as exc:
+                        if primary_error is None:
+                            raise typer.Exit(1) from exc
+
+                if primary_error is not None:
+                    raise primary_error
+                if shutdown_error is not None:
+                    raise typer.Exit(1) from shutdown_error
+                assert shutdown_result is not None
+                if shutdown_result.state.value != "stopped":
+                    raise typer.Exit(1)
+                assert result is not None
                 typer.echo(result)
             else:
                 _run_until_stopped(daemon_)

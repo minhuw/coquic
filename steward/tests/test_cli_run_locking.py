@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
-from coquic_steward.cli import app, run as run_cli_command
+from coquic_steward.cli import app, daemon as daemon_cli_command, run as run_cli_command
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.lifecycle import ShutdownResult
 from coquic_steward.core.models import DaemonLifecycleState
@@ -24,6 +26,7 @@ from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
     StewardPreflightError,
+    TickResult,
     acquire_daemon_lock,
 )
 from coquic_steward.storage import TaskStore
@@ -48,6 +51,33 @@ def _task_context(repo, monkeypatch):
 def _invoke_run(repo, monkeypatch, task_id: str):
     monkeypatch.chdir(repo)
     return CliRunner().invoke(app, ["run", task_id])
+
+
+def _invoke_cli_process(repo: Path, home: Path, *args: str):
+    code = """
+import sys
+from typer.testing import CliRunner
+from coquic_steward.cli import app
+from coquic_steward.core.config import load_config
+from coquic_steward.storage import TaskStore
+
+result = CliRunner().invoke(app, sys.argv[1:])
+print(result.output, end="")
+if result.exit_code:
+    raise SystemExit(result.exit_code)
+state = TaskStore.open(load_config().db_path).get_daemon_state()
+assert state is not None and state["lifecycle"] == "stopped", state
+"""
+    env = os.environ.copy()
+    env["COQUIC_HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, "-c", code, *args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _assert_lock_held(config) -> None:
@@ -479,6 +509,144 @@ def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "TickResult" in result.output
+
+
+def test_cli_daemon_once_reopens_exact_store_in_new_process(
+    repo: Path, coquic_home: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(repo)
+    coquic_home.mkdir(parents=True, exist_ok=True)
+    (coquic_home / "steward.toml").write_text(
+        "[steward]\ndry_run = true\n\n[steward.signals]\nenabled = []\n",
+        encoding="utf-8",
+    )
+    config = load_config()
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
+
+    daemon = _invoke_cli_process(
+        repo,
+        coquic_home,
+        "daemon",
+        "--once",
+        "--no-plan",
+        "--no-dispatch",
+    )
+    assert daemon.returncode == 0, daemon.stderr
+    assert "TickResult" in daemon.stdout
+
+    status = _invoke_cli_process(repo, coquic_home, "status")
+    assert status.returncode == 0, status.stderr
+
+    audit = _invoke_cli_process(repo, coquic_home, "audit-invariants")
+    assert audit.returncode == 0, audit.stderr
+    assert audit.stdout.strip() == "ok"
+
+
+def test_cli_daemon_once_skips_finalization_when_shutdown_incomplete(
+    repo: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(repo)
+    config = load_config()
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
+    events: list[str] = []
+    finalizer_calls: list[object] = []
+
+    class FakeDaemon(StewardDaemon):
+        def __init__(self, _config, _store, **_kwargs):
+            events.append("construct")
+            _assert_lock_held(config)
+
+        def startup_reconcile(self) -> None:
+            events.append("reconcile")
+            _assert_lock_held(config)
+
+        def tick(self, **_kwargs):
+            events.append("tick")
+            _assert_lock_held(config)
+            return TickResult()
+
+        def shutdown(self):
+            events.append("shutdown")
+            _assert_lock_held(config)
+            return ShutdownResult(state=DaemonLifecycleState.stopping)
+
+    def fail_if_finalized(_store):
+        finalizer_calls.append(_store)
+        pytest.fail("incomplete shutdown must not finalize the Store")
+
+    monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
+    monkeypatch.setattr(TaskStore, "_finalize_exact_store", fail_if_finalized)
+    result = CliRunner().invoke(
+        app, ["daemon", "--once", "--no-plan", "--no-dispatch"]
+    )
+
+    assert result.exit_code == 1
+    assert "Steward daemon shutdown incomplete; owned containers may still be running." in result.output
+    assert "TickResult" not in result.output
+    assert events == ["construct", "reconcile", "tick", "shutdown"]
+    assert finalizer_calls == []
+    with acquire_daemon_lock(config):
+        pass
+
+
+@pytest.mark.parametrize("failure_stage", ["startup", "tick"])
+def test_cli_daemon_once_preserves_cycle_error_after_cleanup_failure(
+    repo: Path, monkeypatch, failure_stage: str
+) -> None:
+    monkeypatch.chdir(repo)
+    config = load_config()
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
+    events: list[str] = []
+
+    class FakeDaemon(StewardDaemon):
+        def __init__(self, _config, _store, **_kwargs):
+            events.append("construct")
+            _assert_lock_held(config)
+
+        def startup_reconcile(self) -> None:
+            events.append("startup")
+            _assert_lock_held(config)
+            if failure_stage == "startup":
+                raise RuntimeError("startup failed")
+
+        def tick(self, **_kwargs):
+            events.append("tick")
+            _assert_lock_held(config)
+            if failure_stage == "tick":
+                raise RuntimeError("tick failed")
+            return TickResult()
+
+        def shutdown(self):
+            events.append("shutdown")
+            _assert_lock_held(config)
+            return ShutdownResult()
+
+    def fail_finalize(_store):
+        events.append("finalize")
+        raise RuntimeError("finalization failed")
+
+    monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
+    monkeypatch.setattr(TaskStore, "_finalize_exact_store", fail_finalize)
+
+    with pytest.raises(RuntimeError, match=failure_stage):
+        daemon_cli_command(
+            once=True,
+            no_plan=True,
+            no_dispatch=True,
+            max_dispatch=None,
+        )
+
+    expected_events = ["construct", "startup"]
+    if failure_stage == "tick":
+        expected_events.append("tick")
+    expected_events.extend(["shutdown", "finalize"])
+    assert events == expected_events
+    with acquire_daemon_lock(config):
+        pass
+
 
 def test_cli_daemon_exits_when_push_preflight_fails(
     repo: Path, coquic_home: Path, monkeypatch

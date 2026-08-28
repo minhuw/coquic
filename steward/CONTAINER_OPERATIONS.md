@@ -10,9 +10,12 @@ credentials, initializes SQLite, or contacts a receiver.
 ## Authority and private paths
 
 Set one absolute `COQUIC_HOME` on the host and in the daemon. The only clone is
-`$COQUIC_HOME/repository/`. Bootstrap refuses a dirty, detached, wrong-remote,
-wrong-branch, non-fast-forward, interactive, or ambiguous checkout and never
-resets an existing clone or uses a human checkout.
+`$COQUIC_HOME/repository/`. Production remotes must be credential-free
+SCP-style or `ssh://` URLs; HTTPS, other transports, and embedded passwords are
+refused. Bootstrap refuses a dirty, detached, wrong-remote, wrong-branch,
+non-fast-forward, interactive, or ambiguous checkout and never resets an
+existing clone or uses a human checkout. Local-path remotes are retained only
+by `STEWARD_MANAGE_FAKE=1` test fixtures.
 
 The trusted daemon is the only service with Docker authority and the full
 private home. Compose mounts the local Unix socket and these host files as
@@ -21,7 +24,8 @@ individual read-only files:
 | Host path | Compose target | Purpose |
 | --- | --- | --- |
 | `$COQUIC_HOME/private/credentials/codex-api` | `/run/secrets/codex-api-key` | provider credential delivered at a run boundary |
-| `$COQUIC_HOME/private/credentials/github` | `/run/secrets/github-identity` | integration identity |
+| `$COQUIC_HOME/private/credentials/github-token` | `/run/secrets/github-token` | GitHub API token |
+| `$COQUIC_HOME/private/credentials/git-ssh-key` | `/run/secrets/git-ssh-key` | Git SSH key |
 | `$COQUIC_HOME/private/credentials/d1-read-token` | `/run/secrets/d1-read-token` | Steward D1 publication token |
 | `$COQUIC_HOME/private/credentials/r2-access-key-id` | `/run/secrets/r2-access-key-id` | public R2 access-key ID |
 | `$COQUIC_HOME/private/credentials/r2-secret-access-key` | `/run/secrets/r2-secret-access-key` | public R2 secret access key |
@@ -136,7 +140,9 @@ or applies an unreviewed provider change.
    expected_branch = "main"
    compose_project = "coquic-steward"
    codex_credential_path = "/run/secrets/codex-api-key"
-   github_credential_path = "/run/secrets/github-identity"
+   github_token_path = "/run/secrets/github-token"
+   git_ssh_key_path = "/run/secrets/git-ssh-key"
+   git_known_hosts_path = "/etc/coquic-steward/known_hosts"
    # Compose supplies release_id, daemon_image_id, task_image_id, and
    # validation_image_id from STEWARD_RELEASE_ID and the three immutable
    # STEWARD_*_IMAGE values; do not replace them with mutable image tags.
@@ -171,7 +177,7 @@ or applies an unreviewed provider change.
 
    Replace the example host prefix in `staging_root` when `COQUIC_HOME` is
    different, and create that real, non-symlink directory with mode `0700`
-   before config validation. The three credential paths above are
+   before config validation. The credential paths in this override are
    daemon-container targets, not host paths; their host sources remain the
    individual files listed in the credential table. Do not put any credential
    value in this TOML file.

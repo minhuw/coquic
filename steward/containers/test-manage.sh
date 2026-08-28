@@ -27,7 +27,7 @@ git -C "$seed" commit -qm seed
 git -C "$seed" remote add origin "$remote"
 git -C "$seed" push -q origin main
 
-for file in codex-api github d1-read-token r2-access-key-id r2-secret-access-key known_hosts; do
+for file in codex-api github-token git-ssh-key d1-read-token r2-access-key-id r2-secret-access-key known_hosts; do
   printf 'synthetic-%s-credential-value\n' "$file" >"$home/private/credentials/$file"
   chmod 600 "$home/private/credentials/$file"
 done
@@ -41,11 +41,12 @@ export STEWARD_EXPECTED_REMOTE=origin
 export STEWARD_EXPECTED_BRANCH=main
 export DOCKER_SOCKET="$tmp/docker.sock"
 export CODEX_API_KEY_PATH="$home/private/credentials/codex-api"
-export GITHUB_IDENTITY_PATH="$home/private/credentials/github"
+export GITHUB_TOKEN_PATH="$home/private/credentials/github-token"
+export GIT_SSH_KEY_PATH="$home/private/credentials/git-ssh-key"
 export D1_TOKEN_PATH="$home/private/credentials/d1-read-token"
 export R2_ACCESS_KEY_ID_PATH="$home/private/credentials/r2-access-key-id"
 export R2_SECRET_ACCESS_KEY_PATH="$home/private/credentials/r2-secret-access-key"
-export KNOWN_HOSTS_PATH="$home/private/credentials/known_hosts"
+export GIT_KNOWN_HOSTS_PATH="$home/private/credentials/known_hosts"
 export STEWARD_UID="$(id -u)"
 export STEWARD_GID="$(id -g)"
 export STEWARD_DOCKER_GID="$(id -g)"
@@ -297,7 +298,8 @@ case "$mode" in
     rendered="$(docker compose --project-name "$STEWARD_COMPOSE_PROJECT" --file "$script_dir/compose.yml" config --format json)"
     RENDERED_COMPOSE="$rendered" D1_SOURCE="$D1_TOKEN_PATH" R2_ID_SOURCE="$R2_ACCESS_KEY_ID_PATH" \
       R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" CODEX_SOURCE="$CODEX_API_KEY_PATH" \
-      GITHUB_SOURCE="$GITHUB_IDENTITY_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
+      GITHUB_SOURCE="$GITHUB_TOKEN_PATH" SSH_KEY_SOURCE="$GIT_SSH_KEY_PATH" \
+      KNOWN_HOSTS_SOURCE="$GIT_KNOWN_HOSTS_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
 import json, os, sys
 value = json.loads(os.environ["RENDERED_COMPOSE"])
 service = value["services"]["steward"]
@@ -311,14 +313,18 @@ assert {
     (item["source"], item["target"]) for item in service["secrets"]
 } == {
     ("codex_api_key", "/run/secrets/codex-api-key"),
-    ("github_identity", "/run/secrets/github-identity"),
+    ("github_token", "/run/secrets/github-token"),
+    ("git_ssh_key", "/run/secrets/git-ssh-key"),
     ("d1_token", "/run/secrets/d1-read-token"),
     ("r2_access_key_id", "/run/secrets/r2-access-key-id"),
     ("r2_secret_access_key", "/run/secrets/r2-secret-access-key"),
 }
 sources = value["secrets"]
 assert sources["codex_api_key"]["file"] == os.environ["CODEX_SOURCE"]
-assert sources["github_identity"]["file"] == os.environ["GITHUB_SOURCE"]
+assert sources["github_token"]["file"] == os.environ["GITHUB_SOURCE"]
+assert sources["git_ssh_key"]["file"] == os.environ["SSH_KEY_SOURCE"]
+assert service["volumes"][-1]["source"] == os.environ["KNOWN_HOSTS_SOURCE"]
+assert service["volumes"][-1]["target"] == "/etc/coquic-steward/known_hosts"
 assert sources["d1_token"]["file"] == os.environ["D1_SOURCE"]
 assert sources["r2_access_key_id"]["file"] == os.environ["R2_ID_SOURCE"]
 assert sources["r2_secret_access_key"]["file"] == os.environ["R2_SECRET_SOURCE"]
@@ -331,6 +337,9 @@ assert not any(
 PY
     ;;
   --bootstrap)
+    unset STEWARD_MANAGE_FAKE
+    expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
+    export STEWARD_MANAGE_FAKE=1
     check_credential_refusals
     mkdir -p "$home/private/deployment/bootstrap-repository.tmp"
     printf 'foreign\n' >"$home/private/deployment/bootstrap-repository.tmp/marker"
@@ -350,6 +359,16 @@ assert value["daemonImage"].startswith("sha256:")
 assert value["taskImage"].startswith("sha256:")
 PY
     "$manage" bootstrap >/dev/null
+    for remote_url in \
+      'https://github.com/minhuw/coquic.git' \
+      'ssh://git:password@github.com/minhuw/coquic.git' \
+      'git:password@github.com:minhuw/coquic.git'; do
+      git -C "$home/repository" remote set-url origin "$remote_url"
+      unset STEWARD_MANAGE_FAKE
+      expect_bootstrap_refusal "remote $remote_url" 'credential-free SSH'
+      export STEWARD_MANAGE_FAKE=1
+      git -C "$home/repository" remote set-url origin "$remote"
+    done
     second="$(cat "$home/private/deployment/current")"
     [[ "$first" == "$second" && -d "$home/repository/.git" && ! -e "$home/steward.sqlite" ]]
     cp "$home/private/deployment/operation.journal" "$tmp/journal.before"

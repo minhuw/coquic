@@ -68,13 +68,71 @@ check_private_file() {
   fi
 }
 
+check_host_credential() {
+  local path="$1" name="$2" label="$3"
+  [[ "$path" == "$home/private/credentials/$name" ]] || die "$label path must use the canonical host source"
+  check_private_file "$path" "$label"
+}
+
 validate_credentials() {
   check_private_file "${CODEX_API_KEY_PATH:-$home/private/credentials/codex-api}" 'Codex API credential'
-  check_private_file "${GITHUB_IDENTITY_PATH:-$home/private/credentials/github}" 'GitHub integration identity'
+  check_host_credential "${GITHUB_TOKEN_PATH:-$home/private/credentials/github-token}" github-token 'GitHub API token'
+  check_host_credential "${GIT_SSH_KEY_PATH:-$home/private/credentials/git-ssh-key}" git-ssh-key 'Git SSH key'
   check_private_file "${D1_TOKEN_PATH:-$home/private/credentials/d1-read-token}" 'D1 publication token'
   check_private_file "${R2_ACCESS_KEY_ID_PATH:-$home/private/credentials/r2-access-key-id}" 'R2 access-key ID'
   check_private_file "${R2_SECRET_ACCESS_KEY_PATH:-$home/private/credentials/r2-secret-access-key}" 'R2 secret access key'
-  check_private_file "${KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}" 'known-hosts'
+  check_host_credential "${GIT_KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}" known_hosts 'Git known-hosts'
+}
+
+validate_ssh_remote() {
+  if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 && "$1" == /* ]]; then
+    return 0
+  fi
+  python - "$1" <<'PY' || die 'configured Git remote must be credential-free SSH'
+import re
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+if not value or any(character.isspace() or ord(character) < 0x20 for character in value):
+    raise SystemExit(1)
+if "://" in value:
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        raise SystemExit(1)
+    user = parsed.username
+    if (
+        parsed.scheme.lower() != "ssh"
+        or not hostname
+        or hostname.startswith("-")
+        or re.fullmatch(r"^(?:[A-Za-z0-9.-]+|[0-9A-Fa-f:.]+)$", hostname) is None
+        or (user is not None and (re.fullmatch(r"[A-Za-z0-9._-]+", user) is None or user.startswith("-")))
+        or not parsed.path
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or "%" in parsed.netloc
+    ):
+        raise SystemExit(1)
+else:
+    scp = re.compile(
+        r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[^\s\x00-\x1f]+)$"
+    )
+    credentials = re.compile(
+        r"@(?:localhost|(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+):"
+    )
+    match = scp.fullmatch(value)
+    if (
+        match is None
+        or match.group("host").startswith("-")
+        or (match.group("user") is not None and match.group("user").startswith("-"))
+        or credentials.search(match.group("path")) is not None
+    ):
+        raise SystemExit(1)
+PY
 }
 
 validate_compose_static() {
@@ -520,6 +578,7 @@ validate_repository() {
   branch="${STEWARD_EXPECTED_BRANCH:-main}"
   actual_url="$(git -C "$repository_path" config --get "remote.$remote.url" || true)"
   [[ -n "$actual_url" ]] || die 'expected Git remote is missing'
+  validate_ssh_remote "$actual_url"
   expected_url="${COQUIC_REMOTE_URL:-}"
   if [[ -n "$expected_url" && "$actual_url" != "$expected_url" ]]; then
     die 'canonical repository remote does not match the configured remote'
@@ -561,6 +620,7 @@ bootstrap() {
   mkdir -p -m 700 "$home" "$home/private" "$home/private/runtime" "$home/private/codex-sessions" "$home/private/credentials" "$home/private/deployment" "$home/worktrees" "$home/tasks" "$home/control-loop"
   [[ ! -e "$repository" ]] && {
     [[ -n "${COQUIC_REMOTE_URL:-}" ]] || die 'COQUIC_REMOTE_URL is required for a fresh clone'
+    validate_ssh_remote "$COQUIC_REMOTE_URL"
     [[ -d "$(dirname "$repository")" ]] || die 'repository parent is missing'
     local unexpected
     unexpected="$(find "$home" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | while read -r entry; do case "$entry" in private|worktrees|tasks|control-loop) ;; *) printf '%s\n' "$entry" ;; esac; done | head -n 1)"
@@ -630,7 +690,7 @@ init_service() {
   printf 'init complete release=%s store=verified\n' "$release"
 }
 
-start_service() { require_paths; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; validate_store; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
+start_service() { require_paths; validate_credentials; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; validate_store; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
 stop_service() { require_paths; validate_socket; with_lock; journal stop; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then rm -f "$deployment/service.running"; else compose_run stop --timeout "${STEWARD_STOP_GRACE:-45}" steward >/dev/null; fi; journal complete success; record_outcome stop success; }
 
 status_service() {
@@ -698,7 +758,7 @@ require_quiescence() {
 }
 
 upgrade_service() {
-  require_paths; require_numeric_config; validate_socket; with_lock
+  require_paths; require_numeric_config; validate_credentials; validate_socket; with_lock
   local force=0 arg
   for arg in "$@"; do [[ "$arg" == --force ]] && force=1 || die 'upgrade accepts only --force'; done
   [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'
@@ -735,7 +795,7 @@ upgrade_service() {
 }
 
 rollback_service() {
-  require_paths; require_numeric_config; validate_socket; with_lock
+  require_paths; require_numeric_config; validate_credentials; validate_socket; with_lock
   [[ -f "$deployment/previous" ]] || die 'no previous verified release is recorded'
   local previous current before_previous
   previous="$(selector_value previous)"

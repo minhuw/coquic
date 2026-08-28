@@ -60,20 +60,40 @@ services:
         target: /etc/coquic-steward/steward.toml
         read_only: true
       - type: bind
-        source: ${KNOWN_HOSTS_PATH:?}
+        source: ${GIT_KNOWN_HOSTS_PATH:?}
         target: /etc/coquic-steward/known_hosts
         read_only: true
     secrets:
       - source: codex_api_key
         target: /run/secrets/codex-api-key
-      - source: github_identity
-        target: /run/secrets/github-identity
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
+      - source: github_token
+        target: /run/secrets/github-token
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
+      - source: git_ssh_key
+        target: /run/secrets/git-ssh-key
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
       - source: d1_token
         target: /run/secrets/d1-read-token
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
       - source: r2_access_key_id
         target: /run/secrets/r2-access-key-id
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
       - source: r2_secret_access_key
         target: /run/secrets/r2-secret-access-key
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
     healthcheck:
       test: ["CMD", "/usr/bin/env", "coquic-steward", "health"]
       interval: 30s
@@ -84,8 +104,10 @@ services:
 secrets:
   codex_api_key:
     file: ${CODEX_API_KEY_PATH:?}
-  github_identity:
-    file: ${GITHUB_IDENTITY_PATH:?}
+  github_token:
+    file: ${GITHUB_TOKEN_PATH:?}
+  git_ssh_key:
+    file: ${GIT_SSH_KEY_PATH:?}
   d1_token:
     file: ${D1_TOKEN_PATH:?}
   r2_access_key_id:

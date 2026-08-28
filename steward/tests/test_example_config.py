@@ -337,6 +337,7 @@ def test_config_rejects_removed_container_keys(
         "main_branch",
         "codex_api_key_path",
         "github_identity_path",
+        "github_credential_path",
         "task_concurrency",
         "max_active_tasks",
         "unknown_deployment_key",
@@ -353,6 +354,32 @@ def test_config_rejects_removed_deployment_keys(
     )
 
     with pytest.raises(ValueError, match=rf"unsupported keys: {removed_deployment_key}"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+@pytest.mark.parametrize(
+    "missing_path",
+    ("github_token_path", "git_ssh_key_path", "git_known_hosts_path"),
+)
+def test_enabled_deployment_requires_split_credential_paths(
+    repo: Path, tmp_path: Path, missing_path: str
+) -> None:
+    paths = {
+        "github_token_path": "/run/secrets/github-token",
+        "git_ssh_key_path": "/run/secrets/git-ssh-key",
+        "git_known_hosts_path": "/etc/coquic-steward/known_hosts",
+    }
+    paths.pop(missing_path)
+    config_path = tmp_path / "missing-deployment-credential.toml"
+    config_path.write_text(
+        "[steward.deployment]\n"
+        "enabled = true\n"
+        + "\n".join(f'{key} = "{value}"' for key, value in paths.items())
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=missing_path):
         load_config(repo_root=repo, config_path=config_path)
 
 
@@ -407,6 +434,9 @@ codex_api_key_path = "/run/secrets/codex-api"
 enabled = {str(deployment_enabled).lower()}
 home = {str(home)!r}
 repository = {str(canonical)!r}
+github_token_path = "/run/secrets/github-token"
+git_ssh_key_path = "/run/secrets/git-ssh-key"
+git_known_hosts_path = "/etc/coquic-steward/known_hosts"
 min_free_bytes = 100
 recovery_free_bytes = 200
 max_owned_docker_bytes = 1000

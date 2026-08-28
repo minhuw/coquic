@@ -131,7 +131,9 @@ _DEPLOYMENT_ALLOWED_KEYS = frozenset(
         "expected_branch",
         "compose_project",
         "codex_credential_path",
-        "github_credential_path",
+        "github_token_path",
+        "git_ssh_key_path",
+        "git_known_hosts_path",
         "release_id",
         "daemon_image",
         "daemon_image_id",
@@ -162,6 +164,11 @@ _LIMITS_ALLOWED_KEYS = frozenset(
     }
 )
 _TELEMETRY_ALLOWED_KEYS = frozenset({"billing_mode"})
+_DEPLOYMENT_CREDENTIAL_TARGETS = {
+    "github_token_path": Path("/run/secrets/github-token"),
+    "git_ssh_key_path": Path("/run/secrets/git-ssh-key"),
+    "git_known_hosts_path": Path("/etc/coquic-steward/known_hosts"),
+}
 
 
 def _require_allowed_keys(
@@ -524,7 +531,9 @@ class StewardDeploymentConfig:
     expected_branch: str = "main"
     compose_project: str = "coquic-steward"
     codex_credential_path: Path | None = None
-    github_credential_path: Path | None = None
+    github_token_path: Path | None = None
+    git_ssh_key_path: Path | None = None
+    git_known_hosts_path: Path | None = None
     release_id: str | None = None
     daemon_image: str = "coquic-steward-daemon"
     daemon_image_id: str | None = None
@@ -546,7 +555,14 @@ class StewardDeploymentConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("deployment.enabled must be a boolean")
-        for name in ("home", "repository", "codex_credential_path", "github_credential_path"):
+        for name in (
+            "home",
+            "repository",
+            "codex_credential_path",
+            "github_token_path",
+            "git_ssh_key_path",
+            "git_known_hosts_path",
+        ):
             value = getattr(self, name)
             if value is not None:
                 path = _absolute_path(value, f"deployment.{name}")
@@ -862,8 +878,16 @@ class StewardConfig:
         return self.deployment.codex_credential_path
 
     @property
-    def github_credential_path(self) -> Path | None:
-        return self.deployment.github_credential_path
+    def github_token_path(self) -> Path | None:
+        return self.deployment.github_token_path
+
+    @property
+    def git_ssh_key_path(self) -> Path | None:
+        return self.deployment.git_ssh_key_path
+
+    @property
+    def git_known_hosts_path(self) -> Path | None:
+        return self.deployment.git_known_hosts_path
 
     @property
     def host_uid(self) -> int | None:
@@ -1186,7 +1210,18 @@ def _container_config(raw: object, root: Path) -> StewardContainerConfig:
 
 def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
     data = _require_allowed_keys("steward.deployment", raw, _DEPLOYMENT_ALLOWED_KEYS)
-    enabled = bool(data.get("enabled", False))
+    enabled = _strict_bool(data.get("enabled", False), "deployment.enabled")
+    if enabled:
+        missing = [
+            name for name in _DEPLOYMENT_CREDENTIAL_TARGETS
+            if data.get(name) in (None, "")
+        ]
+        if missing:
+            raise ValueError("enabled deployment requires " + ", ".join(missing))
+        for name, target in _DEPLOYMENT_CREDENTIAL_TARGETS.items():
+            configured = Path(str(data[name])).expanduser()
+            if configured != target:
+                raise ValueError(f"deployment.{name} must use {target}")
     home_value = data.get("home")
     if home_value is None and enabled:
         home_value = os.getenv("COQUIC_HOME")
@@ -1210,9 +1245,19 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
             if data.get("codex_credential_path") is not None
             else None
         ),
-        github_credential_path=(
-            Path(data["github_credential_path"]).expanduser()
-            if data.get("github_credential_path") is not None
+        github_token_path=(
+            Path(data["github_token_path"]).expanduser()
+            if data.get("github_token_path") is not None
+            else None
+        ),
+        git_ssh_key_path=(
+            Path(data["git_ssh_key_path"]).expanduser()
+            if data.get("git_ssh_key_path") is not None
+            else None
+        ),
+        git_known_hosts_path=(
+            Path(data["git_known_hosts_path"]).expanduser()
+            if data.get("git_known_hosts_path") is not None
             else None
         ),
         release_id=(

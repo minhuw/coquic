@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import StewardConfig
+from ..core.github_auth import validate_ssh_remote
 from ..core.subprocesses import CommandResult, run_command
 from ..control_loop import ArchiveError, ControlLoopArchive
 
@@ -154,16 +155,43 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
         raise StewardPreflightError("preflight failed: daemon lacks configured Docker socket group")
     credentials = (
         (deployment.codex_credential_path, "Codex API credential"),
-        (deployment.github_credential_path, "GitHub integration identity"),
+        (deployment.github_token_path, "GitHub API token"),
+        (deployment.git_ssh_key_path, "Git SSH key"),
+        (deployment.git_known_hosts_path, "Git known-hosts"),
     )
     for path, label in credentials:
         _check_secret_file(path, label)
         assert path is not None
         if deployment.host_uid is not None and path.lstat().st_uid != deployment.host_uid:
             raise StewardPreflightError(f"preflight failed: {label} owner is mismatched")
-    remote = run_command(["git", "config", "--get", f"remote.{deployment.expected_remote}.url"], cwd=repository)
-    if not remote.ok or remote.stdout.strip() == "":
-        raise StewardPreflightError("preflight failed: expected Git remote is unavailable")
+    remote_names = tuple(
+        dict.fromkeys((deployment.expected_remote, config.git_remote))
+    )
+    for remote_name in remote_names:
+        remote = run_command(
+            ["git", "config", "--get", f"remote.{remote_name}.url"],
+            cwd=repository,
+        )
+        if not remote.ok or remote.stdout.strip() == "":
+            label = (
+                "expected Git remote"
+                if remote_name == deployment.expected_remote
+                else "configured Git remote"
+            )
+            raise StewardPreflightError(
+                f"preflight failed: {label} is unavailable"
+            )
+        try:
+            validate_ssh_remote(remote.stdout.strip())
+        except ValueError as exc:
+            label = (
+                "expected Git remote"
+                if remote_name == deployment.expected_remote
+                else "configured Git remote"
+            )
+            raise StewardPreflightError(
+                f"preflight failed: {label} must be credential-free SSH"
+            ) from exc
     branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repository)
     if not branch.ok or branch.stdout.strip() != deployment.expected_branch:
         raise StewardPreflightError("preflight failed: repository is detached or on the wrong branch")

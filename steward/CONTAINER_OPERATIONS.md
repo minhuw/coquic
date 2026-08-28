@@ -94,6 +94,20 @@ paths and limits, not credential values. Before bootstrap or start, the daemon
 configuration must enable publication and point its credential fields at the
 daemon's secret mounts. Steward and Site use the same persistent D1 identity.
 
+Set these exact, non-secret source-identity values in that private environment
+before bootstrap:
+
+```sh
+COQUIC_REMOTE_URL=git@github.com:minhuw/coquic.git
+STEWARD_EXPECTED_REMOTE=origin
+STEWARD_EXPECTED_BRANCH=main
+```
+
+The SSH URL contains no password, token, or other credential; Git
+authentication comes from the mounted daemon-owned SSH key. An existing
+`$COQUIC_HOME/repository/` checkout must use `origin` at this exact URL and
+branch `main`; any remote string mismatch is refused.
+
 The Cloudflare operator reviews the read-only preview, which retains the
 accepted plan privately, and then runs
 `infra/cloudflare/scripts/deploy-production.sh --apply` to consume exactly that

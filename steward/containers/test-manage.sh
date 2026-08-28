@@ -82,6 +82,35 @@ expect_bootstrap_refusal() {
   [[ "$output" != *"$credential_canary"* ]]
 }
 
+check_environment_template() {
+  python - "$script_dir/.env.example" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+assignments = {}
+for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    name, separator, value = line.partition("=")
+    assert separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+    assert name not in assignments and value
+    assignments[name] = value
+
+expected = {
+    "COQUIC_REMOTE_URL": "git@github.com:minhuw/coquic.git",
+    "STEWARD_EXPECTED_REMOTE": "origin",
+    "STEWARD_EXPECTED_BRANCH": "main",
+}
+assert all(assignments.get(name) == value for name, value in expected.items())
+remote = assignments["COQUIC_REMOTE_URL"]
+assert re.fullmatch(r"git@[A-Za-z0-9.-]+:[^?#\s]+", remote)
+assert not re.search(r"://[^/?#]*:[^/?#@]+@", remote)
+assert not any(marker in remote for marker in ("?", "#"))
+PY
+}
+
 restore_credential() {
   local path="$1" name="${1##*/}"
   if [[ -d "$path" && ! -L "$path" ]]; then
@@ -143,6 +172,19 @@ check_build_source_contract() {
 
 release_snapshot() {
   find "$home/private/deployment" -maxdepth 2 -type f ! -name operation.lock -exec sha256sum {} + | sort
+}
+
+expect_bootstrap_refusal_without_release_mutation() {
+  local label="$1" expected="$2" output before after
+  before="$(release_snapshot)"
+  if output="$($manage bootstrap 2>&1)"; then
+    printf 'expected bootstrap refusal for %s\n' "$label" >&2
+    return 1
+  fi
+  [[ "$output" == *"$expected"* ]]
+  [[ "$output" != *"$credential_canary"* ]]
+  after="$(release_snapshot)"
+  [[ "$before" == "$after" ]]
 }
 
 expect_build_source_refusal() {
@@ -341,6 +383,7 @@ PY
 
 case "$mode" in
   --config)
+    check_environment_template
     "$manage" --config
     rendered="$(docker compose --project-name "$STEWARD_COMPOSE_PROJECT" --file "$script_dir/compose.yml" config --format json)"
     RENDERED_COMPOSE="$rendered" D1_SOURCE="$D1_TOKEN_PATH" R2_ID_SOURCE="$R2_ACCESS_KEY_ID_PATH" \
@@ -389,6 +432,10 @@ PY
     expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
     export STEWARD_MANAGE_FAKE=1
     check_credential_refusals
+    unset COQUIC_REMOTE_URL
+    expect_bootstrap_refusal_without_release_mutation 'missing fresh-clone remote' 'COQUIC_REMOTE_URL is required for a fresh clone'
+    [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
+    export COQUIC_REMOTE_URL="$remote"
     mkdir -p "$home/private/deployment/bootstrap-repository.tmp"
     printf 'foreign\n' >"$home/private/deployment/bootstrap-repository.tmp/marker"
     printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
@@ -406,6 +453,9 @@ assert value["validationImage"] == value["validationImageId"]
 assert value["daemonImage"].startswith("sha256:")
 assert value["taskImage"].startswith("sha256:")
 PY
+    export COQUIC_REMOTE_URL='git@github.com:minhuw/other.git'
+    expect_bootstrap_refusal_without_release_mutation 'existing clone remote mismatch' 'canonical repository remote does not match the configured remote'
+    export COQUIC_REMOTE_URL="$remote"
     "$manage" bootstrap >/dev/null
     for remote_url in \
       'https://github.com/minhuw/coquic.git' \

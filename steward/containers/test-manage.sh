@@ -133,6 +133,53 @@ release_for_fake_pair() {
   printf '%s\n' "$STEWARD_FAKE_DAEMON_ID:$STEWARD_FAKE_TASK_ID:$STEWARD_FAKE_VALIDATION_ID" | sha256sum | cut -c1-24
 }
 
+check_build_source_contract() {
+  local image
+  ! grep -Fq 'repo_root' "$manage"
+  for image in daemon task validation; do
+    grep -Fq "\"\$repository#steward-$image-image\"" "$manage"
+  done
+}
+
+release_snapshot() {
+  find "$home/private/deployment" -maxdepth 2 -type f ! -name operation.lock -exec sha256sum {} + | sort
+}
+
+expect_build_source_refusal() {
+  local label="$1" expected="$2" output before after
+  before="$(release_snapshot)"
+  if output="$($manage build 2>&1)"; then
+    printf 'expected build refusal for %s\n' "$label" >&2
+    return 1
+  fi
+  [[ "$output" == *"$expected"* ]]
+  after="$(release_snapshot)"
+  [[ "$before" == "$after" ]]
+}
+
+check_standalone_build_source_refusals() {
+  local repository_backup="$tmp/repository.valid"
+  mv "$home/repository" "$repository_backup"
+  set_fake_pair a b
+  expect_build_source_refusal missing 'canonical repository is not a Git checkout'
+  mv "$repository_backup" "$home/repository"
+
+  printf 'dirty\n' >"$home/repository/dirty"
+  set_fake_pair c d
+  expect_build_source_refusal dirty 'canonical repository is dirty'
+  rm -f "$home/repository/dirty"
+
+  git -C "$home/repository" checkout -q -b unexpected-branch
+  set_fake_pair e f
+  expect_build_source_refusal 'wrong branch' 'detached or on wrong branch'
+  git -C "$home/repository" checkout -q main
+
+  git -C "$home/repository" worktree add --detach "$home/worktrees/unexpected-build" HEAD >/dev/null
+  set_fake_pair 1 2
+  expect_build_source_refusal 'extra worktree' 'unexpected linked worktree'
+  git -C "$home/repository" worktree remove --force "$home/worktrees/unexpected-build"
+}
+
 expect_manage_refusal() {
   local output
   if output="$($manage "$@" 2>&1)"; then
@@ -337,6 +384,7 @@ assert not any(
 PY
     ;;
   --bootstrap)
+    check_build_source_contract
     unset STEWARD_MANAGE_FAKE
     expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
     export STEWARD_MANAGE_FAKE=1
@@ -387,6 +435,8 @@ PY
     export COQUIC_REMOTE_URL="$remote"
     second="$(cat "$home/private/deployment/current")"
     [[ "$first" == "$second" && -d "$home/repository/.git" && ! -e "$home/steward.sqlite" ]]
+    check_standalone_build_source_refusals
+    "$manage" build >/dev/null
     cp "$home/private/deployment/operation.journal" "$tmp/journal.before"
     git -C "$home/repository" worktree add --detach "$home/worktrees/unexpected" HEAD >/dev/null
     ! "$manage" bootstrap >/dev/null 2>&1

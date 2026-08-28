@@ -58,10 +58,14 @@ run.
 
 ## Releases and state
 
-Build images from pinned Nix outputs and inspect their immutable IDs and labels:
+Build images from pinned Nix outputs and inspect their immutable IDs and labels. Every
+release-producing management operation (`bootstrap`, `build`, and `upgrade`)
+revalidates and builds only from `$COQUIC_HOME/repository/`; invoking the
+management script from another checkout grants that checkout no production
+source authority.
 
 ```text
-nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
+nix build --no-link "$COQUIC_HOME/repository#steward-daemon-image" "$COQUIC_HOME/repository#steward-task-image" "$COQUIC_HOME/repository#steward-validation-image"
 ```
 
 The deployment directory is private and contains only bounded release facts:
@@ -232,7 +236,11 @@ exact Store and never invokes init.
 
 ## Lifecycle and recovery
 
-The management wrapper is the only lifecycle interface:
+The management wrapper is the only lifecycle interface. Before constructing a
+release, `bootstrap`, standalone `build`, and `upgrade` each validate the
+canonical repository immediately before journaling or release mutation. The
+script checkout remains authoritative only for management assets such as
+`compose.yml`.
 
 ```text
 bash steward/containers/manage.sh config

@@ -4,7 +4,6 @@ set -euo pipefail
 # Docker Compose is the outer lifecycle manager. This wrapper deliberately
 # builds argv arrays and records only bounded deployment facts.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-repo_root="$(cd "$script_dir/../.." && pwd -P)"
 compose_file="${COMPOSE_FILE:-$script_dir/compose.yml}"
 project="${STEWARD_COMPOSE_PROJECT:-coquic-steward}"
 home="${COQUIC_HOME:-}"
@@ -500,6 +499,7 @@ release_id_from_values() {
 
 build_release() {
   local daemon_archive task_archive validation_archive daemon_ref task_ref validation_ref daemon_id task_id validation_id release
+  validate_repository
   journal build
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
     daemon_id="${STEWARD_FAKE_DAEMON_ID:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"
@@ -511,7 +511,7 @@ build_release() {
   else
     validate_socket
     command -v nix >/dev/null || die 'Nix is unavailable for pinned image build'
-    mapfile -t archives < <(nix build --no-link --print-out-paths "$repo_root#steward-daemon-image" "$repo_root#steward-task-image" "$repo_root#steward-validation-image")
+    mapfile -t archives < <(nix build --no-link --print-out-paths "$repository#steward-daemon-image" "$repository#steward-task-image" "$repository#steward-validation-image")
     [[ "${#archives[@]}" -eq 3 ]] || die 'Nix did not produce all three image archives'
     daemon_archive="${archives[0]}"; task_archive="${archives[1]}"; validation_archive="${archives[2]}"
     docker load --input "$daemon_archive" >/dev/null

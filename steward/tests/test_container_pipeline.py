@@ -2247,13 +2247,15 @@ def test_durable_ordinary_push_uses_task_as_issue_source(
     source.spec.worker = WorkerKind.custom
     store.save(source)
     commands: list[list[str]] = []
+    environments: list[dict[str, str] | None] = []
     real_command = run_command
 
-    def command(argv, cwd, *, timeout=None, **_kwargs):
+    def command(argv, cwd, *, timeout=None, env=None, **_kwargs):
         if argv and argv[0] == "gh":
             commands.append(argv)
+            environments.append(env)
             return CommandResult(argv, cwd, 0, "", "")
-        return real_command(argv, cwd, timeout=timeout, **_kwargs)
+        return real_command(argv, cwd, timeout=timeout, env=env, **_kwargs)
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
     assert drive_durable(executor, source.id), (
@@ -2268,7 +2270,56 @@ def test_durable_ordinary_push_uses_task_as_issue_source(
         ["gh", "issue", "comment"],
         ["gh", "issue", "close"],
     ]
+    assert environments == [{}, {}]
     assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+
+
+def test_durable_issue_updates_use_authenticated_cli_without_leaking_token(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    token = "github-executor-token-canary"
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    helper_calls = 0
+    real_command = run_command
+
+    def fake_github_cli_environment(_config):
+        nonlocal helper_calls
+        helper_calls += 1
+        return {"GH_TOKEN": token}
+
+    def command(argv, cwd, *, timeout=None, env=None, **_kwargs):
+        if argv and argv[0] == "gh":
+            commands.append((argv, env))
+            return CommandResult(argv, cwd, 0, "", "")
+        return real_command(argv, cwd, timeout=timeout, env=env, **_kwargs)
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.github_cli_environment",
+        fake_github_cli_environment,
+    )
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
+    assert drive_durable(executor, integration.id)
+
+    assert [argv[:3] for argv, _env in commands] == [
+        ["gh", "issue", "comment"],
+        ["gh", "issue", "close"],
+    ]
+    assert helper_calls == 2
+    assert [env for _argv, env in commands] == [{"GH_TOKEN": token}] * 2
+    assert all(token not in " ".join(argv) for argv, _env in commands)
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None
+    assert token not in transcript.read_text(encoding="utf-8")
+    events = store.events(source.id) + store.events(integration.id)
+    evidence = "\n".join(
+        [event.message for event in events]
+        + [json.dumps(event.data, sort_keys=True, default=str) for event in events]
+    )
+    assert token not in evidence
+
 
 def test_durable_validation_blocks_frozen_path_before_commit(
     config: StewardConfig, tmp_path: Path, monkeypatch

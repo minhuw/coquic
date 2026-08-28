@@ -22,6 +22,7 @@ from ..agents import (
     render_worker_prompt,
 )
 from ..core.config import StewardConfig, _frozen_path_matches
+from ..core.github_auth import github_cli_environment
 from ..core.models import (
     EffectActionKind,
     ExecutionMode,
@@ -2886,6 +2887,7 @@ class StewardExecutor:
                     ],
                     cwd=self.config.repo_root,
                     timeout=30,
+                    env=github_cli_environment(self.config),
                 )
                 if not comment.ok:
                     self._record_feature_issue_update_failure(
@@ -2935,6 +2937,7 @@ class StewardExecutor:
                 ],
                 cwd=self.config.repo_root,
                 timeout=30,
+                env=github_cli_environment(self.config),
             )
         if not close.ok:
             self._record_feature_issue_update_failure(

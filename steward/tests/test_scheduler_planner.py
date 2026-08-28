@@ -67,6 +67,7 @@ from coquic_steward.planning.verifier import (
 )
 from coquic_steward.signals import (
     CodacyProvider,
+    CodeScanningProvider,
     GitHubActionsCiProvider,
     GitHubActionsInteropProvider,
     GitHubActionsPerfProvider,
@@ -3029,9 +3030,10 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+    def fake_run_command(args, cwd, *, timeout=None, **kwargs):
         captured["args"] = args
         captured["cwd"] = cwd
+        captured["env"] = kwargs.get("env")
         return CommandResult(
             args=args,
             cwd=cwd,
@@ -3065,11 +3067,147 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
     assert "--status" not in args
     assert args[args.index("--limit") + 1] == "1"
     assert captured["cwd"] == config.repo_root
+    assert captured["env"] == {}
     assert collection.fetch.provider == "github-actions:ci"
     assert collection.fetch.item_count == 1
     assert collection.items[0].provider == "github-actions:ci"
     assert collection.items[0].kind == "github-actions.ci-failure"
     assert collection.items[0].payload["run_attempt"] == 2
+
+
+def test_github_cli_provider_sites_use_per_call_auth_environment(
+    config: StewardConfig, monkeypatch
+) -> None:
+    token = "github-provider-token-canary"
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+    helper_calls = 0
+
+    def fake_github_cli_environment(_config):
+        nonlocal helper_calls
+        helper_calls += 1
+        return {"GH_TOKEN": token}
+
+    def fake_run_command(args, cwd, *, timeout=None, env=None, **_kwargs):
+        calls.append((args, env))
+        if args[:3] == ["gh", "run", "list"]:
+            payload: object = [
+                {
+                    "databaseId": 101,
+                    "workflowName": "Per-Commit CI",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "attempt": 1,
+                }
+            ]
+        elif args[:3] == ["gh", "search", "issues"]:
+            payload = []
+        elif args[:3] == ["gh", "issue", "view"]:
+            payload = {
+                "number": 42,
+                "title": "Current feature",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+                "body": "Current feature body",
+                "labels": [{"name": "steward:feature"}],
+                "state": "OPEN",
+            }
+        elif args[:3] == ["gh", "api", "-X"] and args[-1].endswith("/42"):
+            payload = {
+                "number": 42,
+                "html_url": "https://github.com/minhuw/coquic/security/code-scanning/42",
+                "url": "https://api.github.com/repos/minhuw/coquic/code-scanning/alerts/42",
+                "state": "open",
+                "rule": {"id": "cpp/use-after-free", "name": "Use after free"},
+                "most_recent_instance": {
+                    "location": {"path": "src/main.cpp", "region": {"start_line": 12}}
+                },
+            }
+        elif args[:3] == ["gh", "api", "-X"]:
+            payload = []
+        else:  # pragma: no cover - protects the command contract.
+            raise AssertionError(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.github_cli_environment",
+        fake_github_cli_environment,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    GitHubActionsCiProvider().collect(config)
+    GitHubFeatureIssuesProvider().collect(config)
+    GitHubFeatureIssuesProvider().revalidated_signal_item(
+        config,
+        SignalItem(
+            id="stored-feature",
+            provider="github-issues:features",
+            kind="github-issues.feature-request",
+            fingerprint="stored-feature",
+            title="Feature",
+            payload={"issue_number": 42},
+        ),
+    )
+    CodeScanningProvider().collect(config)
+    CodeScanningProvider().revalidated_signal_item(
+        config,
+        SignalItem(
+            id="stored-codeql",
+            provider="code-scanning",
+            kind="code-scanning.alert",
+            fingerprint="stored-codeql",
+            title="CodeQL alert",
+            payload={"alert_number": 42},
+        ),
+    )
+
+    assert len(calls) == 6
+    assert helper_calls == 6
+    assert [env for _args, env in calls] == [{"GH_TOKEN": token}] * 6
+    assert all(token not in " ".join(args) for args, _env in calls)
+
+
+def test_github_cli_provider_failure_uses_auth_without_leaking_token(
+    config: StewardConfig, monkeypatch
+) -> None:
+    token = "github-failure-token-canary"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.github_cli_environment",
+        lambda _config: {"GH_TOKEN": token},
+    )
+
+    def fake_run_command(args, cwd, *, timeout=None, env=None, **_kwargs):
+        captured["args"] = args
+        captured["env"] = env
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=1,
+            stdout="",
+            stderr="provider unavailable",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    collection = collect_signal_items(
+        config, providers=[GitHubActionsCiProvider()]
+    )[0]
+
+    assert collection.fetch.error == "provider unavailable"
+    assert captured["env"] == {"GH_TOKEN": token}
+    assert token not in str(captured["args"])
+    assert token not in collection.fetch.error
+
 
 @pytest.mark.parametrize(
     ("status", "conclusion"),

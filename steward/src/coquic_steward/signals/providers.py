@@ -17,6 +17,7 @@ from urllib.request import (
 )
 
 from ..core.config import StewardConfig
+from ..core.github_auth import github_cli_environment
 from ..core.models import SignalItem
 from ..core.subprocesses import run_command
 
@@ -246,7 +247,12 @@ class GitHubActionsProvider:
         ]
         if self.workflow_file:
             command.extend(["--workflow", self.workflow_file])
-        runs = run_command(command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS)
+        runs = run_command(
+            command,
+            cwd=config.repo_root,
+            timeout=SIGNAL_TIMEOUT_SECONDS,
+            env=github_cli_environment(config),
+        )
         if not runs.ok:
             return None, runs.stderr
         try:
@@ -501,7 +507,10 @@ class GitHubFeatureIssuesProvider:
                 "number,title,url,body,labels,author,createdAt,updatedAt,state",
             ]
             issues = run_command(
-                command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+                command,
+                cwd=config.repo_root,
+                timeout=SIGNAL_TIMEOUT_SECONDS,
+                env=github_cli_environment(config),
             )
             if not issues.ok:
                 return ProviderSignalResult(error=issues.stderr, summary=issues.stderr)
@@ -585,7 +594,10 @@ class GitHubFeatureIssuesProvider:
             "number,title,url,body,labels,author,createdAt,updatedAt,state",
         ]
         result = run_command(
-            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+            command,
+            cwd=config.repo_root,
+            timeout=SIGNAL_TIMEOUT_SECONDS,
+            env=github_cli_environment(config),
         )
         if not result.ok:
             if strict:
@@ -701,6 +713,7 @@ class CodeScanningProvider:
             ],
             cwd=config.repo_root,
             timeout=SIGNAL_TIMEOUT_SECONDS,
+            env=github_cli_environment(config),
         )
         if not codeql.ok:
             return ProviderSignalResult(error=codeql.stderr)
@@ -743,7 +756,10 @@ class CodeScanningProvider:
             f"repos/{config.github_repository}/code-scanning/alerts/{alert_number}",
         ]
         result = run_command(
-            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+            command,
+            cwd=config.repo_root,
+            timeout=SIGNAL_TIMEOUT_SECONDS,
+            env=github_cli_environment(config),
         )
         if not result.ok:
             if strict:

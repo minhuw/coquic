@@ -25,6 +25,13 @@ PATH_POLICY_STATUS_PARSE_SUMMARY = "path policy status could not be parsed"
 _PORCELAIN_STATUS_CODES = frozenset(" MADRCUT?!")
 
 
+def _validate_remote_operation(config: StewardConfig, path: Path) -> None:
+    # Import lazily because orchestration imports the execution package.
+    from ..orchestration.preflight import validate_remote_operation
+
+    validate_remote_operation(config, path)
+
+
 class _PathPolicyStatusParseError(ValueError):
     """A bounded, stable failure while decoding Git status records."""
 
@@ -202,6 +209,7 @@ class Worktrees:
         # live run refreshes the remote-read base before integration.
         if self.config.dry_run:
             return self.config.main_branch
+        _validate_remote_operation(self.config, self.config.repo_root)
         run_command(
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
             cwd=self.config.repo_root,
@@ -396,6 +404,7 @@ class Worktrees:
         )
 
     def reset_to_main(self, path: Path) -> None:
+        _validate_remote_operation(self.config, path)
         run_command(
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
             cwd=path,
@@ -465,6 +474,7 @@ class Worktrees:
     def push_head_to_main(self, path: Path) -> CommandResult:
         if self.config.dry_run:
             raise RuntimeError("git push requires a live effect decision")
+        _validate_remote_operation(self.config, path)
         return run_command(
             ["git", "push", self.config.git_remote, f"HEAD:{self.config.main_branch}"],
             cwd=path,

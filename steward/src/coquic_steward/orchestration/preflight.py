@@ -177,7 +177,56 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
         raise StewardPreflightError("preflight failed: repository worktree identity is ambiguous")
 
 
+def validate_remote_operation(config: StewardConfig, repository: Path) -> None:
+    """Validate the Git context immediately before a production remote call."""
+
+    if config.deployment.enabled:
+        _validate_remote_policy(config, repository)
+
+
 def _validate_remote_policy(config: StewardConfig, repository: Path) -> None:
+    contexts = (repository,)
+    try:
+        is_canonical = repository.resolve() == config.repo_root.resolve()
+    except OSError as exc:
+        raise StewardPreflightError(
+            "preflight failed: Git remote configuration is unavailable"
+        ) from exc
+    if is_canonical:
+        contexts += _linked_worktree_paths(repository)
+    for context in contexts:
+        _validate_remote_policy_context(config, context)
+
+
+def _linked_worktree_paths(repository: Path) -> tuple[Path, ...]:
+    result = run_command(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repository,
+    )
+    if not result.ok:
+        raise StewardPreflightError(
+            "preflight failed: Git remote configuration is unavailable"
+        )
+    canonical = repository.resolve()
+    paths: list[Path] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line.removeprefix("worktree "))
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise StewardPreflightError(
+                "preflight failed: Git remote configuration is unavailable"
+            ) from exc
+        if resolved != canonical:
+            paths.append(path)
+    return tuple(paths)
+
+
+def _validate_remote_policy_context(
+    config: StewardConfig, repository: Path
+) -> None:
     deployment = config.deployment
     remote_names = tuple(
         dict.fromkeys((deployment.expected_remote, config.git_remote))
@@ -427,8 +476,7 @@ def _validate_container_host_mapping(config: StewardConfig) -> None:
 def preflight_remote_push(config: StewardConfig) -> bool:
     if config.dry_run:
         return False
-    if config.deployment.enabled:
-        _validate_remote_policy(config, config.repo_root)
+    validate_remote_operation(config, config.repo_root)
     fetch = run_command(
         ["git", "fetch", "--quiet", config.git_remote, config.main_branch],
         cwd=config.repo_root,
@@ -454,6 +502,7 @@ def preflight_remote_push(config: StewardConfig) -> bool:
     )
     if not commit.ok:
         raise _preflight_error(config, "prepare dry-run commit", commit)
+    validate_remote_operation(config, config.repo_root)
     dry_run = run_command(
         [
             "git",

@@ -151,7 +151,12 @@ from .transport import (
     _close_d1_provider_client,
     _close_r2_provider_client,
 )
-from .preflight import PreflightReport, preflight_remote_push, run_preflight
+from .preflight import (
+    PreflightReport,
+    preflight_remote_push,
+    run_preflight,
+    validate_remote_operation,
+)
 
 DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2402,6 +2407,7 @@ class StewardDaemon:
         worktree = Path(task.worktree_path) if task.worktree_path else None
         if commit and worktree is not None and worktree.is_dir():
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            validate_remote_operation(self.config, worktree)
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
@@ -2557,6 +2563,7 @@ class StewardDaemon:
             return "task execution mode unavailable for push reconciliation"
         if pushed and mode is ExecutionMode.live:
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            validate_remote_operation(self.config, worktree)
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,

@@ -513,6 +513,69 @@ def test_production_remote_policy_neutralizes_inherited_url_rewrites(
     )
 
 
+@pytest.mark.parametrize("rewrite_name", ["insteadOf", "pushInsteadOf"])
+def test_production_remote_policy_covers_linked_worktree_context(
+    repo: Path,
+    tmp_path: Path,
+    rewrite_name: str,
+) -> None:
+    _add_canonical_remote(repo)
+    canonical = "git@github.com:org/repo.git"
+    attacker = "ssh://git@attacker.example/evil.git"
+    worktree = tmp_path / "task-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+        cwd=repo,
+        check=True,
+    )
+    rewrite = tmp_path / "worktree-rewrite.gitconfig"
+    rewrite.write_text(
+        f'[url "{attacker}"]\n    {rewrite_name} = {canonical}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "--local",
+            f"includeIf.gitdir:{repo.resolve()}/.git/worktrees/" + ".path",
+            str(rewrite),
+        ],
+        cwd=repo,
+        check=True,
+    )
+
+    config = _production_config(repo, tmp_path)
+    protected = {**os.environ, **preflight_module.git_remote_environment(config)}
+    command = ["git", "remote", "get-url"]
+    if rewrite_name == "pushInsteadOf":
+        command.append("--push")
+    command.append("origin")
+    effective = subprocess.run(
+        command,
+        cwd=worktree,
+        env=protected,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert effective.stdout.strip() == attacker
+    assert (
+        subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo,
+            env=protected,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        == canonical
+    )
+
+    with pytest.raises(StewardPreflightError, match="URL rewriting"):
+        preflight_module._validate_remote_policy(config, repo)
+
+
 @pytest.mark.parametrize(
     ("push", "expected_error"),
     [

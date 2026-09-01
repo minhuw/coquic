@@ -73,6 +73,7 @@ from .worktree import (
     PATH_POLICY_STATUS_PARSE_SUMMARY,
     Worktrees,
     _PathPolicyStatusParseError,
+    _validate_remote_operation,
 )
 from .container import SubprocessDockerClient, TaskContainerRuntime, ValidationContainerRuntime
 from .session import (
@@ -2105,6 +2106,7 @@ class StewardExecutor:
         if dry_run is None:
             dry_run = self.config.dry_run
         if not dry_run:
+            _validate_remote_operation(self.config, worktree)
             fetched = run_command(
                 ["git", "fetch", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
@@ -2507,6 +2509,7 @@ class StewardExecutor:
 
     def _commit_reachable(self, worktree: Path, commit: str) -> bool:
         remote = f"{self.config.git_remote}/{self.config.main_branch}"
+        _validate_remote_operation(self.config, worktree)
         fetched = run_command(
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
             cwd=worktree,

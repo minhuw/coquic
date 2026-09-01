@@ -16,6 +16,12 @@ _NONINTERACTIVE_GIT_ENV = {
     "GCM_INTERACTIVE": "never",
     "GIT_TERMINAL_PROMPT": "0",
 }
+_PROTECTED_GIT_CONFIG_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_COUNT": "0",
+    "GIT_CONFIG_PARAMETERS": "",
+}
 _SSH_USER = re.compile(r"^[A-Za-z0-9._-]+$")
 _SSH_HOST = re.compile(r"^(?:[A-Za-z0-9.-]+|[0-9A-Fa-f:.]+)$")
 _SCP_REMOTE = re.compile(
@@ -90,7 +96,11 @@ def git_remote_environment(
 
     if not _deployment(config).enabled:
         return {}
-    return {**git_environment(config), **_NONINTERACTIVE_GIT_ENV}
+    return {
+        **git_environment(config),
+        **_NONINTERACTIVE_GIT_ENV,
+        **_PROTECTED_GIT_CONFIG_ENV,
+    }
 
 
 def _read_github_token(path: Path) -> str:

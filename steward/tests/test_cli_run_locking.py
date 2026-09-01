@@ -11,7 +11,11 @@ from typer.testing import CliRunner
 
 import coquic_steward.cli as cli_module
 from coquic_steward.cli import app, daemon as daemon_cli_command, run as run_cli_command
-from coquic_steward.core.config import StewardConfig, load_config
+from coquic_steward.core.config import (
+    StewardConfig,
+    StewardDeploymentConfig,
+    load_config,
+)
 from coquic_steward.core.lifecycle import ShutdownResult
 from coquic_steward.core.models import DaemonLifecycleState
 from coquic_steward.core.subprocesses import run_command
@@ -54,6 +58,31 @@ def _task_context(repo, monkeypatch):
 def _invoke_run(repo, monkeypatch, task_id: str):
     monkeypatch.chdir(repo)
     return CliRunner().invoke(app, ["run", task_id])
+
+
+def _production_config(repo: Path, tmp_path: Path) -> StewardConfig:
+    home = tmp_path / "deployment-home"
+    deployment = StewardDeploymentConfig(
+        enabled=True,
+        home=home,
+        repository=home / "repository",
+        github_token_path=tmp_path / "github-token",
+        git_ssh_key_path=tmp_path / "git-key",
+        git_known_hosts_path=tmp_path / "known-hosts",
+        min_free_bytes=1,
+        max_owned_docker_bytes=2,
+        recovery_free_bytes=2,
+        recovery_owned_docker_bytes=1,
+    )
+    return StewardConfig(repo_root=repo, dry_run=False, deployment=deployment)
+
+
+def _add_canonical_remote(repo: Path) -> None:
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+        cwd=repo,
+        check=True,
+    )
 
 
 def _invoke_cli_process(repo: Path, home: Path, *args: str):
@@ -391,6 +420,123 @@ def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
     assert "pid=" in exc_info.value.owner
     with acquire_daemon_lock(config):
         pass
+
+
+@pytest.mark.parametrize("rewrite_name", ["insteadOf", "pushInsteadOf"])
+def test_production_remote_policy_rejects_repository_url_rewrites(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rewrite_name: str,
+) -> None:
+    _add_canonical_remote(repo)
+    canonical = "git@github.com:org/repo.git"
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "--local",
+            f"url.file:///tmp/attacker.{rewrite_name}",
+            canonical,
+        ],
+        cwd=repo,
+        check=True,
+    )
+    assert preflight_module._git_remote_config_values(
+        repo, "remote.origin.url"
+    ) == (canonical,)
+    protected = {
+        **os.environ,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_CONFIG_PARAMETERS": "",
+    }
+    effective_command = ["git", "remote", "get-url"]
+    if rewrite_name == "pushInsteadOf":
+        effective_command.append("--push")
+    effective_command.append("origin")
+    effective = subprocess.run(
+        effective_command,
+        cwd=repo,
+        env=protected,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert effective.stdout.strip() == "file:///tmp/attacker"
+    config = _production_config(repo, tmp_path)
+    commands: list[list[str]] = []
+    original_run_command = preflight_module.run_command
+
+    def recording_run_command(command, cwd, **kwargs):
+        commands.append(command)
+        return original_run_command(command, cwd, **kwargs)
+
+    monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
+    with pytest.raises(StewardPreflightError, match="URL rewriting"):
+        preflight_module._validate_remote_policy(config, repo)
+
+    assert not any(
+        command[:3] == ["git", "remote", "get-url"] for command in commands
+    )
+    assert not any(
+        command[:2] in (["git", "fetch"], ["git", "push"])
+        for command in commands
+    )
+
+
+def test_production_remote_policy_neutralizes_inherited_url_rewrites(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_canonical_remote(repo)
+    canonical = "git@github.com:org/repo.git"
+    rewrite = tmp_path / "rewrite.gitconfig"
+    rewrite.write_text(
+        f'[url "file:///tmp/attacker"]\n    insteadOf = {canonical}\n'
+        f'[url "file:///tmp/attacker-push"]\n    pushInsteadOf = {canonical}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(rewrite))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(rewrite))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "url.file:///tmp/attacker.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", canonical)
+    monkeypatch.setenv(
+        "GIT_CONFIG_PARAMETERS",
+        f"'url.file:///tmp/attacker-push.pushInsteadOf={canonical}'",
+    )
+
+    preflight_module._validate_remote_policy(
+        _production_config(repo, tmp_path), repo
+    )
+
+
+@pytest.mark.parametrize(
+    ("push", "expected_error"),
+    [
+        (False, "exactly one effective fetch URL"),
+        (True, "exactly one effective push URL"),
+    ],
+)
+def test_production_remote_policy_rejects_multiple_effective_targets(
+    repo: Path, tmp_path: Path, push: bool, expected_error: str
+) -> None:
+    _add_canonical_remote(repo)
+    command = ["git", "remote", "set-url", "--add"]
+    if push:
+        command.append("--push")
+    command.extend(("origin", "git@github.com:org/second.git"))
+    subprocess.run(command, cwd=repo, check=True)
+    if push:
+        subprocess.run(command, cwd=repo, check=True)
+
+    with pytest.raises(StewardPreflightError, match=expected_error):
+        preflight_module._validate_remote_policy(
+            _production_config(repo, tmp_path), repo
+        )
+
 
 def test_daemon_preflights_push_main_remote(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

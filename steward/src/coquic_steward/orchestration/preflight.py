@@ -25,6 +25,7 @@ _COMMIT_ENV = {
     "GIT_COMMITTER_EMAIL": "steward@example.invalid",
     "GIT_COMMITTER_NAME": "CoQUIC Steward",
 }
+_REMOTE_REWRITE_PATTERN = r"^url\..*\.(insteadOf|pushInsteadOf)$"
 
 
 class StewardPreflightError(RuntimeError):
@@ -182,13 +183,13 @@ def _validate_remote_policy(config: StewardConfig, repository: Path) -> None:
         dict.fromkeys((deployment.expected_remote, config.git_remote))
     )
     for remote_name in remote_names:
-        fetch_urls = _git_remote_config_values(
-            repository, f"remote.{remote_name}.url"
-        )
         label = (
             "expected Git remote"
             if remote_name == deployment.expected_remote
             else "configured Git remote"
+        )
+        fetch_urls = _git_remote_config_values(
+            repository, f"remote.{remote_name}.url"
         )
         if not fetch_urls:
             raise StewardPreflightError(
@@ -205,9 +206,50 @@ def _validate_remote_policy(config: StewardConfig, repository: Path) -> None:
                     f"preflight failed: {label} must be credential-free SSH"
                 ) from exc
 
+    environment = git_remote_environment(config)
+    _reject_repository_url_rewrites(repository, environment)
+    for remote_name in remote_names:
+        label = (
+            "expected Git remote"
+            if remote_name == deployment.expected_remote
+            else "configured Git remote"
+        )
+        fetch_urls = _effective_remote_urls(
+            repository, remote_name, environment=environment
+        )
+        push_urls = _effective_remote_urls(
+            repository, remote_name, environment=environment, push=True
+        )
+        for direction, remote_urls in (
+            ("fetch", fetch_urls),
+            ("push", push_urls),
+        ):
+            if len(remote_urls) != 1:
+                raise StewardPreflightError(
+                    f"preflight failed: {label} must have exactly one effective "
+                    f"{direction} URL"
+                )
+            try:
+                validate_ssh_remote(remote_urls[0])
+            except ValueError as exc:
+                raise StewardPreflightError(
+                    f"preflight failed: {label} must be credential-free SSH"
+                ) from exc
+
 
 def _git_remote_config_values(repository: Path, key: str) -> tuple[str, ...]:
-    result = run_command(["git", "config", "--null", "--get-all", key], cwd=repository)
+    result = run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--includes",
+            "--null",
+            "--get-all",
+            key,
+        ],
+        cwd=repository,
+    )
     if result.ok:
         values = result.stdout.split("\0")
         if values and values[-1] == "":
@@ -218,6 +260,55 @@ def _git_remote_config_values(repository: Path, key: str) -> tuple[str, ...]:
     raise StewardPreflightError(
         "preflight failed: Git remote configuration is unavailable"
     )
+
+
+def _reject_repository_url_rewrites(
+    repository: Path, environment: dict[str, str]
+) -> None:
+    result = run_command(
+        [
+            "git",
+            "config",
+            "--includes",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            _REMOTE_REWRITE_PATTERN,
+        ],
+        cwd=repository,
+        env=environment,
+    )
+    if result.ok and not result.stdout:
+        return
+    if result.ok and result.stdout:
+        raise StewardPreflightError(
+            "preflight failed: repository-local Git URL rewriting "
+            "(insteadOf/pushInsteadOf) is not allowed"
+        )
+    if result.returncode == 1 and not result.stdout:
+        return
+    raise StewardPreflightError(
+        "preflight failed: Git remote configuration is unavailable"
+    )
+
+
+def _effective_remote_urls(
+    repository: Path,
+    remote: str,
+    *,
+    environment: dict[str, str],
+    push: bool = False,
+) -> tuple[str, ...]:
+    command = ["git", "remote", "get-url"]
+    if push:
+        command.append("--push")
+    command.extend(("--all", remote))
+    result = run_command(command, cwd=repository, env=environment)
+    if not result.ok:
+        raise StewardPreflightError(
+            "preflight failed: Git remote configuration is unavailable"
+        )
+    return tuple(result.stdout.splitlines())
 
 
 def _check_executable(

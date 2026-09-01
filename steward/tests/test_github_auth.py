@@ -55,6 +55,10 @@ def test_git_remote_environment_preserves_production_controls(tmp_path: Path) ->
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_SSH_COMMAND": git_environment(config)["GIT_SSH_COMMAND"],
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_CONFIG_PARAMETERS": "",
     }
 
 

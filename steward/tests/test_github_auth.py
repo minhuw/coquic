@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,18 @@ def test_git_environment_quotes_paths_and_sets_strict_ssh_options(
         "StrictHostKeyChecking=yes",
         "-o",
         f"UserKnownHostsFile={config.git_known_hosts_path}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
     ]
+    effective = subprocess.run(
+        [*command, "-G", "github.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    options = dict(line.split(maxsplit=1) for line in effective)
+    assert options["userknownhostsfile"] == str(config.git_known_hosts_path)
+    assert options["globalknownhostsfile"] == "/dev/null"
     assert "first-token" not in git_environment(config)["GIT_SSH_COMMAND"]
 
 

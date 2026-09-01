@@ -76,6 +76,8 @@ def git_environment(
             "StrictHostKeyChecking=yes",
             "-o",
             f"UserKnownHostsFile={known_hosts}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
         ]
     )
     return {"GIT_SSH_COMMAND": command}

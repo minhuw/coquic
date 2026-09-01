@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -574,6 +575,33 @@ def test_production_remote_policy_covers_linked_worktree_context(
 
     with pytest.raises(StewardPreflightError, match="URL rewriting"):
         preflight_module._validate_remote_policy(config, repo)
+
+
+def test_production_remote_policy_ignores_stale_prunable_worktree(
+    repo: Path, tmp_path: Path
+) -> None:
+    _add_canonical_remote(repo)
+    worktree = tmp_path / "stale-task-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+        cwd=repo,
+        check=True,
+    )
+    shutil.rmtree(worktree)
+
+    listing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "prunable gitdir file points to non-existent location" in listing.stdout
+    assert preflight_module._linked_worktree_paths(repo) == ()
+
+    preflight_module._validate_remote_policy(
+        _production_config(repo, tmp_path), repo
+    )
 
 
 @pytest.mark.parametrize(

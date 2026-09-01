@@ -209,12 +209,32 @@ def _linked_worktree_paths(repository: Path) -> tuple[Path, ...]:
         )
     canonical = repository.resolve()
     paths: list[Path] = []
-    for line in result.stdout.splitlines():
-        if not line.startswith("worktree "):
+    for entry in result.stdout.split("\n\n"):
+        lines = entry.splitlines()
+        if not lines:
             continue
-        path = Path(line.removeprefix("worktree "))
+        worktree_lines = [line for line in lines if line.startswith("worktree ")]
+        if len(worktree_lines) != 1:
+            raise StewardPreflightError(
+                "preflight failed: Git remote configuration is unavailable"
+            )
+        raw_path = worktree_lines[0].removeprefix("worktree ")
+        if not raw_path:
+            raise StewardPreflightError(
+                "preflight failed: Git remote configuration is unavailable"
+            )
+        path = Path(raw_path)
         try:
             resolved = path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            if any(
+                line == "prunable" or line.startswith("prunable ")
+                for line in lines
+            ):
+                continue
+            raise StewardPreflightError(
+                "preflight failed: Git remote configuration is unavailable"
+            ) from exc
         except OSError as exc:
             raise StewardPreflightError(
                 "preflight failed: Git remote configuration is unavailable"

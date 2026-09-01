@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from ..core.config import StewardConfig, _frozen_path_matches
-from ..core.github_auth import git_environment
+from ..core.github_auth import git_remote_environment
 from ..core.models import TaskRecord
 from ..core.subprocesses import CommandResult, run_command
 
@@ -22,10 +22,6 @@ FORBIDDEN_PATH_PARTS = {
 
 
 PATH_POLICY_STATUS_PARSE_SUMMARY = "path policy status could not be parsed"
-_NONINTERACTIVE_GIT_ENV = {
-    "GCM_INTERACTIVE": "never",
-    "GIT_TERMINAL_PROMPT": "0",
-}
 _PORCELAIN_STATUS_CODES = frozenset(" MADRCUT?!")
 
 
@@ -210,7 +206,7 @@ class Worktrees:
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
             cwd=self.config.repo_root,
             check=True,
-            env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+            env=git_remote_environment(self.config),
         )
         return f"{self.config.git_remote}/{self.config.main_branch}"
 
@@ -404,7 +400,7 @@ class Worktrees:
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
             cwd=path,
             check=True,
-            env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+            env=git_remote_environment(self.config),
         )
         run_command(
             [
@@ -473,7 +469,7 @@ class Worktrees:
             ["git", "push", self.config.git_remote, f"HEAD:{self.config.main_branch}"],
             cwd=path,
             check=True,
-            env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+            env=git_remote_environment(self.config),
         )
 
     def branch_has_commits_not_on_main(self, branch: str) -> bool:

@@ -9,6 +9,7 @@ from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.github_auth import (
     MAX_GITHUB_TOKEN_BYTES,
     git_environment,
+    git_remote_environment,
     github_cli_environment,
     validate_ssh_remote,
 )
@@ -43,6 +44,17 @@ def test_local_mode_keeps_ambient_authentication(tmp_path: Path) -> None:
 
     assert github_cli_environment(config) == {}
     assert git_environment(config) == {}
+    assert git_remote_environment(config) == {}
+
+
+def test_git_remote_environment_preserves_production_controls(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert git_remote_environment(config) == {
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": git_environment(config)["GIT_SSH_COMMAND"],
+    }
 
 
 def test_github_cli_environment_reads_one_token_per_call(tmp_path: Path) -> None:

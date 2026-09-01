@@ -4409,8 +4409,12 @@ def test_persisted_push_reconciliation_authenticates_fetch_only(
 
     monkeypatch.setattr(
         daemon_module,
-        "git_environment",
-        lambda _config: {"GIT_SSH_COMMAND": ssh_command},
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(daemon_module, "run_command", fake_run_command)
 

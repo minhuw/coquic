@@ -423,7 +423,13 @@ def test_daemon_preflights_push_main_remote(
         return original_run_command(command, cwd, **kwargs)
 
     monkeypatch.setattr(
-        preflight_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+        preflight_module,
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
     daemon = StewardDaemon(config, TaskStore.create(config.db_path), logger=logs.append)

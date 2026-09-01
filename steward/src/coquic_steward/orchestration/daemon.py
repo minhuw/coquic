@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from ..core.config import StewardConfig
-from ..core.github_auth import git_environment
+from ..core.github_auth import git_remote_environment
 from ..core.lifecycle import (
     DaemonLifecycleState,
     DockerResourceManager,
@@ -153,10 +153,6 @@ from .transport import (
 )
 from .preflight import PreflightReport, preflight_remote_push, run_preflight
 
-_NONINTERACTIVE_GIT_ENV = {
-    "GCM_INTERACTIVE": "never",
-    "GIT_TERMINAL_PROMPT": "0",
-}
 DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 SESSION_RESUME_MAX_ATTEMPTS = 2
@@ -2409,7 +2405,7 @@ class StewardDaemon:
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
-                env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+                env=git_remote_environment(self.config),
                 cancellation_owner=self._subprocess_owner,
             )
             if not fetched.ok:
@@ -2564,7 +2560,7 @@ class StewardDaemon:
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
-                env={**git_environment(self.config), **_NONINTERACTIVE_GIT_ENV},
+                env=git_remote_environment(self.config),
                 cancellation_owner=self._subprocess_owner,
             )
             if not fetched.ok:

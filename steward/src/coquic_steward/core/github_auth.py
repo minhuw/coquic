@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 
 MAX_GITHUB_TOKEN_BYTES = 4096
+_NONINTERACTIVE_GIT_ENV = {
+    "GCM_INTERACTIVE": "never",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 _SSH_USER = re.compile(r"^[A-Za-z0-9._-]+$")
 _SSH_HOST = re.compile(r"^(?:[A-Za-z0-9.-]+|[0-9A-Fa-f:.]+)$")
 _SCP_REMOTE = re.compile(
@@ -75,6 +79,16 @@ def git_environment(
         ]
     )
     return {"GIT_SSH_COMMAND": command}
+
+
+def git_remote_environment(
+    config: StewardConfig | StewardDeploymentConfig,
+) -> dict[str, str]:
+    """Return the complete per-call environment for remote Git operations."""
+
+    if not _deployment(config).enabled:
+        return {}
+    return {**git_environment(config), **_NONINTERACTIVE_GIT_ENV}
 
 
 def _read_github_token(path: Path) -> str:
@@ -166,3 +180,4 @@ def is_ssh_remote(value: str) -> bool:
 # Short aliases keep call sites focused on the environment contract.
 github_cli_env = github_cli_environment
 git_env = git_environment
+git_remote_env = git_remote_environment

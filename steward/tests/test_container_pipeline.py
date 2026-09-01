@@ -1355,6 +1355,23 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert "changed" in patch.read_text(encoding="utf-8")
     assert worktrees.has_changes(path)
 
+
+def test_local_remote_git_operations_keep_ambient_authentication(
+    config: StewardConfig, monkeypatch
+) -> None:
+    local_config = replace(config, dry_run=False)
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_run_command(command, cwd, *, env=None, **_kwargs):
+        commands.append((command, env))
+        return CommandResult(command, cwd, 0, "", "")
+
+    monkeypatch.setattr(worktree_module, "run_command", fake_run_command)
+
+    assert Worktrees(local_config)._new_worktree_base() == "origin/main"
+    assert commands == [(["git", "fetch", "origin", "main"], {})]
+
+
 def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -1414,7 +1431,13 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
         return original_run_command(command, cwd, env=env, **kwargs)
 
     monkeypatch.setattr(
-        worktree_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+        worktree_module,
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(worktree_module, "run_command", recording_run_command)
     path, _ = Worktrees(push_config).create(task)
@@ -1453,7 +1476,13 @@ def test_worktree_reset_authenticates_fetch_but_not_local_reset(
         return CommandResult(command, cwd, 0, "", "")
 
     monkeypatch.setattr(
-        worktree_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+        worktree_module,
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(worktree_module, "run_command", fake_run_command)
 
@@ -1482,7 +1511,13 @@ def test_executor_remote_fetch_authenticates_but_local_checks_do_not(
         return CommandResult(command, cwd, 0, stdout, "")
 
     monkeypatch.setattr(
-        executor_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+        executor_module,
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(executor_module, "run_command", fake_run_command)
 
@@ -2816,7 +2851,13 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
     monkeypatch.setattr(
-        daemon_module, "git_environment", lambda _config: {"GIT_SSH_COMMAND": ssh_command}
+        daemon_module,
+        "git_remote_environment",
+        lambda _config: {
+            "GIT_SSH_COMMAND": ssh_command,
+            "GCM_INTERACTIVE": "never",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     monkeypatch.setattr(daemon_module, "run_command", daemon_command)
     daemon = StewardDaemon(config, store)

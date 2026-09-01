@@ -190,13 +190,12 @@ expect_bootstrap_refusal_without_release_mutation() {
 check_clone_ssh_contract() (
   local ssh_dir="$tmp/ssh-bin" ssh_log="$tmp/ssh.args"
   mkdir -p "$ssh_dir"
-  cat >"$ssh_dir/ssh" <<'SH'
+  cat >"$ssh_dir/ssh" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "$@" >"$SSH_SHIM_LOG"
+printf '%s\\n' "\$@" >"$ssh_log"
 exit 42
 SH
   chmod 755 "$ssh_dir/ssh"
-  export SSH_SHIM_LOG="$ssh_log"
   export PATH="$ssh_dir:$PATH"
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
   export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'
@@ -225,6 +224,57 @@ SH
   done
   ! grep -Fqx -- /ambient-key "$ssh_log"
   ! grep -Fqx -- UserKnownHostsFile=/ambient-known-hosts "$ssh_log"
+  rm -rf "$home/private/deployment/bootstrap-repository.tmp"
+  printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
+  chmod 600 "$home/private/deployment/operation.journal"
+)
+
+check_clone_rewrite_contract() (
+  local attacker_remote="$tmp/attacker.git" attacker_seed="$tmp/attacker-seed"
+  local rewrite_config="$tmp/rewrite.gitconfig" vulnerable="$tmp/vulnerable-repository"
+  local canonical_remote='git@github.com:minhuw/coquic.git'
+  git init -q --bare "$attacker_remote"
+  git init -q -b main "$attacker_seed"
+  git -C "$attacker_seed" config user.email test@example.invalid
+  git -C "$attacker_seed" config user.name 'Steward attacker fixture'
+  printf 'attacker\n' >"$attacker_seed/README.md"
+  git -C "$attacker_seed" add README.md
+  git -C "$attacker_seed" commit -qm attacker
+  git -C "$attacker_seed" remote add origin "$attacker_remote"
+  git -C "$attacker_seed" push -q origin main
+
+  git config --file "$rewrite_config" "url.$attacker_remote.insteadOf" "$canonical_remote"
+  unset GIT_CONFIG_NOSYSTEM
+  export GIT_CONFIG_SYSTEM="$rewrite_config" GIT_CONFIG_GLOBAL="$rewrite_config"
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="url.$attacker_remote.insteadOf" GIT_CONFIG_VALUE_0="$canonical_remote"
+  export GIT_CONFIG_PARAMETERS="'url.$attacker_remote.insteadOf=$canonical_remote'"
+  git clone -q --branch main --single-branch "$canonical_remote" "$vulnerable"
+  [[ "$(cat "$vulnerable/README.md")" == attacker ]]
+  [[ "$(git -C "$vulnerable" config --local --get remote.origin.url)" == "$canonical_remote" ]]
+  rm -rf "$vulnerable"
+
+  local ssh_dir="$tmp/rewrite-ssh-bin" ssh_log="$tmp/rewrite-ssh.args"
+  mkdir -p "$ssh_dir"
+  cat >"$ssh_dir/ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$@" >"$ssh_log"
+exit 42
+SH
+  chmod 755 "$ssh_dir/ssh"
+  export PATH="$ssh_dir:$PATH"
+  export COQUIC_REMOTE_URL="$canonical_remote"
+  export GIT_SSH_COMMAND='ssh -i /ambient-key -o UserKnownHostsFile=/ambient-known-hosts'
+  export SSH_AUTH_SOCK="$tmp/ambient-agent"
+  unset GIT_SSH STEWARD_MANAGE_FAKE
+  if "$manage" bootstrap >"$tmp/rewrite.output" 2>&1; then
+    cat "$tmp/rewrite.output" >&2
+    printf 'expected rewritten bootstrap to fail closed\n' >&2
+    exit 1
+  fi
+  [[ -s "$ssh_log" ]]
+  [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
+  [[ ! -e "$home/private/deployment/bootstrap-repository.tmp/README.md" ]]
   rm -rf "$home/private/deployment/bootstrap-repository.tmp"
   printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
   chmod 600 "$home/private/deployment/operation.journal"
@@ -474,6 +524,7 @@ PY
     unset STEWARD_MANAGE_FAKE
     expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
     check_clone_ssh_contract
+    check_clone_rewrite_contract
     export STEWARD_MANAGE_FAKE=1
     check_credential_refusals
     unset COQUIC_REMOTE_URL

@@ -106,8 +106,11 @@ STEWARD_EXPECTED_BRANCH=main
 The SSH URL contains no password, token, or other credential; host-side
 bootstrap Git authenticates with the canonical `GIT_SSH_KEY_PATH` and verifies
 hosts with `GIT_KNOWN_HOSTS_PATH`, while the same key is mounted for the daemon.
-An existing `$COQUIC_HOME/repository/` checkout must use `origin` at this exact
-URL and branch `main`; any remote string mismatch is refused.
+Fresh bootstrap runs Git in a clean configuration environment, so system,
+global, and environment-injected URL rewrites cannot substitute the configured
+canonical source. An existing `$COQUIC_HOME/repository/` checkout must use
+`origin` at this exact URL and branch `main`; any remote string mismatch is
+refused.
 
 The Cloudflare operator reviews the read-only preview, which retains the
 accepted plan privately, and then runs

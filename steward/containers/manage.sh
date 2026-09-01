@@ -652,7 +652,14 @@ bootstrap() {
     [[ -z "$unexpected" ]] || die 'repository parent contains unexpected state'
     local clone_tmp="$deployment/bootstrap-repository.tmp"
     journal clone pending '' bootstrap-repository.tmp
-    GIT_SSH_COMMAND="$(git_ssh_command)" GIT_SSH_VARIANT=ssh \
+    env -i \
+      PATH="$PATH" \
+      GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_GLOBAL=/dev/null \
+      GIT_CONFIG_COUNT=0 \
+      GIT_CONFIG_PARAMETERS= \
+      GIT_SSH_COMMAND="$(git_ssh_command)" \
+      GIT_SSH_VARIANT=ssh \
       git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
     validate_repository "$clone_tmp"
     [[ ! -e "$repository" ]] || die 'repository appeared while bootstrap was cloning'

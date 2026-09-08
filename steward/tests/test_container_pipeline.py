@@ -676,6 +676,23 @@ def test_validation_no_progress_fingerprint_ignores_attempt_metadata(tmp_path) -
     )
 
 
+@pytest.mark.parametrize("jobs", [[], ["-j2"]])
+def test_zig_failure_fingerprint_ignores_other_test_output(tmp_path, jobs) -> None:
+    logs = [tmp_path / "first.txt", tmp_path / "second.txt"]
+    for number, log in enumerate(logs):
+        log.write_text(f"different successful output {number}\n[  FAILED  ] Suite.Failure\n")
+    results = [
+        ValidationResult(
+            command=["zig", "build", "test", *jobs], cwd=tmp_path,
+            passed=False, exit_code=1, output_path=log,
+        )
+        for log in logs
+    ]
+    assert _validation_no_progress_fingerprint("same-tree", [results[0]]) == (
+        _validation_no_progress_fingerprint("same-tree", [results[1]])
+    )
+
+
 def test_archive_write_preserves_parent_and_child_pipeline_refs(
     config, monkeypatch
 ) -> None:

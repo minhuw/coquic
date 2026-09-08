@@ -69,13 +69,14 @@ def default_gates(worktree: Path) -> tuple[tuple[str, list[str]], ...]:
                 ".",
             ],
         ),
-        ("zig-build-test.txt", [*indexed, "zig", "build", "test"]),
+        ("zig-build-test.txt", [*indexed, "zig", "build", "test", "-j2"]),
         (
             "pre-commit.txt",
             [
                 *indexed,
                 "env",
                 "COQUIC_CLANG_TIDY_IN_NIX=1",
+                "COQUIC_CLANG_TIDY_JOBS=2",
                 "pre-commit",
                 "run",
                 "--all-files",

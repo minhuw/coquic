@@ -204,8 +204,8 @@ gates = value.get("gates")
 expected = [
     ("git-diff-check.txt", ["git", "diff", "--cached", "--check", "HEAD", "--"]),
     ("nix-flake-check.txt", ["nix", "flake", "check", "--no-build", "--no-update-lock-file", "."]),
-    ("zig-build-test.txt", ["zig", "build", "test"]),
-    ("pre-commit.txt", ["env", "COQUIC_CLANG_TIDY_IN_NIX=1", "pre-commit", "run", "--all-files"]),
+    ("zig-build-test.txt", ["zig", "build", "test", "-j2"]),
+    ("pre-commit.txt", ["env", "COQUIC_CLANG_TIDY_IN_NIX=1", "COQUIC_CLANG_TIDY_JOBS=2", "pre-commit", "run", "--all-files"]),
     ("steward-pytest.txt", ["steward-task-validate", "/validation/worktree"]),
 ]
 if not isinstance(gates, list) or len(gates) != len(expected):

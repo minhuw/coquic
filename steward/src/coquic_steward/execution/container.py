@@ -42,6 +42,8 @@ from .container_config import (
 
 
 _DOCKER_ID = re.compile(r"^[0-9a-f]{12,64}$")
+# Allow Docker to acknowledge forced exit after the container grace period.
+_DOCKER_STOP_ACK_SECONDS = 2
 
 
 class ContainerErrorCategory(StrEnum):
@@ -889,10 +891,11 @@ class TaskContainerRuntime:
         self, container_id: str | None = None, *, timeout: float | None = None
     ) -> None:
         identifier = container_id or self.config.container_name
+        grace = max(1, int(timeout or 10))
         result = self._run(
-            ["stop", "--time", str(max(1, int(timeout or 10))), identifier],
+            ["stop", "--time", str(grace), identifier],
             allow_not_found=True,
-            timeout=timeout,
+            timeout=grace + _DOCKER_STOP_ACK_SECONDS,
         )
         if result.returncode and not _not_found(result.stderr):
             raise ContainerBoundaryError(
@@ -1487,17 +1490,11 @@ class ValidationContainerRuntime:
     def stop(
         self, *, identifier: str | None = None, timeout: float | None = None
     ) -> None:
+        grace = max(1, int(timeout or self.config.limits.stop_timeout_seconds))
         try:
             self._run(
-                [
-                    "stop",
-                    "--time",
-                    str(
-                        max(1, int(timeout or self.config.limits.stop_timeout_seconds))
-                    ),
-                    identifier or self.config.container_name,
-                ],
-                timeout=timeout,
+                ["stop", "--time", str(grace), identifier or self.config.container_name],
+                timeout=grace + _DOCKER_STOP_ACK_SECONDS,
             )
         except ContainerBoundaryError as exc:
             if exc.category is not ContainerErrorCategory.not_found:

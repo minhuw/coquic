@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import select
+import shutil
+import signal
 import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -99,6 +103,62 @@ def test_validation_container_is_no_network_and_separate_from_task_image(
     assert "/tmp:rw,noexec,nosuid,nodev,size=8589934592,mode=1777" in argv
     assert "/validation/worktree" in " ".join(argv)
     assert "/var/run/docker.sock" not in " ".join(argv)
+
+
+@pytest.mark.parametrize("kind", ["task", "validation"])
+@pytest.mark.parametrize("timeout", [None, 0.2, 1, 5])
+def test_stop_leaves_bounded_docker_acknowledgement_headroom(kind, timeout) -> None:
+    calls = []
+
+    class RecordingDocker(SubprocessDockerClient):
+        def run(self, argv, *, timeout=None, **kwargs):
+            calls.append((argv, timeout))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    config = SimpleNamespace(
+        container_name="owned-container", limits=ContainerLimits()
+    )
+    runtime_type = TaskContainerRuntime if kind == "task" else ValidationContainerRuntime
+    runtime = runtime_type(config, client=RecordingDocker())
+    if kind == "task":
+        runtime.stop("d" * 64, timeout=timeout)
+        default_grace = 10
+    else:
+        runtime.stop(identifier="d" * 64, timeout=timeout)
+        default_grace = config.limits.stop_timeout_seconds
+    grace = max(1, int(timeout or default_grace))
+    assert calls == [(["stop", "--time", str(grace), "d" * 64], grace + 2)]
+
+
+@pytest.mark.parametrize("kind", ["task", "validation"])
+def test_idle_entrypoint_handles_term_while_sleeping(tmp_path: Path, kind: str) -> None:
+    entrypoint = Path(__file__).resolve().parents[1] / "containers" / f"{kind}-entrypoint.sh"
+    script = entrypoint.read_text()
+    if kind == "validation":
+        # Exercise the actual idle loop without host-side /nix bootstrap writes.
+        script = script[script.index('if [ "${1:-}" = --idle ]; then'):]
+        script = script[:script.index('[ "${1:-}" = --exec ]')]
+    sleep = tmp_path / "sleep"
+    sleep.write_text(f'#!/bin/sh\nprintf "ready\\n"\nexec {shutil.which("sleep")} "$@"\n')
+    sleep.chmod(0o700)
+    process = subprocess.Popen(
+        [shutil.which("bash"), "-c", script, "entrypoint", "serve" if kind == "task" else "--idle"],
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert select.select([process.stdout], [], [], 5)[0], "idle sleep did not start"
+        assert process.stdout.readline() == b"ready\n"
+        process.terminate()
+        assert process.wait(timeout=2) == 0
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stdout.close()
 
 
 def _validation_inspection(config: ValidationContainerConfig) -> dict[str, object]:
@@ -275,8 +335,9 @@ def test_validation_container_refuses_same_name_foreign_image(tmp_path: Path) ->
     assert [call[0] for call in docker.calls] == ["inspect"]
 
 
+@pytest.mark.parametrize("field,value", [("Memory", 1), ("Init", False), ("SecurityOpt", [])])
 def test_validation_container_refuses_same_image_with_foreign_runtime(
-    tmp_path: Path,
+    tmp_path: Path, field, value,
 ) -> None:
     paths = [tmp_path / name for name in ("worktree", "output", "store")]
     for path in paths:
@@ -290,7 +351,8 @@ def test_validation_container_refuses_same_image_with_foreign_runtime(
         store=paths[2],
     )
     payload = _validation_inspection(config)
-    payload["HostConfig"]["Memory"] = config.limits.memory_bytes // 2
+    payload["HostConfig"][field] = value
+    calls = []
 
     class ForeignDocker(SubprocessDockerClient):
         def run(
@@ -301,6 +363,7 @@ def test_validation_container_refuses_same_image_with_foreign_runtime(
             timeout: float | None = None,
             max_output_bytes: int | None = None,
         ):
+            calls.append(argv)
             return subprocess.CompletedProcess(
                 argv, 0, json.dumps(payload).encode(), b""
             )
@@ -311,6 +374,10 @@ def test_validation_container_refuses_same_image_with_foreign_runtime(
         runtime.ensure_started()
 
     assert error.value.category is ContainerErrorCategory.identity_mismatch
+    with pytest.raises(ContainerBoundaryError) as error:
+        runtime.cleanup_owned()
+    assert error.value.category is ContainerErrorCategory.identity_mismatch
+    assert [call[0] for call in calls] == ["inspect", "inspect"]
 
 
 def test_validation_exec_returns_the_canonical_gate_exit_code(tmp_path: Path) -> None:
@@ -1511,10 +1578,11 @@ def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
         "--no-update-lock-file",
         ".",
     ]
-    assert commands[2][len(prefix) :] == ["zig", "build", "test"]
+    assert commands[2][len(prefix) :] == ["zig", "build", "test", "-j2"]
     assert commands[3][len(prefix) :] == [
         "env",
         "COQUIC_CLANG_TIDY_IN_NIX=1",
+        "COQUIC_CLANG_TIDY_JOBS=2",
         "pre-commit",
         "run",
         "--all-files",

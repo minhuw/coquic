@@ -3314,7 +3314,11 @@ def _stable_validation_diagnostics(validation: ValidationResult) -> str:
     text = _ZIG_SEED_RE.sub("--seed <seed>", text)
     text = _ZIG_BUILD_NONCE_RE.sub("-Z<nonce>", text)
 
-    if validation.command[-3:] != ["zig", "build", "test"]:
+    # Keep recognizing persisted results from before bounded build scheduling.
+    if (
+        validation.command[-4:] != ["zig", "build", "test", "-j2"]
+        and validation.command[-3:] != ["zig", "build", "test"]
+    ):
         return text
 
     signatures = {

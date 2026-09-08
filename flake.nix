@@ -185,10 +185,13 @@
           pkgs.findutils
           pkgs.gawk
           pkgs.git
+          pkgs.gnugrep
+          pkgs.gnused
           pkgs.gnutar
           pkgs.gzip
           pkgs.nix
           pkgs.pre-commit
+          pkgs.ripgrep
           pkgs.util-linux
           pkgs.uv
           zig

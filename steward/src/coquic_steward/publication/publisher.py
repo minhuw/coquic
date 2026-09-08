@@ -11,16 +11,22 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from queue import Empty, SimpleQueue
+from threading import Event
 from typing import TYPE_CHECKING, Final
 
 from ..core.models import EffectActionKind, EffectDecision, EffectDecisionKind
+from ..core.subprocesses import ProcessGroupCancellationOwner, use_subprocess_owner
 
 if TYPE_CHECKING:
     from ..storage import TaskStore
+from .cancellation import PublicationStopped, publication_checkpoint
 from .d1 import (
     D1Error,
     D1PublicationClient,
@@ -608,6 +614,108 @@ def _call_composer(
     return composer(source, **selected)
 
 
+class _LeaseWork:
+    """Keep renewal on the admission-owning thread, not behind its task lock.
+
+    One joined worker performs composition/provider work. It never renews or
+    writes receipts. Request/run checkpoints rendezvous with this owner before
+    continuing; timer ticks also renew during a single long blocking call.
+    There is no independent heartbeat thread and no build deadline. Shutdown
+    stops renewal immediately, cancels owned subprocesses, and drains the same
+    admitted work before releasing the Store/provider lifecycle to the daemon.
+    In-flight network calls remain the daemon transport cancellation's concern.
+    """
+
+    def __init__(self, publisher: CloudPublisher) -> None:
+        self.publisher = publisher
+        self.failure: PublicationResult | None = None
+        self.stopped = Event()
+        self.expires_at: datetime | None = None
+        self.requests: SimpleQueue[Event] = SimpleQueue()
+        self.processes = ProcessGroupCancellationOwner("publication")
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="publication-work")
+
+    def __enter__(self) -> _LeaseWork:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.stopped.set()
+        self.processes.force_cancel()
+        self.executor.shutdown(wait=True, cancel_futures=True)
+
+    def _checkpoint(self) -> None:
+        request = Event()
+        self.requests.put(request)
+        while not request.wait(0.05):
+            if self.stopped.is_set() or self.publisher.cancel_event.is_set():
+                raise PublicationStopped()
+        if self.stopped.is_set() or self.publisher.cancel_event.is_set():
+            raise PublicationStopped()
+
+    def _run(self, operation: Callable[[], object]) -> object:
+        token = publication_checkpoint.set(self._checkpoint)
+        try:
+            with use_subprocess_owner(self.processes):
+                return operation()
+        finally:
+            publication_checkpoint.reset(token)
+
+    def _renew(self, generation: object) -> None:
+        if self.failure is not None:
+            return
+        self.renewed_at = self.publisher._time()
+        # Fence this attempt's last observed expiry even if a successor reused
+        # the worker token. Never renew a reclaimed row on the old call's behalf.
+        expires = self.expires_at or getattr(generation, "lease_expires_at", None)
+        if expires is not None and self.renewed_at >= expires:
+            renewed = None
+            failure = _result(
+                PublicationStatus.lost_claim,
+                getattr(generation, "publication_id", None),
+                reason="lease_expired",
+            )
+        else:
+            renewed, failure = self.publisher._renew(generation)
+        if renewed is not None:
+            self.expires_at = getattr(renewed, "lease_expires_at", None)
+        if failure is not None:
+            self.failure = failure
+            self.stopped.set()
+            self.processes.force_cancel()
+
+    def call(self, generation: object, operation: Callable[[], object]) -> object:
+        if _status(getattr(generation, "state", "")) in {
+            PublicationState.exposed.value, PublicationState.terminal_cleaned.value,
+        }:
+            # Read-only replay authentication has no active lease to extend.
+            return operation()
+        self._renew(generation)
+        if self.failure is not None:
+            raise PublicationStopped()
+        context = copy_context()
+        future = self.executor.submit(context.run, self._run, operation)
+        interval = self.publisher.lease_seconds / 3
+        while not future.done():
+            try:
+                request = self.requests.get(timeout=min(0.1, interval))
+            except Empty:
+                request = None
+            if (
+                request is not None
+                or self.publisher._time() >= self.renewed_at + timedelta(seconds=interval)
+                or self.publisher.cancel_event.is_set()
+            ):
+                self._renew(generation)
+            if request is not None:
+                request.set()
+        # Even a composer exception or a provider response must not authorize
+        # failure bookkeeping after a concurrent hide, cancellation or loss.
+        self._renew(generation)
+        if self.failure is not None:
+            raise PublicationStopped()
+        return future.result()
+
+
 class CloudPublisher:
     """Publish one claimed generation through the fixed R2/D1 protocol."""
 
@@ -626,6 +734,10 @@ class CloudPublisher:
         """Hold task or explicit daemon admission across the mutation."""
 
         from ..storage import TaskStore
+
+        if self.cancel_event.is_set():
+            yield EffectDecision(EffectDecisionKind.proposal_required)
+            return
 
         aggregate_actions = {
             EffectActionKind.publication_overhead,
@@ -747,6 +859,7 @@ class CloudPublisher:
         lease_seconds: int = MAX_LEASE_SECONDS,
         retry_backoff_seconds: int = 1,
         retry_policy: PublicationRetryPolicy,
+        cancel_event: Event | None = None,
     ) -> None:
         if _identifier(worker_id) is None:
             raise PublicationError(ReasonCode.invalid_identifier)
@@ -765,6 +878,7 @@ class CloudPublisher:
         self.lease_seconds = lease_seconds
         self.retry_backoff_seconds = retry_backoff_seconds
         self.retry_policy = retry_policy
+        self.cancel_event = cancel_event or Event()
 
     def _time(self) -> datetime:
         return _timestamp(self._clock(), _now())
@@ -1847,6 +1961,25 @@ class CloudPublisher:
             return early
         if durable is None:
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
+        with _LeaseWork(self) as work:
+            try:
+                return self._publish_claimed(
+                    publication_id, source, durable, hide_reason, compose_kwargs, work
+                )
+            except PublicationStopped:
+                assert work.failure is not None
+                return work.failure
+
+    def _publish_claimed(
+        self,
+        publication_id: str,
+        source: object | None,
+        durable: object,
+        hide_reason: str | None,
+        compose_kwargs: Mapping[str, object] | None,
+        work: _LeaseWork,
+    ) -> PublicationResult:
+        generation = None
         if hide_reason is not None:
             return self._reconcile_hide(durable, hide_reason, phase="hide")
         state = _status(getattr(durable, "state", ""))
@@ -1862,11 +1995,14 @@ class CloudPublisher:
             if source is None:
                 return self._block(durable, "invalid_metadata", hide=False, phase="compose")
             try:
-                composed_value = _call_composer(
-                    self.compose,
-                    source,
-                    task_id=str(getattr(durable, "task_id", "")),
-                    kwargs=compose_kwargs or {},
+                composed_value = work.call(
+                    durable,
+                    lambda: _call_composer(
+                        self.compose,
+                        source,
+                        task_id=str(getattr(durable, "task_id", "")),
+                        kwargs=compose_kwargs or {},
+                    ),
                 )
             except Exception:
                 return self._block(durable, "invalid_metadata", hide=False, phase="compose")
@@ -1946,12 +2082,15 @@ class CloudPublisher:
                     ) as decision:
                         if not decision.allowed:
                             return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="public")
-                        verified = self.r2.put_object(
-                            key,
-                            item.content,
-                            R2ObjectClass.public,
-                            expected_sha256=item.sha256,
-                            expected_size=item.byte_size,
+                        verified = work.call(
+                            durable,
+                            lambda: self.r2.put_object(
+                                key,
+                                item.content,
+                                R2ObjectClass.public,
+                                expected_sha256=item.sha256,
+                                expected_size=item.byte_size,
+                            ),
                         )
                     if verified is not None and (
                         getattr(verified, "key", key) != key
@@ -1993,12 +2132,15 @@ class CloudPublisher:
                     ) as decision:
                         if not decision.allowed:
                             return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="private")
-                        verified = self.r2.put_object(
-                            key,
-                            item.content,
-                            R2ObjectClass.private,
-                            expected_sha256=item.sha256,
-                            expected_size=item.byte_size,
+                        verified = work.call(
+                            durable,
+                            lambda: self.r2.put_object(
+                                key,
+                                item.content,
+                                R2ObjectClass.private,
+                                expected_sha256=item.sha256,
+                                expected_size=item.byte_size,
+                            ),
                         )
                     if verified is not None and (
                         getattr(verified, "key", key) != key
@@ -2033,7 +2175,7 @@ class CloudPublisher:
                 ) as decision:
                     if not decision.allowed:
                         return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="stage")
-                    staged = self.d1.stage(generation.payload)
+                    staged = work.call(durable, lambda: self.d1.stage(generation.payload))
                 if staged is not None and (
                     getattr(staged, "publication_id", publication_id) != publication_id
                     or getattr(staged, "task_id", generation.task_id) != generation.task_id
@@ -2065,7 +2207,7 @@ class CloudPublisher:
                 ) as decision:
                     if not decision.allowed:
                         return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="expose")
-                    exposed = self.d1.expose(generation.payload)
+                    exposed = work.call(durable, lambda: self.d1.expose(generation.payload))
                 if (
                     getattr(exposed, "state", "visible") != "visible"
                     or getattr(exposed, "publication_id", publication_id) != publication_id
@@ -2102,6 +2244,7 @@ def publish_generation(
     generation: object | None = None,
     claimed_generation: object | None = None,
     compose_kwargs: Mapping[str, object] | None = None,
+    cancel_event: Event | None = None,
 ) -> PublicationResult:
     """Functional wrapper for :class:`CloudPublisher`."""
 
@@ -2115,6 +2258,7 @@ def publish_generation(
         lease_seconds=lease_seconds,
         retry_backoff_seconds=retry_backoff_seconds,
         retry_policy=retry_policy,
+        cancel_event=cancel_event,
     ).publish(
         publication_id,
         source,

@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .cancellation import check_publication_active
 from .envelope import (
     EnvelopeError,
     _COST_FIELDS,
@@ -1073,6 +1074,7 @@ class D1PublicationClient:
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > self.max_response_bytes or len(encoded) > MAX_BATCH_BYTES:
             _invalid()
+        check_publication_active()
         try:
             response = self._client.post(
                 self.endpoint,

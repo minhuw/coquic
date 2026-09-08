@@ -1151,7 +1151,8 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
     assert store.generation.reason == "unsafe_content"
     assert provider.head_visible is True
     assert provider.hide_attempts == 1
-    assert store.events[:5] == ["claim", "building", "renew", "begin_hide", "d1:hide-attempt"]
+    assert store.events[:5] == ["claim", "building", "renew", "renew", "renew"]
+    assert store.events[5:7] == ["begin_hide", "d1:hide-attempt"]
 
     # The pending hide fence is durable; the next worker unit retries the
     # provider boundary without composing or changing the public state.
@@ -1482,3 +1483,296 @@ def test_r2_conflict_is_permanent_and_hides_after_block() -> None:
     assert result.status is PublicationStatus.blocked
     assert result.reason == "precondition"
     assert "d1:hide" in store.events
+
+
+class _LeaseClock:
+    def __init__(self) -> None:
+        self.seconds = 0
+        self.renewed = threading.Condition()
+        self.renewals = 0
+
+    def now(self) -> datetime:
+        return NOW + timedelta(seconds=self.seconds)
+
+    def tick(self, seconds: int = 4) -> None:
+        with self.renewed:
+            previous = self.renewals
+            self.seconds += seconds
+            assert self.renewed.wait_for(lambda: self.renewals > previous, timeout=3)
+
+
+@pytest.fixture
+def lease_operation(tmp_path, monkeypatch):
+    from coquic_steward.publication import publisher as publisher_module
+    from coquic_steward.publication.cancellation import check_publication_active
+
+    store = _sqlite_store(tmp_path / "lease.sqlite")
+    store.enqueue_publication(_sqlite_generation())
+    clock = _LeaseClock()
+    renew = store.renew_publication_lease
+
+    def observed_renew(worker_id, **kwargs):
+        before = store.get_publication_generation(IDENTITY.publication_id)
+        result = renew(worker_id, **kwargs)
+        if result.status is PublicationOperationStatus.renewed:
+            assert worker_id == "worker-1"
+            assert before.lease_owner == worker_id
+            assert before.lease_expires_at > kwargs["now"]
+            with clock.renewed:
+                clock.renewals += 1
+                clock.renewed.notify_all()
+        return result
+
+    monkeypatch.setattr(store, "renew_publication_lease", observed_renew)
+    stopped = threading.Event()
+    work_renew = publisher_module._LeaseWork._renew
+
+    def observe_stop(work, generation):
+        work_renew(work, generation)
+        if work.failure is not None:
+            stopped.set()
+
+    monkeypatch.setattr(publisher_module._LeaseWork, "_renew", observe_stop)
+    cancel = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+    errors = []
+    paused = ["compose"]
+    composer_error = [False]
+    composer_action = [None]
+
+    def pause(phase):
+        if paused[0] == phase:
+            entered.set()
+            assert release.wait(5), "test must release admitted work"
+        check_publication_active()
+
+    class Provider(_SQLitePublicationProvider):
+        expose_calls = 0
+        stage_calls = 0
+
+        def put_object(self, key, content, *args, **kwargs):
+            pause("public")
+            assert content == _composed().objects[0].content
+            return super().put_object(key, content, *args, **kwargs)
+
+        def stage(self, payload):
+            pause("stage")
+            self.stage_calls += 1
+            return super().stage(payload)
+
+        def expose(self, payload):
+            pause("expose")
+            self.expose_calls += 1
+            return super().expose(payload)
+
+    provider = Provider()
+
+    def compose(source, **kwargs):
+        pause("compose")
+        if composer_action[0] is not None:
+            composer_action[0]()
+        if composer_error[0]:
+            raise ValueError("composer failed")
+        return _composed()
+
+    publisher = CloudPublisher(
+        store, provider, provider, "worker-1",
+        compose=PublicationComposer(compose), now=clock.now,
+        lease_seconds=9, retry_policy=POLICY, cancel_event=cancel,
+    )
+    source = {"stable": True}
+
+    def publish():
+        try:
+            results.append(publisher.publish(IDENTITY.publication_id, source=source))
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=publish)
+    fixture = SimpleNamespace(
+        store=store, clock=clock, provider=provider, cancel=cancel,
+        entered=entered, release=release, results=results, errors=errors, stopped=stopped,
+        paused=paused, composer_error=composer_error, composer_action=composer_action, thread=thread,
+        publisher=publisher,
+    )
+    yield fixture
+    release.set()
+    if thread.ident is not None:
+        thread.join(5)
+        assert not thread.is_alive()
+    assert not errors
+    assert source == {"stable": True}
+    assert not any(t.name.startswith("publication-work") for t in threading.enumerate())
+    store.engine.dispose()
+
+
+@pytest.mark.parametrize("phase", ["compose", "public", "stage", "expose"])
+def test_live_work_renews_multiple_times_past_original_lease(lease_operation, phase):
+    op = lease_operation
+    op.paused[0] = phase
+    op.thread.start()
+    assert op.entered.wait(3)
+    for _ in range(3):
+        op.clock.tick()
+        row = op.store.get_publication_generation(IDENTITY.publication_id)
+        assert row.lease_owner == "worker-1"
+        assert row.attempt == 1
+        assert row.lease_expires_at > op.clock.now()
+    assert op.clock.now() > NOW + timedelta(seconds=9)
+    op.release.set()
+    op.thread.join(3)
+    assert op.results[0].status is PublicationStatus.exposed
+    assert op.provider.put_attempts == op.provider.stage_calls == op.provider.expose_calls == 1
+    assert len(op.store.list_publication_receipts(IDENTITY.publication_id)) == 1
+    row = op.store.get_publication_generation(IDENTITY.publication_id)
+    assert row.state is PublicationState.exposed
+    assert row.lease_owner is None
+
+
+@pytest.mark.parametrize("phase", ["compose", "public", "stage", "expose"])
+@pytest.mark.parametrize("loss", ["hide", "cancel", "other-worker", "same-worker"])
+def test_long_work_stops_on_fence_without_resurrection(lease_operation, phase, loss):
+    op = lease_operation
+    op.paused[0] = phase
+    op.thread.start()
+    assert op.entered.wait(3)
+    op.clock.tick()
+    receipts = op.store.list_publication_receipts(IDENTITY.publication_id)
+    if loss == "hide":
+        op.store.begin_publication_hide("task-1", "operator_blocked", now=op.clock.now())
+    elif loss == "cancel":
+        op.cancel.set()
+    else:
+        op.clock.seconds += 10
+        op.store.expire_publication_leases(now=op.clock.now())
+        result = op.store.claim_publication(
+            "worker-1" if loss == "same-worker" else "worker-2",
+            publication_id=IDENTITY.publication_id,
+            now=op.clock.now(), lease_seconds=9, retry_policy=POLICY,
+        )
+        assert result.status is PublicationOperationStatus.claimed
+    before = op.store.get_publication_generation(IDENTITY.publication_id)
+    op.clock.seconds += 4
+    assert op.stopped.wait(3)
+    renewals = op.clock.renewals
+    op.clock.seconds += 4
+    op.release.set()
+    op.thread.join(3)
+    expected = PublicationStatus.blocked if loss == "cancel" else PublicationStatus.lost_claim
+    assert op.results[0].status is expected
+    assert op.clock.renewals == renewals
+    assert op.provider.expose_calls == 0
+    assert op.store.list_publication_receipts(IDENTITY.publication_id) == receipts
+    assert op.store.get_publication_generation(IDENTITY.publication_id) == before
+
+
+def test_composer_exception_after_renewals_joins_before_blocking(lease_operation):
+    op = lease_operation
+    op.composer_error[0] = True
+    op.thread.start()
+    assert op.entered.wait(3)
+    for _ in range(3):
+        op.clock.tick()
+    op.release.set()
+    op.thread.join(3)
+    assert op.results[0].status is PublicationStatus.blocked
+    assert op.results[0].reason == "invalid_metadata"
+    assert op.provider.put_attempts == op.provider.expose_calls == 0
+    row = op.store.get_publication_generation(IDENTITY.publication_id)
+    assert row.state is PublicationState.blocked
+    assert row.lease_owner is None
+
+
+def test_cancel_drains_composer_subprocess_and_scoped_worker(lease_operation, monkeypatch):
+    import sys
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner
+    from coquic_steward.publication.cancellation import run_publication_process
+
+    op = lease_operation
+    registered = threading.Event()
+    owners = []
+    original = ProcessGroupCancellationOwner.register
+
+    def register(owner, process):
+        original(owner, process)
+        owners.append(owner)
+        registered.set()
+
+    monkeypatch.setattr(ProcessGroupCancellationOwner, "register", register)
+    op.paused[0] = None
+    op.composer_action[0] = lambda: run_publication_process(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        capture_output=True, text=False, timeout=60, check=False, pass_fds=(), env={},
+    )
+    op.thread.start()
+    assert registered.wait(3)
+    op.cancel.set()
+    op.thread.join(3)
+    assert not op.thread.is_alive()
+    assert op.results[0].status is PublicationStatus.blocked
+    assert owners and all(owner.active_count == 0 for owner in owners)
+    assert op.provider.put_attempts == op.provider.expose_calls == 0
+
+
+def test_exposed_replay_authenticates_without_reacquiring_lease(lease_operation):
+    op = lease_operation
+    op.release.set()
+    op.thread.start()
+    op.thread.join(3)
+    assert op.results[0].status is PublicationStatus.exposed
+    count = op.clock.renewals
+    result = op.publisher.publish(IDENTITY.publication_id, source={"stable": True})
+    assert result.status is PublicationStatus.exposed
+    assert op.provider.expose_calls == 1
+    assert op.clock.renewals == count
+
+
+def test_dry_run_admission_stops_live_composition_renewal(lease_operation):
+    op = lease_operation
+    op.thread.start()
+    assert op.entered.wait(3)
+    op.clock.tick()
+    op.store.resolve_execution_modes(True)
+    before = op.store.get_publication_generation(IDENTITY.publication_id)
+    op.clock.seconds += 4
+    assert op.stopped.wait(3)
+    renewals = op.clock.renewals
+    op.release.set()
+    op.thread.join(3)
+    assert op.results[0].status is PublicationStatus.blocked
+    assert op.clock.renewals == renewals
+    assert op.provider.put_attempts == op.provider.expose_calls == 0
+    assert op.store.get_publication_generation(IDENTITY.publication_id) == before
+
+
+def test_owned_scanner_process_preserves_descriptor_bytes_and_timeout_cleanup(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner, use_subprocess_owner
+    from coquic_steward.publication.cancellation import publication_checkpoint, run_publication_process
+
+    source = tmp_path / "scanner-input"
+    source.write_bytes(b"\xff\x00source\n")
+    owner = ProcessGroupCancellationOwner("publication-test")
+    token = publication_checkpoint.set(lambda: None)
+    kwargs = dict(capture_output=True, text=False, check=False, env=os.environ.copy())
+    try:
+        with use_subprocess_owner(owner), source.open("rb") as handle:
+            result = run_publication_process(
+                [sys.executable, "-c", f"import os; os.write(1, os.read({handle.fileno()}, 1024))"],
+                pass_fds=(handle.fileno(),), timeout=3, **kwargs,
+            )
+            assert result.stdout == source.read_bytes() == b"\xff\x00source\n"
+            assert result.stderr == b""
+            assert result.returncode == 0
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_publication_process(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    pass_fds=(), timeout=0.05, **kwargs,
+                )
+    finally:
+        publication_checkpoint.reset(token)
+    assert owner.active_count == 0

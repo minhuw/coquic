@@ -2460,3 +2460,27 @@ def test_overhead_digest_and_error_mapping_remain_d1_owned() -> None:
     with pytest.raises(D1Error) as error:
         _overhead_digest((overhead,), supplied="0" * 64)
     assert error.value.code == D1ErrorCode.digest_mismatch
+
+
+def test_cancellation_checkpoint_stops_multirequest_exposure_before_head_write():
+    from coquic_steward.publication.cancellation import PublicationStopped, publication_checkpoint
+
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication()
+    d1.stage(payload)
+    before = len(server.requests)
+
+    def checkpoint():
+        if len(server.requests) >= before + 2:
+            raise PublicationStopped()
+
+    token = publication_checkpoint.set(checkpoint)
+    try:
+        with pytest.raises(PublicationStopped):
+            d1.expose(payload)
+    finally:
+        publication_checkpoint.reset(token)
+    assert len(server.requests) == before + 2
+    assert server.connection.execute("SELECT COUNT(*) FROM task_heads").fetchone()[0] == 0
+    assert server.connection.execute("SELECT state FROM publication_generations").fetchone()[0] == "staged"

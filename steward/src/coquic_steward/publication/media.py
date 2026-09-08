@@ -24,6 +24,7 @@ from typing import Any, Final
 from PIL import Image, UnidentifiedImageError
 from PIL.Image import DecompressionBombError, DecompressionBombWarning
 
+from .cancellation import run_publication_process
 from .models import (
     AtifDocument,
     FileIdentity,
@@ -1097,7 +1098,7 @@ def _run_ocr(
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > MAX_OCR_TIMEOUT_SECONDS:
         return (), 0, ReasonCode.ocr_failure
     texts: list[str] = []
-    selected = runner or subprocess.run
+    selected = runner or run_publication_process
 
     def scan(root: Path) -> tuple[tuple[str, ...], int, ReasonCode | None]:
         with private_staging(root) as staging:

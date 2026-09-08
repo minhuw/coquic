@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Final
 
+from .cancellation import run_publication_process
 from .models import (
     MAX_ARTIFACTS,
     MAX_FINDINGS,
@@ -286,7 +287,7 @@ def _invoke(
     runner: Callable[..., Any] | None,
     pass_fds: tuple[int, ...],
 ) -> Any:
-    selected = runner or subprocess.run
+    selected = runner or run_publication_process
     env = os.environ.copy()
     # TruffleHog's filesystem mode is local-only.  Keep the policy in the
     # explicit argv flags below; environment aliases are deliberately omitted

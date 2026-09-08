@@ -270,3 +270,21 @@ def test_credentials_are_read_only_at_construction_and_not_retained(
     assert captured["aws_secret_access_key"] == "secret-value"
     assert "secret-value" not in repr(client)
     assert client.put_object(PUBLIC_KEY, BODY).verified
+
+
+def test_cancellation_checkpoint_fences_followup_head_request():
+    from coquic_steward.publication.cancellation import PublicationStopped, publication_checkpoint
+
+    fake = FakeS3(head=_head())
+
+    def checkpoint():
+        if fake.calls:
+            raise PublicationStopped()
+
+    token = publication_checkpoint.set(checkpoint)
+    try:
+        with pytest.raises(PublicationStopped):
+            _r2(fake).put_object(PUBLIC_KEY, BODY)
+    finally:
+        publication_checkpoint.reset(token)
+    assert [call[0] for call in fake.calls] == ["put_object"]

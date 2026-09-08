@@ -24,6 +24,8 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError
 
+from .cancellation import check_publication_active
+
 
 MAX_R2_OBJECT_BYTES: Final[int] = 64 * 1024 * 1024
 # S3 keys are bounded at 1 KiB here; the public D1 grammar is narrower while
@@ -498,6 +500,7 @@ class R2Client:
             metadata=expected_metadata,
             object_class=klass,
         )
+        check_publication_active()
         try:
             self._client.put_object(**request.as_kwargs())
         except Exception as error:
@@ -539,6 +542,7 @@ class R2Client:
         conflict: bool,
         uploaded: bool = False,
     ) -> R2PutResult:
+        check_publication_active()
         try:
             response = self._client.head_object(Bucket=bucket, Key=key)
         except Exception as error:

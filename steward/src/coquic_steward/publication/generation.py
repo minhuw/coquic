@@ -22,6 +22,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
+from .cancellation import check_publication_active
 from .envelope import (
     EnvelopeError,
     publication_metadata_digest,
@@ -1722,6 +1723,7 @@ def _build_generation(
     outcomes: list[PublicationOutcome] = []
     preflight: list[ReasonCode] = []
     for entry in run_entries:
+        check_publication_active()
         reason = _preflight(entry)
         if reason is not None:
             preflight.append(reason)

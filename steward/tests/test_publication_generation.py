@@ -707,3 +707,27 @@ def test_redacted_run_keeps_private_original_outside_public_payload() -> None:
     assert secret.encode() in result.private_originals[0].content
     rendered = json.dumps(result.as_dict(), sort_keys=True).encode()
     assert secret.encode() not in rendered
+
+
+def test_cancellation_checkpoint_stops_before_next_run_build():
+    from coquic_steward.publication.cancellation import PublicationStopped, publication_checkpoint
+
+    graph = _graph(_source(run_id="run-first"))
+    graph["runs"].append(_source(run_id="run-second"))
+    calls = []
+
+    def builder(source, **kwargs):
+        calls.append(source)
+        return build_publication_bundle(source, **kwargs)
+
+    def checkpoint():
+        if calls:
+            raise PublicationStopped()
+
+    token = publication_checkpoint.set(checkpoint)
+    try:
+        with pytest.raises(PublicationStopped):
+            compose_publication_generation(graph, run_builder=builder, scanner_runner=_scanner)
+    finally:
+        publication_checkpoint.reset(token)
+    assert len(calls) == 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1407,6 +1408,9 @@ def test_health_fails_closed_when_database_state_is_unavailable(
     assert payload["quiescent"] is False
     assert payload["lifecycle"] == "ambiguous"
     assert payload["heartbeat"] == "degraded"
+    assert payload["activeTasks"] is None
+    assert payload["cleanupPending"] is None
+    assert payload["containerCounts"] is None
     assert "private database detail" not in result.stdout
 
 
@@ -1416,6 +1420,13 @@ def test_health_is_not_quiescent_with_pending_archive_outbox(
     config = StewardConfig(repo_root=tmp_path, local_codex_test_harness=True)
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
+    store.claim_daemon_instance(
+        "daemon-health-test", lifecycle="running",
+        state={
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "runtime_protocol": config.runtime_protocol,
+        },
+    )
     store.control_loop_ledger.record_runtime("running")
     assert store.control_loop_ledger.outbox(limit=1)
 
@@ -1434,6 +1445,13 @@ def test_health_uses_canonical_retryable_cleanup_count(
     config = StewardConfig(repo_root=tmp_path, local_codex_test_harness=True)
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
+    store.claim_daemon_instance(
+        "daemon-health-test", lifecycle="running",
+        state={
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "runtime_protocol": config.runtime_protocol,
+        },
+    )
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,

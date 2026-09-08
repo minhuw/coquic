@@ -275,9 +275,30 @@ bash steward/containers/manage.sh rollback
 
 `start` delegates to Compose with `restart: unless-stopped`. `stop` sends
 SIGTERM with the configured grace and preserves task containers and recovery
-state; it never calls `docker compose down`. `status` reports release,
-lifecycle, bounded pressure and cleanup facts, and safe Compose health. `logs`
-is limited to the Steward service.
+state; it never calls `docker compose down`. `status` reports the selected release
+and Compose service state/health; resource and cleanup values are unknown there.
+`logs` is limited to the Steward service.
+
+Before launch, `start` runs `coquic-steward health --store-only`: exit 0 and
+`{"mode":"store-only","store":"ok"}` mean the existing Store passes read-only
+validation, not that a daemon is running. Neither health mode creates a missing
+Store, migrates it, or resolves execution-mode admission latches. Keep the explicit
+`bootstrap → init → start` sequence.
+
+Compose and release verification use default `coquic-steward health`. Exit 0
+requires a persisted running owner, a heartbeat no older than 90 seconds, and
+matching runtime protocol and deployment release identity. Missing, stopped,
+stale, or ambiguous daemon evidence fails closed. `release` comes from the daemon
+claim, not the inspecting CLI's selected configuration. Resource pressure is
+reported separately (`pressure`, `resourceObservedAt`) and does not make a live
+daemon unhealthy; unobserved resource state is `unknown`.
+
+`cycleProgress` reports only persisted current-start and last-completion times;
+null means no recorded evidence. A fresh heartbeat does not prove scheduler or
+publication progress. Publication and cleanup fields are bounded local ledger
+facts, not remote-provider checks. Quiescence requires healthy runtime evidence,
+an explicitly recorded idle cycle state and no observed task, planner, archive,
+or cleanup work.
 
 `upgrade` first proves quiescence through the daemon health API. Without
 `--force`, active task/planner work, integration, archive writing, or cleanup

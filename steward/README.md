@@ -184,8 +184,10 @@ session homes.
 ```bash
 nix develop -c uv run --project steward python -m pytest steward/tests -q
 nix develop -c python scripts/validate_steward_cloud_contracts.py
-nix develop -c pre-commit run --files steward/README.md steward/CLOUD_PUBLICATION.md
 git diff --check
 ```
+
+`git diff --check` checks patch whitespace, not Markdown semantics. The configured
+pre-commit hooks cover C/C++ and frontend files, not these Markdown documents.
 
 The daily suite skips the expensive `goodput` and `crosstraffic` benchmarks.

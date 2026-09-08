@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 import signal
 import json
@@ -924,9 +925,23 @@ def diagnostics() -> None:
     typer.echo(json.dumps(payload, sort_keys=True))
 
 
+def _health_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
 @app.command()
-def health() -> None:
-    """Return bounded local health facts for Compose and operators."""
+def health(
+    store_only: bool = typer.Option(
+        False, "--store-only", help="Validate the existing Store without requiring a daemon."
+    ),
+) -> None:
+    """Inspect Store readiness or bounded persisted runtime evidence, without initialization."""
 
     config = load_config()
     active_tasks = 0
@@ -936,11 +951,16 @@ def health() -> None:
     archive_pending = False
     database_healthy = False
     persisted_pressure: dict[str, object] | None = None
+    daemon_state: dict[str, object] = {}
     container_counts = {"owned": 0, "active": 0, "cleanupPending": 0, "unknown": 0}
     try:
         # Health inspects existing state; it must not become a startup boundary
         # that resolves or tightens task execution-mode admission latches.
         store = TaskStore.open(config.db_path)
+        if store_only:
+            typer.echo(json.dumps({"mode": "store-only", "store": "ok"}, sort_keys=True))
+            return
+        daemon_state = store.get_daemon_state() or {}
         active_tasks = int(store.active_count())
         cleanup_pending = int(store.cleanup_pending_count())
         publication_health = publication_health_view(store)
@@ -964,15 +984,19 @@ def health() -> None:
         # Health must remain safe and bounded when the database is unavailable.
         active_tasks = cleanup_pending = 0
         archive_pending = False
+    if store_only:
+        typer.echo(json.dumps({"mode": "store-only", "store": "unavailable"}, sort_keys=True))
+        raise typer.Exit(code=1)
     free_bytes = None
     try:
-        free_bytes = int(os.statvfs(config.coquic_home).f_bavail * os.statvfs(config.coquic_home).f_frsize)
+        filesystem = os.statvfs(config.coquic_home)
+        free_bytes = int(filesystem.f_bavail * filesystem.f_frsize)
     except OSError:
         pass
     pressure = (
-        str(persisted_pressure.get("state", "resource_pressure"))
-        if persisted_pressure is not None
-        else "resource_pressure"
+        str(persisted_pressure.get("state", "unknown"))
+        if persisted_pressure is not None and persisted_pressure.get("updated_at")
+        else "unknown"
     )
     deployment = config.deployment
     if (
@@ -982,21 +1006,78 @@ def health() -> None:
         and free_bytes < deployment.min_free_bytes
     ):
         pressure = "resource_pressure"
+    owner = daemon_state.get("instance_id")
+    owner_valid = (
+        isinstance(owner, str)
+        and owner != "unknown"
+        and _PUBLICATION_IDENTIFIER.fullmatch(owner) is not None
+    )
+    lifecycle = daemon_state.get("lifecycle", "absent")
+    if not database_healthy or (daemon_state and not owner_valid) or lifecycle not in {
+        "absent", "starting", "reconciling", "running", "stopping", "stopped"
+    }:
+        lifecycle = "ambiguous"
+    heartbeat_at = _health_timestamp(daemon_state.get("heartbeat_at"))
+    heartbeat_age = (
+        (datetime.now(timezone.utc) - heartbeat_at).total_seconds()
+        if heartbeat_at is not None else None
+    )
+    # The daemon beats every 30 seconds; allow three intervals, not row-update age.
+    heartbeat = "degraded"
+    if database_healthy and heartbeat_age is not None:
+        heartbeat = (
+            "ambiguous" if heartbeat_age < 0 else
+            "ok" if heartbeat_age <= 90 else "stale"
+        )
+    release = daemon_state.get("release_id")
+    if not isinstance(release, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}", release
+    ):
+        release = None
+    runtime_protocol = daemon_state.get("runtime_protocol")
+    if not isinstance(runtime_protocol, str) or not _PUBLICATION_IDENTIFIER.fullmatch(
+        runtime_protocol
+    ):
+        runtime_protocol = None
+    release_matches = release is not None and release == deployment.release_id
+    runtime_healthy = bool(
+        database_healthy and owner_valid and lifecycle == "running"
+        and heartbeat == "ok" and runtime_protocol == config.runtime_protocol
+        and (not deployment.enabled or release_matches)
+    )
+    current_cycle = _health_timestamp(daemon_state.get("current_cycle_started_at"))
+    last_cycle = _health_timestamp(daemon_state.get("last_completed_cycle_at"))
     payload = {
-        "lifecycle": "running" if database_healthy else "ambiguous",
-        "heartbeat": "ok" if database_healthy else "degraded",
-        "quiescent": database_healthy
+        "mode": "runtime",
+        "store": "ok" if database_healthy else "unavailable",
+        "runtimeHealthy": runtime_healthy,
+        "daemonInstanceId": owner if owner_valid else None,
+        "lifecycle": lifecycle,
+        "heartbeat": heartbeat,
+        "heartbeatAt": heartbeat_at.isoformat() if heartbeat_at is not None else None,
+        "heartbeatAgeSeconds": heartbeat_age,
+        "heartbeatMaxAgeSeconds": 90,
+        "cycleProgress": {
+            "currentStartedAt": current_cycle.isoformat() if current_cycle is not None else None,
+            "lastCompletedAt": last_cycle.isoformat() if last_cycle is not None else None,
+        },
+        "quiescent": runtime_healthy
+        and "current_cycle_started_at" in daemon_state
+        and daemon_state["current_cycle_started_at"] is None
         and not (
             active_tasks
             or cleanup_pending
             or planner_active
             or archive_pending
         ),
-        "activeTasks": active_tasks,
-        "cleanupPending": cleanup_pending,
-        "plannerActive": planner_active,
-        "archivePending": archive_pending,
+        "activeTasks": active_tasks if database_healthy else None,
+        "cleanupPending": cleanup_pending if database_healthy else None,
+        "plannerActive": planner_active if database_healthy else None,
+        "archivePending": archive_pending if database_healthy else None,
         "pressure": pressure,
+        "resourceObservedAt": (
+            persisted_pressure.get("updated_at") if persisted_pressure is not None else None
+        ),
         "homeFreeBytes": free_bytes,
         "ownedDockerBytes": (
             persisted_pressure.get("owned_docker_bytes")
@@ -1009,13 +1090,14 @@ def health() -> None:
             "recoveryHomeFreeBytes": deployment.recovery_free_bytes,
             "recoveryOwnedDockerBytes": deployment.recovery_owned_docker_bytes,
         },
-        "containerCounts": container_counts,
+        "containerCounts": container_counts if database_healthy else None,
         "publicationHealth": publication_health if database_healthy else None,
-        "release": deployment.release_id,
-        "runtimeProtocol": config.runtime_protocol,
+        "release": release,
+        "releaseMatches": release_matches,
+        "runtimeProtocol": runtime_protocol,
     }
     typer.echo(json.dumps(payload, sort_keys=True))
-    if not database_healthy:
+    if not runtime_healthy:
         raise typer.Exit(code=1)
 
 

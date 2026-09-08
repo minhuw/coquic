@@ -339,7 +339,7 @@ running_release_identity() {
 import json, sys
 value = json.loads(sys.stdin.read())
 release = value.get("release")
-if value.get("lifecycle") != "running" or value.get("heartbeat") != "ok" or value.get("runtimeProtocol") != "task-container-v1":
+if value.get("runtimeHealthy") is not True or value.get("releaseMatches") is not True or value.get("lifecycle") != "running" or value.get("heartbeat") != "ok" or value.get("runtimeProtocol") != "task-container-v1":
     raise SystemExit(1)
 if not isinstance(release, str) or "\n" in release:
     raise SystemExit(1)
@@ -686,14 +686,14 @@ validate_store() {
     return 0
   fi
   local health
-  health="$(compose_run run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health 2>/dev/null)" || \
+  health="$(compose_run run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health --store-only 2>/dev/null)" || \
     die 'Store validation failed before start'
   python - "$health" <<'PY' || die 'Store validation failed before start'
 import json
 import sys
 
 value = json.loads(sys.argv[1])
-if value.get("lifecycle") != "running" or value.get("heartbeat") != "ok":
+if value.get("mode") != "store-only" or value.get("store") != "ok":
     raise SystemExit(1)
 PY
 }
@@ -752,7 +752,7 @@ verify_release_health() {
 import json, sys
 value = json.load(sys.stdin)
 expected = sys.argv[1]
-raise SystemExit(0 if value.get("lifecycle") == "running" and value.get("heartbeat") == "ok" and value.get("release") == expected and value.get("runtimeProtocol") == "task-container-v1" else 1)
+raise SystemExit(0 if value.get("runtimeHealthy") is True and value.get("releaseMatches") is True and value.get("lifecycle") == "running" and value.get("heartbeat") == "ok" and value.get("release") == expected and value.get("runtimeProtocol") == "task-container-v1" else 1)
 ' "$release" <<<"$health"; then
       return 0
     fi

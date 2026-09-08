@@ -474,6 +474,64 @@ PY
   "$manage" rollback >/dev/null
 }
 
+# Exercise the production health-call branches independently of the fake
+# deployment fixture: Store readiness is valid while the daemon is stopped.
+check_health_contract() (
+  unset STEWARD_MANAGE_FAKE
+  local deployment="$home/private/deployment" repository="$home/repository"
+  local running=0 ready=1 health_release=release-test matches=true runtime_healthy=true
+  local lifecycle=running heartbeat=ok protocol=task-container-v1
+  source <(sed -n '/^validate_store() {$/,/^}$/p' "$manage")
+  source <(sed -n '/^verify_release_health() {$/,/^}$/p' "$manage")
+  source <(sed -n '/^running_release_identity() {$/,/^}$/p' "$manage")
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  sleep() { :; }
+  expect_health_refusal() {
+    if "$@"; then
+      printf 'expected health refusal: %s\n' "$*" >&2
+      exit 1
+    fi
+  }
+  compose_run() {
+    if [[ "$*" == 'run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health --store-only' ]]; then
+      [[ "$ready" == 1 ]] || return 1
+      printf '%s\n' '{"mode":"store-only","store":"ok"}'
+    elif [[ "$*" == "exec -T --workdir $repository steward /usr/bin/env coquic-steward health" ]]; then
+      [[ "$running" == 1 ]] || return 1
+      printf '{"mode":"runtime","runtimeHealthy":%s,"releaseMatches":%s,"lifecycle":"%s","heartbeat":"%s","release":"%s","runtimeProtocol":"%s"}\n' \
+        "$runtime_healthy" "$matches" "$lifecycle" "$heartbeat" "$health_release" "$protocol"
+    else
+      printf 'unexpected health invocation: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+  validate_store
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+  ready=0
+  if (validate_store) 2>/dev/null; then exit 1; fi
+  ready=1 running=1
+  verify_release_health release-test
+  [[ "$(running_release_identity)" == release-test ]]
+  health_release=old-release
+  expect_health_refusal verify_release_health release-test
+  health_release=release-test matches=false
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+  matches=true runtime_healthy=false
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+  runtime_healthy=true heartbeat=stale
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+  heartbeat=ok lifecycle=stopped
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+  lifecycle=running protocol=wrong-protocol
+  expect_health_refusal verify_release_health release-test
+  expect_health_refusal running_release_identity
+)
+
 case "$mode" in
   --config)
     check_environment_template
@@ -589,6 +647,7 @@ PY
     [[ -d "$home/worktrees/unexpected" && "$(cat "$home/private/deployment/current")" == "$first" ]]
     ;;
   --init)
+    check_health_contract
     "$manage" bootstrap >/dev/null
     [[ ! -e "$home/steward.sqlite" ]]
     expect_manage_refusal start

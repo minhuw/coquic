@@ -140,8 +140,10 @@ def test_ordinary_cli_and_health_refuse_absent_store_without_creating_it(
 ) -> None:
     status = _invoke(repo, monkeypatch, "status")
     health = _invoke(repo, monkeypatch, "health")
+    readiness = _invoke(repo, monkeypatch, "health", "--store-only")
 
     assert status.exit_code != 0
     assert health.exit_code == 1
+    assert readiness.exit_code == 1
     config = load_config()
     assert not config.db_path.exists()

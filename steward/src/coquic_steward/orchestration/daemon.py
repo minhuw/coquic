@@ -54,6 +54,7 @@ from ..storage.sqlite import (
 )
 from ..execution.container import bind_deployment_identity
 from ..execution.session import (
+    worktree_checkpoint,
     FreshPlannerSession,
     InvocationStatus,
     ResumeCategory,
@@ -1997,6 +1998,53 @@ class StewardDaemon:
                     evidence={"error": exc.__class__.__name__},
                 )
 
+        # Legacy wording runs carry no authority over an approved tree. Once
+        # their wrapper is stopped, finish the retained phase deterministically.
+        if (self.executor._pipeline_cursor(task.id, owner_id) == PipelineCursorPhase.commit_message
+                and not any(str(run.state) == "running" for run in runs)):
+            active = self._unfinished_phase_event(task.id, owner_id)
+            if active is not None:
+                self._release_phase_action(task.id, owner_id, "commit_message", str(active.data["action_id"]))
+            wording = self.executor.advance_once(task.id)
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.ingested if wording.next_phase == PipelineCursorPhase.commit else ReconciliationDisposition.blocked,
+                "commit wording reconciled deterministically",
+            )
+
+        # A terminal run is not a phase receipt. The process can die after
+        # session success was stored but before the caller consumed its output.
+        events = self.store.events(task.id, kinds=(
+            "pipeline.phase.finished", "session.result.ingested",
+            "session.recovery.completed",
+        ))
+        for run in reversed(runs):
+            if str(run.state) != "succeeded" or run.pipeline_id != owner_id:
+                continue
+            try:
+                predecessor = self._result_predecessor(run)
+                action = self.store.get_session(predecessor.session_id).idempotency_key
+            except (ValueError, KeyError):
+                return ReconciliationOutcome(task.id, ReconciliationDisposition.blocked, "successful result lineage ownership is invalid", run_id=run.id)
+            if not action:
+                return ReconciliationOutcome(task.id, ReconciliationDisposition.blocked, "successful result has no phase action identity", run_id=run.id)
+            if any(
+                (event.kind == "pipeline.phase.finished"
+                 and event.data.get("pipeline_id") == run.pipeline_id
+                 and event.data.get("output", {}).get("action_id") == action)
+                or event.data.get("run_id") == run.id
+                or event.data.get("recovered_run_id") == run.id
+                for event in events
+            ):
+                continue
+            completed = self._complete_atomic_run_result(task, run)
+            if completed is not None:
+                return completed
+            return ReconciliationOutcome(
+                task.id, ReconciliationDisposition.blocked,
+                "successful run has incomplete result artifacts", run_id=run.id,
+            )
+
         running = [run for run in runs if str(run.state) == "running"]
         if len(running) > 1:
             return ReconciliationOutcome(
@@ -2057,7 +2105,16 @@ class StewardDaemon:
                 pass
             runs = self.store.list_runs(task.id)
 
-        root = self._interrupted_recovery_root(runs)
+        finished_actions = {
+            (event.data.get("pipeline_id"), event.data.get("output", {}).get("action_id"))
+            for event in events if event.kind == "pipeline.phase.finished"
+        }
+        unresolved = [
+            run for run in runs
+            if run.pipeline_id == owner_id
+            and (run.pipeline_id, self.store.get_session(run.session_id).idempotency_key) not in finished_actions
+        ]
+        root = self._interrupted_recovery_root(unresolved)
         if root is not None and self.session_supervisor is not None:
             return self._resume_or_recover(task, root, runs)
         if root is not None:
@@ -2235,13 +2292,21 @@ class StewardDaemon:
                 ReconciliationDisposition.blocked,
                 "execution ownership is missing",
             )
+        if self.store.events(task.id, kinds=("pipeline.preparation.intent",), pipeline_id=pipeline_id, limit=1):
+            try:
+                prepared = self.executor.advance_once(task.id)
+            except Exception as exc:
+                return ReconciliationOutcome(task.id, ReconciliationDisposition.blocked, "base-change preparation could not be reconciled", evidence={"error": exc.__class__.__name__})
+            if prepared.status != "child_pipeline":
+                return ReconciliationOutcome(task.id, ReconciliationDisposition.blocked, "base-change preparation remains unresolved")
+            return ReconciliationOutcome(task.id, ReconciliationDisposition.ingested, "recorded base-change preparation reconciled")
         active = self._unfinished_phase_event(task.id, pipeline_id)
         if active is None:
             return None
         phase = str(active.data.get("phase") or "")
         action = str(active.data.get("action_id") or "")
         pipeline = self.store.get_pipeline(pipeline_id)
-        if phase in {"provisioned", "validation", "integration"}:
+        if phase in {"provisioned", "validation", "integration", "commit_message"}:
             self._release_phase_action(task.id, pipeline_id, phase, action)
             return ReconciliationOutcome(
                 task.id,
@@ -2478,7 +2543,7 @@ class StewardDaemon:
 
     def _unfinished_phase_event(self, task_id: str, pipeline_id: str):
         states: dict[str, tuple[str, object]] = {}
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.phase.started", "pipeline.phase.finished", "pipeline.phase.interrupted"), pipeline_id=pipeline_id):
             if event.data.get("pipeline_id") != pipeline_id:
                 continue
             if event.kind == "pipeline.phase.started":
@@ -2594,11 +2659,28 @@ class StewardDaemon:
                 return "persisted push is not reachable from fetched remote ancestry"
         return None
 
+    def _result_predecessor(self, run: object) -> object:
+        """Resolve the original phase owner, never a recovery session's key."""
+        current = run
+        seen = {run.id}
+        while current.resume_of_run_id or current.retry_of_run_id:
+            parent_id = current.resume_of_run_id or current.retry_of_run_id
+            if parent_id in seen:
+                raise ValueError("cyclic recovery lineage")
+            seen.add(parent_id)
+            parent = self.store.get_run(parent_id)
+            if (parent.task_id, parent.pipeline_id, parent.role) != (run.task_id, run.pipeline_id, run.role):
+                raise ValueError("recovery lineage ownership mismatch")
+            current = parent
+        return current
+
     def _complete_atomic_run_result(
         self,
         task: TaskRecord,
         run: object,
     ) -> ReconciliationOutcome | None:
+        if run.task_id != task.id or self.store.get_execution(task.id).owning_pipeline_id != run.pipeline_id:
+            return None
         run_dir = (
             TaskArchiveWriter(self.config).task_dir(task.id)
             / "pipelines"
@@ -2608,14 +2690,37 @@ class StewardDaemon:
         )
         result_path = run_dir / "result.json"
         last_message = run_dir / "last-message.md"
-        if not result_path.is_file() or not last_message.is_file():
+        if not result_path.is_file():
             return None
         try:
+            if result_path.stat().st_size > 16_384:
+                return None
             result_metadata = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if result_metadata.get("status") != "available":
+        if not isinstance(result_metadata, dict) or result_metadata.get("status") != "available":
             return None
+        incomplete = ReconciliationOutcome(
+            task.id, ReconciliationDisposition.blocked,
+            "successful run has incomplete result artifacts", run_id=run.id,
+        )
+        try:
+            predecessor = self._result_predecessor(run)
+            session = self.store.get_session(run.session_id)
+            if (result_metadata.get("task_id"), result_metadata.get("pipeline_id"),
+                result_metadata.get("session_id"), result_metadata.get("run_id")) != (
+                    task.id, run.pipeline_id, run.session_id, run.id):
+                return incomplete
+            if not (run_dir / "codex.jsonl").is_file():
+                return incomplete
+            if not last_message.read_text(encoding="utf-8").strip():
+                return incomplete
+            if session.cwd is None or task.worktree_path is None or Path(session.cwd).resolve() != Path(task.worktree_path).resolve():
+                return incomplete
+            if result_metadata.get("output_checkpoint") != worktree_checkpoint(self.config, session.cwd):
+                return incomplete
+        except (OSError, ValueError, KeyError, RuntimeError):
+            return incomplete
         try:
             saved = self.store.transition_run(
                 run.id,
@@ -2630,7 +2735,7 @@ class StewardDaemon:
                 return None
         result = self._session_result_from_run(saved)
         try:
-            reconciled = self.executor.reconcile_session_result(run.id, result)
+            reconciled = self.executor.reconcile_session_result(predecessor.id, result)
         except Exception as exc:
             return ReconciliationOutcome(
                 task.id,

@@ -3007,25 +3007,26 @@ def test_durable_push_skips_terminal_integration_source(
     assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
     assert commands == []
 
-def test_durable_commit_message_failure_blocks_before_push(
+def test_approved_patch_never_calls_optional_commit_wording(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
     config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
     original_run = executor.runner.run
+    stages = []
 
-    def invalid_commit_message(task, prompt, cwd, **kwargs):
-        result = original_run(task, prompt, cwd, **kwargs)
+    def without_commit_wording(task, prompt, cwd, **kwargs):
         stage = kwargs.get("stage")
-        if getattr(stage, "value", stage) == "commit_message":
-            result.final_message = '{"subject":"not conventional","body":"Body"}'
-        return result
+        assert stage != CodexStage.commit_message
+        stages.append(stage)
+        return original_run(task, prompt, cwd, **kwargs)
 
-    monkeypatch.setattr(executor.runner, "run", invalid_commit_message)
-    assert not drive_durable(executor, integration.id)
-    saved = store.get(integration.id)
-    assert saved.status == TaskStatus.blocked
-    assert saved.summary == "commit message generation failed"
-    assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+    monkeypatch.setattr(executor.runner, "run", without_commit_wording)
+    assert drive_durable(executor, integration.id)
+    assert stages == [CodexStage.code, CodexStage.review]
+    assert any(event.kind == "pipeline.push" for event in store.events(integration.id))
+    message = next(event.data for event in store.events(integration.id) if event.kind == "pipeline.commit_message")
+    assert parse_commit_message(json.dumps(message)) is not None
+
 
 def test_durable_integration_phase_preserves_child_pipeline_boundaries(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -3342,3 +3343,242 @@ def test_executor_uses_durable_phase_order_for_validation_and_review(
         "provisioned", "implementation", "validation", "review", "integration", "commit_message"
     ]
     assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
+
+
+@pytest.mark.parametrize("boundary", ["intent", "stash", "detach", "branch", "apply", "drop", "child"])
+def test_base_change_crash_converges_exactly_without_touching_other_stashes(config, monkeypatch, boundary):
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    parent = store.list_pipelines(task.id)[0]
+    accepted = store.get(task.id).patch_path.read_bytes()
+    TaskArchiveWriter(config).create_task_from_record(store.get(task.id), pipeline=parent)
+    (config.repo_root / "PRIVATE.txt").write_text("unrelated stash\n")
+    run_command(["git", "stash", "push", "-u", "-m", "unrelated-before"], cwd=config.repo_root, check=True)
+    before = run_command(["git", "rev-parse", "refs/stash"], cwd=config.repo_root, check=True).stdout.strip()
+    (config.repo_root / "LATEST.md").write_text("upstream\n")
+    run_command(["git", "add", "LATEST.md"], cwd=config.repo_root, check=True)
+    run_command(["git", "commit", "-m", "test: latest base"], cwd=config.repo_root, check=True)
+    latest = executor.worktrees.base_commit(config.repo_root)
+    crashed = []
+    other_stashes = [before]
+    original_command = worktree_module.run_command
+    original_event = store.add_event
+    original_child = store.create_pipeline
+
+    def command(argv, *args, **kwargs):
+        result = original_command(argv, *args, **kwargs)
+        mutations = {"stash": ["git", "stash", "push"], "detach": ["git", "switch", "--detach"], "branch": ["git", "switch", "-c"], "apply": ["git", "apply", "--binary"], "drop": ["git", "stash", "drop"]}
+        if boundary in mutations and argv[:3] == mutations[boundary] and not crashed:
+            assert store.events(task.id, kinds=("pipeline.preparation.intent",), pipeline_id=parent.id)
+            if boundary == "stash":
+                # The shared stash stack may change independently during downtime.
+                (config.repo_root / "SECOND.txt").write_text("also unrelated\n")
+                original_command(["git", "stash", "push", "-u", "-m", "unrelated-after"], cwd=config.repo_root, check=True)
+                other_stashes.append(original_command(["git", "rev-parse", "refs/stash"], cwd=config.repo_root, check=True).stdout.strip())
+            crashed.append(boundary)
+            raise SystemExit("crash after " + boundary)
+        return result
+
+    def event(task_id, kind, *args, **kwargs):
+        value = original_event(task_id, kind, *args, **kwargs)
+        if boundary == "intent" and kind == "pipeline.preparation.intent" and not crashed:
+            crashed.append(boundary)
+            raise SystemExit("crash after intent")
+        return value
+
+    def child(*args, **kwargs):
+        value = original_child(*args, **kwargs)
+        if boundary == "child" and not crashed:
+            crashed.append(boundary)
+            raise SystemExit("crash after child allocation")
+        return value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worktree_module, "run_command", command)
+        patch.setattr(store, "add_event", event)
+        patch.setattr(store, "create_pipeline", child)
+        with pytest.raises(SystemExit):
+            executor.advance_once(task.id)
+    assert crashed == [boundary]
+    restarted = StewardExecutor(config, TaskStore.open(config.db_path), runner=FakeRunner(config))
+    daemon = StewardDaemon(config, store)
+    daemon.executor = restarted
+    daemon.session_supervisor = None
+    for _ in range(3):
+        outcome = daemon._reconcile_task(store.get(task.id))
+        assert outcome.disposition in {"ingested", "unchanged"}, outcome.detail
+    pipelines = store.list_pipelines(task.id)
+    assert len(pipelines) == 2
+    assert pipelines[0].state == "superseded"
+    child = pipelines[1]
+    assert store.get_execution(task.id).owning_pipeline_id == child.id
+    assert child.base_identity == latest
+    current = store.get(task.id)
+    assert current.patch_path.read_bytes() == accepted
+    assert executor.worktrees.tree(current.worktree_path) == child.output_identity
+    assert executor.worktrees.patch_identity(current.worktree_path) == child.patch_identity
+    assert (current.worktree_path / "README.md").read_text() == "changed\n"
+    assert (current.worktree_path / "LATEST.md").read_text() == "upstream\n"
+    remaining = run_command(["git", "stash", "list", "--format=%H"], cwd=config.repo_root, check=True).stdout.splitlines()
+    assert set(remaining) == set(other_stashes)
+    assert len(remaining) == len(other_stashes)
+    assert restarted.advance_once(task.id).next_phase == PipelineCursorPhase.validation
+
+
+def test_base_change_recovery_rejects_unrecorded_edits(config, monkeypatch):
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    (config.repo_root / "LATEST.md").write_text("latest\n")
+    run_command(["git", "add", "LATEST.md"], cwd=config.repo_root, check=True)
+    run_command(["git", "commit", "-m", "test: advance main"], cwd=config.repo_root, check=True)
+    original = store.add_event
+
+    def crash(task_id, kind, *args, **kwargs):
+        value = original(task_id, kind, *args, **kwargs)
+        if kind == "pipeline.preparation.intent":
+            raise SystemExit("intent persisted")
+        return value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "add_event", crash)
+        with pytest.raises(SystemExit):
+            executor.advance_once(task.id)
+    worktree = store.get(task.id).worktree_path
+    (worktree / "UNRELATED.md").write_text("must remain\n")
+    result = executor.advance_once(task.id)
+    assert result.status == "blocked"
+    assert (worktree / "UNRELATED.md").read_text() == "must remain\n"
+    assert len(store.list_pipelines(task.id)) == 1
+
+
+def test_review_evidence_is_current_tree_bounded_and_preserves_complete_patch(config, monkeypatch):
+    from coquic_steward.execution.review import MAX_VALIDATION_EVIDENCE_BYTES
+
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    pipeline = store.list_pipelines(task.id)[0]
+    log = config.logs_dir / "large.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"old noisy output\n" * 100_000 + b"FAILURE TAIL\n")
+    result = ValidationResult(command=["gate"], cwd=config.repo_root, passed=False, exit_code=1, output_path=log)
+    evidence = executor._validation_evidence(result)
+    assert len(evidence["output"].encode()) <= 2050
+    assert evidence["output"].endswith("FAILURE TAIL\n")
+    assert str(log) == evidence["output_path"]
+    assert executor._validation_evidence(result.model_copy(update={"passed": True}))["output"] == ""
+    assert log.stat().st_size > 1_000_000
+    # A new current-tree validation event supersedes all previous task attempts.
+    store.add_event(task.id, "pipeline.validation.result", "passed", {
+        "pipeline_id": "stale-pipeline", "output_tree": pipeline.output_identity,
+        "validations": [{"summary": "STALE_VALIDATION"}],
+    })
+    store.add_event(task.id, "pipeline.validation.result", "passed", {
+        "pipeline_id": pipeline.id, "output_tree": pipeline.output_identity,
+        "validations": [evidence] * 100,
+        "validation_artifact": "private/current-gates.json",
+    })
+    # Restore the review cursor to exercise the real prompt path on this tree.
+    store.add_event(task.id, "pipeline.phase.finished", "validation", {
+        "pipeline_id": pipeline.id, "output": {"next_phase": "review"},
+    })
+    prompts = []
+    original = executor.runner.run
+
+    def capture(task, prompt, cwd, **kwargs):
+        prompts.append(prompt)
+        return original(task, prompt, cwd, **kwargs)
+
+    monkeypatch.setattr(executor.runner, "run", capture)
+    # A finished action cannot be repeated; use a fresh pipeline owner.
+    child = executor._new_child_pipeline(store.get(task.id), pipeline, PipelineTrigger.review_repair, {})
+    store.add_event(task.id, "pipeline.phase.finished", "validation", {"pipeline_id": child.id, "output": {"next_phase": "review"}})
+    store.add_event(task.id, "pipeline.validation.result", "passed", {"pipeline_id": child.id, "output_tree": pipeline.output_identity, "validations": [evidence] * 100, "validation_artifact": "private/current-gates.json"})
+    assert executor.advance_once(task.id).next_phase == PipelineCursorPhase.integration
+    prompt = prompts[0]
+    context = json.loads(prompt.split("Original task intent and accepted evidence:\n", 1)[1].split("\n\nReview policy:", 1)[0])
+    assert len(json.dumps(context["validation_evidence"]).encode()) <= MAX_VALIDATION_EVIDENCE_BYTES
+    assert "STALE_VALIDATION" not in prompt
+    assert "private/current-gates.json" in prompt
+    assert "FAILURE TAIL" in prompt
+    assert executor.worktrees.diff(store.get(task.id).worktree_path) in prompt
+
+
+@pytest.mark.parametrize("title", ["", "fix: already conventional", "x" * 300, "line\nbreak\x00 title", "🐈" * 200])
+def test_deterministic_commit_subject_is_valid_and_bounded(config, title):
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title=title or "empty", prompt="complete"))
+    task.spec.title = title
+    message = executor_module.deterministic_commit_message(task)
+    assert len(message["subject"]) <= 72
+    assert parse_commit_message(json.dumps(message)) == message
+    assert "\x00" not in message["subject"]
+
+
+@pytest.mark.parametrize("state", ["interrupted", "succeeded", "failed"])
+def test_legacy_optional_wording_run_does_not_block_approved_patch(config, monkeypatch, state):
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    assert executor.advance_once(task.id).next_phase == PipelineCursorPhase.commit_message
+    current = store.get(task.id)
+    pipeline = store.list_pipelines(task.id)[0]
+    executor._phase_start(current, pipeline, PipelineCursorPhase.commit_message)
+    session = store.create_session(task.id, pipeline.id, owner_role="commit-message", cwd=current.worktree_path, idempotency_key=f"{task.id}:{pipeline.id}:commit_message")
+    run = store.create_run(task.id, pipeline.id, session.id, role="commit-message")
+    store.transition_run(run.id, state, expected_state="running", exit_code=1)
+    TaskArchiveWriter(config).create_task_from_record(current, pipeline=pipeline)
+    daemon = StewardDaemon(config, store)
+    daemon.session_supervisor = None
+    daemon.executor = executor
+    assert daemon._reconcile_task(current).disposition == "ingested"
+    assert executor._pipeline_cursor(task.id, pipeline.id) == PipelineCursorPhase.commit
+    assert daemon._reconcile_task(store.get(task.id)).disposition == "unchanged"
+    assert len(store.list_runs(task.id)) == 1
+
+
+def test_review_prompt_budget_never_truncates_patch(config):
+    from coquic_steward.execution.review import (
+        MAX_VALIDATION_EVIDENCE_BYTES,
+        bounded_validation_evidence,
+        render_review_prompt,
+    )
+
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="review", prompt="review exact patch"))
+    patch = "diff --git a/large b/large\n" + "+complete patch line\n" * 10_000
+    evidence = [{"passed": False, "output": "failure tail\n" * 100, "output_path": f"private/gate-{index}.log"} for index in range(100)]
+    bounded = bounded_validation_evidence(evidence, "private/validations.json")
+    baseline = render_review_prompt(task, config, patch_text=patch)
+    prompt = render_review_prompt(task, config, patch_text=patch, validation_evidence=bounded)
+    assert len(prompt.encode()) - len(baseline.encode()) <= MAX_VALIDATION_EVIDENCE_BYTES
+    assert f"<complete_patch>\n{patch}\n</complete_patch>" in prompt
+    assert "private/validations.json" in prompt
+
+
+def test_patch_preparation_preserves_untracked_binary_bytes(config):
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="binary patch", prompt="preserve binary"))
+    worktrees = Worktrees(config)
+    path, branch = worktrees.create(task)
+    task.worktree_path, task.branch_name = path, branch
+    binary = bytes(range(256)) * 30
+    (path / "binary.dat").write_bytes(binary)
+    patch = worktrees.diff(path)
+    accepted_tree = worktrees.tree(path)
+    (config.repo_root / "UPSTREAM").write_text("latest\n")
+    run_command(["git", "add", "UPSTREAM"], cwd=config.repo_root, check=True)
+    run_command(["git", "commit", "-m", "test: upstream"], cwd=config.repo_root, check=True)
+    base = worktrees.base_commit(config.repo_root)
+    intent = worktrees.patch_preparation_intent(task, ordinal=2, base_identity=base, patch_text=patch, accepted_tree=accepted_tree)
+    prepared = worktrees.prepare_patch_worktree(task, ordinal=2, base_identity=base, patch_text=patch, accepted_tree=accepted_tree, preparation=intent)
+    repeated = worktrees.prepare_patch_worktree(task, ordinal=2, base_identity=base, patch_text=patch, accepted_tree=accepted_tree, preparation=intent)
+    assert prepared == repeated
+    assert (path / "binary.dat").read_bytes() == binary
+    assert prepared.applied
+
+
+def test_patch_preparation_same_base_keeps_legacy_optional_tree_argument(config):
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="same base", prompt="keep patch"))
+    worktrees = Worktrees(config)
+    task.worktree_path, task.branch_name = worktrees.create(task)
+    (task.worktree_path / "README.md").write_text("accepted\n")
+    patch = worktrees.diff(task.worktree_path)
+    result = worktrees.prepare_patch_worktree(task, ordinal=2, base_identity=worktrees.base_commit(task.worktree_path), patch_text=patch)
+    assert result.applied
+    assert (task.worktree_path / "README.md").read_text() == "accepted\n"

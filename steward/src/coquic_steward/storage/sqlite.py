@@ -3249,6 +3249,7 @@ class SQLiteTaskStore:
         trigger: str = "initial",
         parent_pipeline_id: str | None = None,
         ordinal: int | None = None,
+        supersede_parent: bool = False,
         **fields: object,
     ) -> TaskPipeline:
         normalized_fields = _pipeline_fields(fields)
@@ -3276,6 +3277,7 @@ class SQLiteTaskStore:
             trigger=trigger,
             parent_pipeline_id=parent_pipeline_id,
             ordinal=ordinal,
+            supersede_parent=supersede_parent,
             **normalized_fields,
         )
 
@@ -3288,6 +3290,7 @@ class SQLiteTaskStore:
         trigger: str,
         parent_pipeline_id: str | None,
         ordinal: int | None,
+        supersede_parent: bool = False,
         **fields: object,
     ) -> TaskPipeline:
         for attempt in range(8):
@@ -3321,6 +3324,16 @@ class SQLiteTaskStore:
                         started_at=now,
                         updated_at=now,
                     )
+                    if supersede_parent:
+                        if parent_pipeline_id is None:
+                            raise ValueError("supersession requires a parent")
+                        changed = connection.execute(
+                            TaskPipelineRow.__table__.update()
+                            .where(TaskPipelineRow.id == parent_pipeline_id, TaskPipelineRow.state == "active")
+                            .values(state="superseded", completed_at=now.isoformat(), updated_at=now.isoformat())
+                        )
+                        if changed.rowcount != 1:
+                            raise ValueError("only an active parent can be superseded")
                     connection.execute(
                         TaskPipelineRow.__table__.insert().values(
                             **_row_values(pipeline_to_row(item))
@@ -4408,6 +4421,7 @@ class SQLiteTaskStore:
                 records = connection.execute(
                     select(EventRow.kind, EventRow.data_json).where(
                         EventRow.task_id == task_id,
+                        func.json_extract(case((func.json_valid(EventRow.data_json), EventRow.data_json), else_="{}"), "$.pipeline_id") == pipeline_id,
                         EventRow.kind.in_(
                             (
                                 "pipeline.phase.started",
@@ -4415,7 +4429,7 @@ class SQLiteTaskStore:
                                 "pipeline.phase.interrupted",
                             )
                         ),
-                    )
+                    ).order_by(EventRow.id)
                 ).all()
                 states: dict[str, str] = {}
                 for kind, data_json in records:
@@ -8382,12 +8396,24 @@ class SQLiteTaskStore:
                 integration=False,
             )
 
-    def events(self, task_id: str, *, limit: int | None = None) -> list[Event]:
+    def events(
+        self, task_id: str, *, limit: int | None = None,
+        kinds: tuple[str, ...] | None = None, pipeline_id: str | None = None,
+        newest_first: bool = False, phase: str | None = None,
+    ) -> list[Event]:
         statement = (
             select(EventRow)
             .where(EventRow.task_id == task_id)
             .order_by(EventRow.created_at, EventRow.id)
         )
+        if kinds is not None:
+            statement = statement.where(EventRow.kind.in_(kinds))
+        if pipeline_id is not None:
+            statement = statement.where(func.json_extract(EventRow.data_json, "$.pipeline_id") == pipeline_id)
+        if phase is not None:
+            statement = statement.where(func.json_extract(EventRow.data_json, "$.phase") == phase)
+        if newest_first:
+            statement = statement.order_by(None).order_by(EventRow.created_at.desc(), EventRow.id.desc())
         if limit is not None:
             statement = statement.limit(limit)
         with Session(self.engine) as session:

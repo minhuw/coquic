@@ -44,6 +44,7 @@ from ..core.subprocesses import CommandResult, run_command
 from ..storage import TaskStore
 from ..storage.sqlite import TaskLedgerOwnershipError
 from .review import (
+    bounded_validation_evidence,
     parse_review,
     render_review_prompt,
     review_approved,
@@ -204,6 +205,11 @@ _TRANSIENT_PUSH_HTTP_STATUS_RE = re.compile(
     r"\b(?:http(?: status)?|status(?: code)?|unexpected status)\s*[:=]?\s*5\d\d\b",
     re.IGNORECASE,
 )
+
+
+class _PhaseInterrupted(RuntimeError):
+    def __init__(self, result: WorkerResult):
+        self.result = result
 
 
 class _PhaseAlreadyClaimed(RuntimeError):
@@ -398,14 +404,38 @@ class StewardExecutor:
         """Ingest one completed recovered run into its claimed phase once."""
 
         predecessor = self.store.get_run(predecessor_run_id)
+        completed = self.store.get_run(result.run_id)
+        if (result.task_id, result.pipeline_id, result.session_id) != (
+            predecessor.task_id, predecessor.pipeline_id, completed.session_id
+        ) or (completed.task_id, completed.pipeline_id, completed.role) != (
+            predecessor.task_id, predecessor.pipeline_id, predecessor.role
+        ) or str(completed.state) != "succeeded":
+            raise RuntimeError("completed run ownership mismatch")
+        current = completed
+        seen = set()
+        while current.id != predecessor.id:
+            if current.id in seen:
+                raise RuntimeError("cyclic result lineage")
+            seen.add(current.id)
+            parent_id = current.resume_of_run_id or current.retry_of_run_id
+            if parent_id is None:
+                raise RuntimeError("completed result is unrelated to phase owner")
+            current = self.store.get_run(parent_id)
+            if (current.task_id, current.pipeline_id, current.role) != (
+                predecessor.task_id, predecessor.pipeline_id, predecessor.role
+            ):
+                raise RuntimeError("completed result lineage ownership mismatch")
         task = self.store.get(predecessor.task_id)
         pipeline = self.store.get_pipeline(predecessor.pipeline_id)
         try:
             action = self.store.get_session(predecessor.session_id).idempotency_key
         except KeyError:
             action = None
-        action = action or predecessor.checkpoint_id
-        events = self.store.events(task.id)
+        if not action:
+            raise RuntimeError("recovered run has no phase action identity")
+        events = self.store.events(task.id, kinds=(
+            "pipeline.phase.started", "pipeline.phase.finished", "pipeline.phase.interrupted",
+        ), pipeline_id=pipeline.id)
         if action and any(
             event.kind == "pipeline.phase.finished"
             and event.data.get("pipeline_id") == pipeline.id
@@ -422,6 +452,7 @@ class StewardExecutor:
                 action_id=action,
                 progressed=False,
             )
+        self._require_pipeline_ownership(task.id, pipeline)
         phase = self._pipeline_cursor(task.id, pipeline.id)
         in_progress = self._in_progress_action(task.id, pipeline.id, phase)
         if in_progress is None and action is not None:
@@ -461,13 +492,23 @@ class StewardExecutor:
             raise RuntimeError("only a complete recovered result can be ingested")
         worker = self._worker_result_from_session(predecessor, result)
         role = predecessor.role
+        started = next(
+            event for event in reversed(events)
+            if event.kind == "pipeline.phase.started" and event.data.get("action_id") == action
+        )
+        payload = started.data.get("input", {}).get("payload", {})
         if phase == PipelineCursorPhase.planning and role in {"planner", "planning"}:
             plan = parse_implementation_plan(worker.final_message, task, self.config)
             if plan is None or self.worktrees.has_changes(self._require_worktree(task)):
                 return self._block_pipeline(
                     task, pipeline, "recovered implementation plan is invalid"
                 )
-            self.store.add_event(
+            attempt = payload.get("attempt")
+            if not isinstance(attempt, int) or isinstance(attempt, bool):
+                raise RuntimeError("recovered planning action has no attempt identity")
+            plan_path = save_implementation_plan(self.config, task.id, attempt, plan)
+            self.store.finish_plan_run(task.id, attempt, worker, plan=plan, plan_path=plan_path)
+            self._record_reconciled_phase_result(
                 task.id,
                 "pipeline.plan.result",
                 "accepted",
@@ -475,6 +516,8 @@ class StewardExecutor:
                     "pipeline_id": pipeline.id,
                     "action_id": in_progress.action_id,
                     "plan": plan,
+                    "attempt": attempt,
+                    "plan_path": str(plan_path),
                     "recovered_run_id": result.run_id,
                 },
             )
@@ -487,10 +530,10 @@ class StewardExecutor:
                 evidence={"plan": plan, "recovered_run_id": result.run_id},
             )
         elif phase == PipelineCursorPhase.implementation and role == "implementation":
-            iterations = self.store.iterations(task.id)
-            if not iterations:
-                raise RuntimeError("recovered implementation has no iteration ledger")
-            iteration = iterations[-1].iteration
+            iteration = payload.get("iteration")
+            if not isinstance(iteration, int) or isinstance(iteration, bool):
+                raise RuntimeError("recovered implementation action has no iteration identity")
+            self.store.get_iteration(task.id, iteration)
             self.store.finish_iteration_worker(task.id, iteration, worker)
             worktree = self._require_worktree(task)
             base, output_tree, patch = self.worktrees.snapshot(worktree)
@@ -507,6 +550,8 @@ class StewardExecutor:
             if patch == sha256(b"").hexdigest() or not self.worktrees.has_changes(
                 worktree
             ):
+                if PipelineTrigger(pipeline.trigger) != PipelineTrigger.initial:
+                    return self._block_pipeline(task, pipeline, "repair implementation made no progress")
                 proposal = self._remote_write_proposal(task, pipeline)
                 self.store.finish_task(
                     task.id,
@@ -540,7 +585,7 @@ class StewardExecutor:
                 kind="raw",
                 action_id=in_progress.action_id or "recovered",
             )
-            self.store.add_event(
+            self._record_reconciled_phase_result(
                 task.id,
                 "pipeline.review.raw",
                 "recovered review captured",
@@ -582,7 +627,7 @@ class StewardExecutor:
                 kind="effective",
                 action_id=in_progress.action_id or "recovered",
             )
-            self.store.add_event(
+            self._record_reconciled_phase_result(
                 task.id,
                 "pipeline.formality.effective",
                 "recovered effective review built",
@@ -637,12 +682,8 @@ class StewardExecutor:
                     },
                 )
         elif phase == PipelineCursorPhase.commit_message and role == "commit-message":
-            message = parse_commit_message(worker.final_message)
-            if message is None:
-                return self._block_pipeline(
-                    task, pipeline, "recovered commit message is invalid"
-                )
-            self.store.add_event(
+            message = parse_commit_message(worker.final_message) or deterministic_commit_message(task)
+            self._record_reconciled_phase_result(
                 task.id,
                 "pipeline.commit_message",
                 message["subject"],
@@ -676,6 +717,20 @@ class StewardExecutor:
             },
         )
         return adopted
+
+    def _record_reconciled_phase_result(
+        self, task_id: str, kind: str, message: str, data: dict[str, Any],
+    ) -> None:
+        # A crash after result recording but before the phase receipt must not
+        # spend another review/formality budget or duplicate immutable evidence.
+        for event in self.store.events(task_id, kinds=(kind,), pipeline_id=data["pipeline_id"]):
+            if event.data.get("action_id") != data["action_id"]:
+                continue
+            for key in {"plan", "review", "result", "subject", "body"} & data.keys():
+                if event.data.get(key) != data[key]:
+                    raise RuntimeError("recovered result differs from recorded phase evidence")
+            return
+        self.store.add_event(task_id, kind, message, data)
 
     def _worker_result_from_session(
         self,
@@ -734,17 +789,49 @@ class StewardExecutor:
             raise TaskLedgerOwnershipError("task execution owner is invalid")
         if TaskStatus(task.status).terminal:
             return self._seal_ready(task, pipeline)
+        pending = self.store.events(task_id, kinds=("pipeline.preparation.intent",), pipeline_id=pipeline.id, newest_first=True, limit=1)
+        if pending:
+            intent = pending[0].data["preparation"]
+            accepted_patch = self._accepted_patch(task, pipeline)
+            if accepted_patch is None:
+                return self._block_pipeline(task, pipeline, "preparation lost accepted patch artifact")
+            try:
+                with _integration_lock(self.config.state_dir):
+                    child = self._prepare_base_change_child(
+                        task, pipeline, trigger=PipelineTrigger(intent["trigger"]),
+                        latest_main=intent["base_identity"], accepted_patch=accepted_patch,
+                        extra_evidence=intent["extra_evidence"],
+                    )
+            except Exception as exc:
+                return self._block_pipeline(task, pipeline, f"preparation recovery failed: {exc}")
+            if isinstance(child, AdvanceResult):
+                return child
+            return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True)
         cursor = self._pipeline_cursor(task_id, pipeline.id)
         if cursor == PipelineCursorPhase.ready_to_seal:
             return self._seal_ready(task, pipeline)
-        budget_failure = self._budget_failure(task_id, cursor)
-        if budget_failure is not None:
-            return self._block_pipeline(task, pipeline, budget_failure)
         in_progress = self._in_progress_action(task_id, pipeline.id, cursor)
         if in_progress is not None:
             return in_progress
+        budget_failure = self._budget_failure(task_id, cursor)
+        if budget_failure is not None:
+            return self._block_pipeline(task, pipeline, budget_failure)
         try:
             return self._dispatch_durable_phase(task, pipeline, cursor)
+        except _PhaseInterrupted as exc:
+            action = self._latest_started_action(task.id, pipeline.id, cursor)
+            evidence = {"run_id": exc.result.run_id}
+            # Unlike a deterministic retry, shutdown must NOT release the claim:
+            # the interrupted session still owns it until startup reconciles it.
+            self.store.add_event(
+                task.id, "pipeline.session.interrupted", "session interrupted",
+                {"pipeline_id": pipeline.id, "phase": cursor.value,
+                 "action_id": action, **evidence},
+            )
+            return AdvanceResult(
+                task.id, pipeline.id, cursor, cursor, "interrupted",
+                action_id=action, progressed=False, evidence=evidence,
+            )
         except _PhaseAlreadyClaimed as exc:
             return AdvanceResult(
                 task.id,
@@ -969,28 +1056,6 @@ class StewardExecutor:
             idempotency_key=action,
         )
         self.store.finish_iteration_worker(task.id, iteration, result)
-        if _worker_was_interrupted(result):
-            self.store.add_event(
-                task.id,
-                "pipeline.phase.interrupted",
-                "implementation interrupted for daemon shutdown",
-                {
-                    "pipeline_id": pipeline.id,
-                    "phase": phase.value,
-                    "action_id": action,
-                    "run_id": result.run_id,
-                },
-            )
-            return AdvanceResult(
-                task.id,
-                pipeline.id,
-                phase,
-                phase,
-                "interrupted",
-                action_id=action,
-                progressed=False,
-                evidence={"run_id": result.run_id},
-            )
         if not result.completed:
             return self._block_pipeline(task, pipeline, result.final_message or "implementation failed")
         base, output_tree, patch = self.worktrees.snapshot(worktree)
@@ -1099,7 +1164,10 @@ class StewardExecutor:
         patch_path = self.config.patches_dir / task.id / f"pipeline-{pipeline.ordinal}-iteration-{iteration}.patch"
         self.worktrees.save_patch(worktree, patch_path)
         self.store.record_iteration_patch(task.id, iteration, patch_path)
-        self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": [self._validation_evidence(item) for item in validations]})
+        validation_artifact = f"pipelines/{pipeline.id}/validations/gates-{iteration}.json"
+        full_evidence = [self._validation_evidence(item) for item in validations]
+        self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": full_evidence})
+        summaries = bounded_validation_evidence(full_evidence, validation_artifact)
         self._archive_bytes(task, pipeline, f"patches/iteration-{iteration}.patch", patch_path.read_bytes())
         pipeline = self.store.update_pipeline_identity(
             pipeline.id,
@@ -1110,7 +1178,8 @@ class StewardExecutor:
             phase=coarse_phase(PipelineCursorPhase.review),
         )
         evidence = {
-            "validations": [self._validation_evidence(item) for item in validations],
+            "validations": summaries,
+            "validation_artifact": validation_artifact,
             "output_tree": output_tree,
             "patch_identity": patch,
             "patch_path": str(patch_path),
@@ -1123,12 +1192,12 @@ class StewardExecutor:
         )
         if failed:
             fingerprint = _validation_no_progress_fingerprint(output_tree, failed)
-            self.store.add_event(task.id, "pipeline.validation.failure", "validation failed", {"pipeline_id": pipeline.id, "fingerprint": fingerprint, **evidence})
+            self.store.add_event(task.id, "pipeline.validation.failure", "validation failed", {"pipeline_id": pipeline.id, "fingerprint": fingerprint, "validation_artifact": validation_artifact, "output_tree": output_tree})
             if self._fingerprint_seen(task.id, fingerprint):
                 return self._block_pipeline(task, pipeline, "validation made no progress")
             child = self._new_child_pipeline(task, pipeline, PipelineTrigger.validation_repair, {"validation": evidence, "fingerprint": fingerprint})
             return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence=evidence)
-        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.review, output_identity=output_tree, patch_identity=patch, evidence=evidence)
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.review, output_identity=output_tree, patch_identity=patch, evidence={key: value for key, value in evidence.items() if key != "validations"})
 
     def _durable_review(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.review
@@ -1139,7 +1208,16 @@ class StewardExecutor:
         self._phase_start(task, pipeline, phase, action_id=action, payload={"tree": tree, "patch_identity": sha256(patch_text.encode()).hexdigest()})
         self.store.start_review(task.id, "durable review")
         plan = self._latest_plan(task.id, pipeline.id)
-        validations = [self._validation_evidence(item) for item in task.validations]
+        validation_events = self.store.events(
+            task.id, kinds=("pipeline.validation.result",), pipeline_id=pipeline.id,
+            newest_first=True, limit=1,
+        )
+        validations = bounded_validation_evidence(
+            validation_events[0].data.get("validations", []),
+            validation_events[0].data.get("validation_artifact", f"pipelines/{pipeline.id}/validations"),
+        ) if validation_events else []
+        if not validation_events or validation_events[0].data.get("output_tree") != tree:
+            return self._block_pipeline(task, pipeline, "review has no current-tree validation")
         prompt = render_review_prompt(
             task,
             self.config,
@@ -1287,15 +1365,9 @@ class StewardExecutor:
     def _durable_commit_message(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.commit_message
         worktree = self._require_worktree(task)
-        patch_text = self.worktrees.diff(worktree)
-        validations = list(task.validations)
         action = action_identity(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=action, payload={"tree": self.worktrees.tree(worktree)})
-        prompt = render_commit_message_prompt(task, patch_text, _patch_paths(patch_text), validations)
-        result = self._durable_runner(task, prompt, worktree, name=f"commit-message-{pipeline.ordinal}", output_schema=commit_message_schema_path(self.config), stage=CodexStage.commit_message, sandbox="read-only", task_role=TaskRole.commit_message, idempotency_key=action)
-        data = parse_commit_message(result.final_message) if result.completed else None
-        if data is None:
-            return self._block_pipeline(task, pipeline, "commit message generation failed")
+        data = deterministic_commit_message(task)
         self.store.add_event(task.id, "pipeline.commit_message", data["subject"], {"pipeline_id": pipeline.id, "action_id": action, "subject": data["subject"], "body": data["body"]})
         return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.commit, evidence=data)
 
@@ -1621,7 +1693,7 @@ class StewardExecutor:
 
     def _pipeline_cursor(self, task_id: str, pipeline_id: str) -> PipelineCursorPhase:
         cursor = PipelineCursorPhase.provisioned
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.phase.finished",), pipeline_id=pipeline_id):
             if event.kind == "pipeline.phase.finished" and event.data.get("pipeline_id") == pipeline_id:
                 value = event.data.get("output", {}).get("next_phase")
                 if value is not None:
@@ -1634,7 +1706,7 @@ class StewardExecutor:
     def _phase_attempt(self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase) -> int:
         return sum(
             1
-            for event in self.store.events(task_id)
+            for event in self.store.events(task_id, kinds=("pipeline.phase.started",), pipeline_id=pipeline_id, phase=phase.value)
             if event.kind == "pipeline.phase.started"
             and event.data.get("pipeline_id") == pipeline_id
             and str(event.data.get("phase")) == phase.value
@@ -1645,7 +1717,7 @@ class StewardExecutor:
     ) -> AdvanceResult | None:
         states: dict[str, str] = {}
         starts: dict[str, Any] = {}
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.phase.started", "pipeline.phase.finished", "pipeline.phase.interrupted"), pipeline_id=pipeline_id):
             if event.data.get("pipeline_id") != pipeline_id:
                 continue
             if event.kind == "pipeline.phase.started" and event.data.get("phase") == phase.value:
@@ -1779,7 +1851,7 @@ class StewardExecutor:
 
     def _latest_started_action(self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase) -> str | None:
         selected = None
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.phase.started",), pipeline_id=pipeline_id, phase=phase.value, newest_first=True, limit=1):
             if event.kind == "pipeline.phase.started" and event.data.get("pipeline_id") == pipeline_id and event.data.get("phase") == phase.value:
                 selected = event.data.get("action_id")
         return str(selected) if selected else None
@@ -1795,30 +1867,20 @@ class StewardExecutor:
                 PipelineCursorPhase.implementation,
                 PipelineCursorPhase.review,
                 PipelineCursorPhase.formality,
-                PipelineCursorPhase.commit_message,
             } and len(self.store.list_runs(task_id)) >= self.MAX_RUNS:
                 return "run budget exhausted"
         except (AttributeError, KeyError):
             pass
-        events = self.store.events(task_id)
-        if phase == PipelineCursorPhase.validation and sum(
-            1 for event in events if event.kind == "pipeline.validation.result"
-        ) >= self.MAX_VALIDATIONS:
+        if phase == PipelineCursorPhase.validation and self.store.count_task_events(task_id, "pipeline.validation.result") >= self.MAX_VALIDATIONS:
             return "validation budget exhausted"
-        if phase == PipelineCursorPhase.formality and sum(
-            1 for event in events if event.kind == "pipeline.formality.effective"
-        ) >= self.MAX_FORMALITY:
+        if phase == PipelineCursorPhase.formality and self.store.count_task_events(task_id, "pipeline.formality.effective") >= self.MAX_FORMALITY:
             return "formality budget exhausted"
-        if phase == PipelineCursorPhase.review and sum(
-            1 for event in events if event.kind == "pipeline.review.raw"
-        ) >= self.MAX_REVIEWS:
+        if phase == PipelineCursorPhase.review and self.store.count_task_events(task_id, "pipeline.review.raw") >= self.MAX_REVIEWS:
             return "review budget exhausted"
-        if phase == PipelineCursorPhase.push and sum(
-            1
-            for event in events
-            if event.kind == "pipeline.phase.started"
-            and event.data.get("phase") == PipelineCursorPhase.push.value
-        ) >= self.MAX_TRANSPORT_RETRIES + 1:
+        if phase == PipelineCursorPhase.push and len(self.store.events(
+            task_id, kinds=("pipeline.phase.started",), phase="push",
+            limit=self.MAX_TRANSPORT_RETRIES + 1,
+        )) >= self.MAX_TRANSPORT_RETRIES + 1:
             return "transport budget exhausted"
         return None
 
@@ -1914,17 +1976,12 @@ class StewardExecutor:
             )
             if conflicts - int(current_recorded) >= self.MAX_CONFLICTS:
                 raise RuntimeError("conflict budget exhausted")
-        try:
-            self.store.transition_pipeline(parent.id, PipelineState.superseded.value, phase=coarse_phase(self._pipeline_cursor(task.id, parent.id)).value)
-        except TaskLedgerOwnershipError:
-            raise
-        except ValueError:
-            pass
         child = self.store.create_pipeline(
             task.id,
             execution_id=parent.execution_id,
             trigger=trigger.value,
             parent_pipeline_id=parent.id,
+            supersede_parent=True,
             base_identity=base_identity or parent.base_identity,
             input_identity=input_identity or parent.output_identity or parent.input_identity,
             output_identity=output_identity,
@@ -1956,7 +2013,7 @@ class StewardExecutor:
         task_role: TaskRole | str | None = None,
         idempotency_key: str | None = None,
     ) -> WorkerResult:
-        return self.runner.run(
+        result = self.runner.run(
             task,
             prompt,
             cwd,
@@ -1968,6 +2025,9 @@ class StewardExecutor:
             task_role=task_role,
             idempotency_key=idempotency_key,
         )
+        if _worker_was_interrupted(result):
+            raise _PhaseInterrupted(result)
+        return result
 
     def _implementation_prompt(self, task: TaskRecord, pipeline: Any) -> str:
         plan = self._latest_plan(task.id, pipeline.id)
@@ -2003,7 +2063,7 @@ class StewardExecutor:
                 selected_pipeline.parent_pipeline_id
             )
         selected = None
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.plan.result",)):
             if event.kind == "pipeline.plan.result" and event.data.get("pipeline_id") in lineage:
                 plan = event.data.get("plan")
                 if isinstance(plan, dict):
@@ -2042,7 +2102,13 @@ class StewardExecutor:
 
     def _validation_evidence(self, validation: ValidationResult) -> dict[str, Any]:
         try:
-            output = validation.output_path.read_text(encoding="utf-8")
+            if validation.passed:
+                output = ""
+            else:
+                with validation.output_path.open("rb") as log:
+                    log.seek(0, os.SEEK_END)
+                    log.seek(max(0, log.tell() - 2048))
+                    output = log.read(2048).decode("utf-8", errors="replace")
         except OSError:
             output = ""
         return {
@@ -2051,15 +2117,16 @@ class StewardExecutor:
             "passed": validation.passed,
             "exit_code": validation.exit_code,
             "output_path": str(validation.output_path),
-            "summary": validation.summary,
+            "summary": validation.summary[:512],
             "output": output,
+            "output_is_tail": not validation.passed,
             "started_at": validation.started_at.isoformat(),
             "completed_at": validation.completed_at.isoformat(),
         }
 
     def _latest_raw_review(self, task_id: str, pipeline_id: str) -> dict[str, Any] | None:
         selected = None
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.review.raw",), pipeline_id=pipeline_id, newest_first=True, limit=1):
             if event.kind == "pipeline.review.raw" and event.data.get("pipeline_id") == pipeline_id:
                 value = event.data.get("review")
                 if isinstance(value, dict):
@@ -2081,7 +2148,7 @@ class StewardExecutor:
 
     def _latest_commit_message(self, task_id: str, pipeline_id: str) -> dict[str, str] | None:
         selected = None
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.commit_message",), pipeline_id=pipeline_id, newest_first=True, limit=1):
             if event.kind == "pipeline.commit_message" and event.data.get("pipeline_id") == pipeline_id:
                 subject, body = event.data.get("subject"), event.data.get("body")
                 if isinstance(subject, str) and isinstance(body, str):
@@ -2090,7 +2157,7 @@ class StewardExecutor:
 
     def _latest_commit(self, task_id: str, pipeline_id: str) -> str | None:
         selected = None
-        for event in self.store.events(task_id):
+        for event in self.store.events(task_id, kinds=("pipeline.commit",), pipeline_id=pipeline_id, newest_first=True, limit=1):
             if event.kind == "pipeline.commit" and event.data.get("pipeline_id") == pipeline_id:
                 value = event.data.get("commit")
                 if isinstance(value, str):
@@ -2139,19 +2206,31 @@ class StewardExecutor:
             return self._block_pipeline(
                 task, parent, "accepted patch evidence does not match its identity"
             )
-        ordinal = max(item.ordinal for item in self.store.list_pipelines(task.id)) + 1
+        existing = self.store.events(task.id, kinds=("pipeline.preparation.intent",), pipeline_id=parent.id, newest_first=True, limit=1)
+        if existing:
+            intent = existing[0].data["preparation"]
+            if intent["base_identity"] != latest_main or intent["patch_identity"] != digest:
+                raise RuntimeError("base-change request differs from durable intent")
+        else:
+            if len(self.store.list_pipelines(task.id)) >= self.MAX_PIPELINES:
+                return self._block_pipeline(task, parent, "pipeline budget exhausted")
+            ordinal = max(item.ordinal for item in self.store.list_pipelines(task.id)) + 1
+            intent = self.worktrees.patch_preparation_intent(
+                task, ordinal=ordinal, base_identity=latest_main,
+                patch_text=accepted_patch, accepted_tree=parent.output_identity,
+            )
+            intent.update({"patch_identity": digest, "trigger": trigger.value, "extra_evidence": extra_evidence or {}})
+            self.store.add_event(task.id, "pipeline.preparation.intent", "base-change preparation authorized", {"pipeline_id": parent.id, "preparation": intent})
         prepared = self.worktrees.prepare_patch_worktree(
-            task,
-            ordinal=ordinal,
-            base_identity=latest_main,
-            patch_text=accepted_patch,
-            accepted_tree=parent.output_identity,
+            task, ordinal=intent["ordinal"], base_identity=latest_main,
+            patch_text=accepted_patch, accepted_tree=parent.output_identity,
+            preparation=intent,
         )
         conflict = not prepared.applied
         if conflict and sum(
             1
-            for event in self.store.events(task.id)
-            if event.kind == "pipeline.integration.conflict"
+            for event in self.store.events(task.id, kinds=("pipeline.integration.conflict",))
+            if event.data.get("pipeline_id") != parent.id
         ) >= self.MAX_CONFLICTS:
             return self._block_pipeline(task, parent, "conflict budget exhausted")
         selected_trigger = (
@@ -2184,14 +2263,15 @@ class StewardExecutor:
             if conflict
             else "pipeline.integration.base_changed"
         )
-        self.store.add_event(
-            task.id,
-            event_kind,
-            "accepted patch conflicted with latest main"
-            if conflict
-            else "accepted patch applied to latest main",
-            {"pipeline_id": parent.id, **evidence},
-        )
+        if not any(event.data.get("fingerprint") == fingerprint for event in self.store.events(task.id, kinds=(event_kind,), pipeline_id=parent.id)):
+            self.store.add_event(
+                task.id,
+                event_kind,
+                "accepted patch conflicted with latest main"
+                if conflict
+                else "accepted patch applied to latest main",
+                {"pipeline_id": parent.id, **evidence},
+            )
         if self._fingerprint_seen(task.id, fingerprint):
             return self._block_pipeline(
                 task, parent, "base-change repair made no progress"
@@ -3104,6 +3184,18 @@ def render_commit_message_prompt(
             "</patch>",
         ]
     )
+
+
+def deterministic_commit_message(task: TaskRecord) -> dict[str, str]:
+    """Wording cannot prevent an independently reviewed tree from integrating."""
+    title = " ".join("".join(char for char in task.spec.title if char.isprintable() or char.isspace()).split())
+    prefix = "feat" if implementation_plan_required(task) else "fix"
+    subject = f"{prefix}: {title or 'complete task'}"[:72].rstrip()
+    data = {"subject": subject, "body": f"Complete task {task.id}."}
+    validated = parse_commit_message(json.dumps(data))
+    if validated is None:
+        raise ValueError("invalid deterministic commit message")
+    return validated
 
 
 def parse_commit_message(message: str) -> dict[str, str] | None:

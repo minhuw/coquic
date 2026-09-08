@@ -4099,6 +4099,7 @@ def _interrupted_run(config, store, *, role="implementation", checkpoint=None):
             "pipeline_id": pipeline.id,
             "phase": "implementation",
             "action_id": action,
+            "input": {"payload": {"iteration": 0}},
         },
     )
     private_home = config.private_sessions_dir / task.id / "session-original"
@@ -4980,6 +4981,8 @@ def test_reconcile_adopts_matching_live_wrapper_without_duplicate(config):
 def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
+    task.worktree_path = config.repo_root
+    store.save(task)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE task_runs SET state = 'running', completed_at = NULL WHERE id = ?",
@@ -4994,8 +4997,11 @@ def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
         pipeline.id,
         run.id,
         "result.json",
-        {"status": "available", "summary": "complete", "path": None},
+        {"status": "available", "summary": "complete", "path": None,
+         "task_id": task.id, "pipeline_id": pipeline.id, "session_id": run.session_id,
+         "run_id": run.id, "output_checkpoint": worktree_checkpoint(config, config.repo_root)},
     )
+    archive.write_run_file(task.id, pipeline.id, run.id, "codex.jsonl", "{}\n")
     supervisor = FakeSupervisor(config, store)
     daemon = StewardDaemon(config, store, session_supervisor=supervisor)
     ingested = []
@@ -5519,61 +5525,96 @@ def test_shutdown_grace_bounds_blocked_worker_pool(config):
     assert elapsed < config.shutdown_grace_seconds + 1
 
 
-def test_shutdown_interrupted_implementation_preserves_restart_state(config):
+@pytest.mark.parametrize("phase", ["planning", "implementation", "review", "formality"])
+@pytest.mark.parametrize("interruption", ["interrupted", "forced"])
+def test_shutdown_interrupted_phase_preserves_restart_state(config, phase, interruption):
     store = TaskStore.create(config.db_path)
-    task, pipeline = _task(store, "interrupted implementation")
+    task, pipeline = _task(store, "interrupted " + phase)
     task.worktree_path = config.repo_root
+    if phase == "planning":
+        task.spec.workflow = "feature"
     store.save(task)
+    store.start_worker(task.id, "test phase")
+    store.add_event(task.id, "pipeline.phase.finished", "provisioned", {
+        "pipeline_id": pipeline.id,
+        "output": {"action_id": "provisioned", "next_phase": phase},
+    })
+    review = {"verdict": "approve", "summary": "ok", "findings": [], "validation_gaps": [], "remaining_risk": ""}
+    if phase == "formality":
+        store.add_event(task.id, "pipeline.review.raw", "review", {"pipeline_id": pipeline.id, "review": review})
+    if phase == "review":
+        store.add_event(task.id, "pipeline.validation.result", "passed", {
+            "pipeline_id": pipeline.id, "output_tree": StewardExecutor(config, store).worktrees.tree(config.repo_root), "validations": [],
+        })
+    role = {"planning": "planner", "implementation": "implementation", "review": "reviewer", "formality": "formality"}[phase]
+    calls = []
 
     class InterruptedRunner(CodexRunner):
-        def __init__(self):
-            super().__init__(config)
-
-        def paths(self, task, *, name="worker"):
-            root = config.logs_dir / task.id / name
-            return root / "codex.jsonl", root / "last-message.md"
-
-        def run(
-            self,
-            task,
-            _prompt,
-            cwd,
-            *,
-            name="worker",
-            output_schema=None,
-            resume_session=None,
-            stage=CodexStage.code,
-            sandbox=None,
-            task_role=None,
-            idempotency_key=None,
-        ):
-            transcript, message = self.paths(task, name=name)
-            transcript.parent.mkdir(parents=True, exist_ok=True)
-            transcript.write_text("{}\n", encoding="utf-8")
-            message.write_text("interrupted\n", encoding="utf-8")
+        def run(self, task, _prompt, cwd, **kwargs):
+            calls.append(kwargs["idempotency_key"])
+            checkpoint = worktree_checkpoint(config, cwd)
+            session, run = store.create_session_with_run(
+                task.id, pipeline.id, owner_role=role, role=role,
+                session_id="interrupted-session",
+                private_home_path=config.private_sessions_dir / task.id / "interrupted-session",
+                private_home_relative_path=f"{task.id}/interrupted-session",
+                image_digest=IMAGE, codex_identity="test", provider_store_identity="codex-sessions-v1",
+                model=None, reasoning=None, image_version=IMAGE, runtime_version="task-runtime-v1",
+                run_provider_store_identity="codex-sessions-v1",
+                cwd=cwd, checkpoint_id=checkpoint, run_checkpoint_id=checkpoint,
+                session_idempotency_key=kwargs["idempotency_key"],
+            )
+            store.mark_run_interrupted(run.id, reason="daemon shutdown")
+            daemon.request_shutdown(force=interruption == "forced")
+            transcript, message = self.paths(task, name=kwargs["name"])
             return WorkerResult(
-                completed=False,
-                command=["fake-codex"],
-                cwd=cwd,
-                exit_code=143,
-                transcript_path=transcript,
-                last_message_path=message,
-                diagnostics={"status": "interrupted"},
+                completed=False, command=["fake-codex"], cwd=cwd, exit_code=143,
+                transcript_path=transcript, last_message_path=message,
+                diagnostics={"status": interruption}, run_id=run.id,
+                session_id=session.id, pipeline_id=pipeline.id,
             )
 
-    executor = StewardExecutor(config, store, runner=InterruptedRunner())
-    outcome = executor._durable_implementation(
-        store.get(task.id), store.get_pipeline(pipeline.id)
-    )
+    executor = StewardExecutor(config, store, runner=InterruptedRunner(config))
+    executor.MAX_RUNS = 1  # Interruption at the budget boundary still preserves its claim.
     daemon = StewardDaemon(config, store)
-    daemon.executor = SimpleNamespace(advance_once=lambda _task_id: outcome)
+    daemon.executor = executor
     finalized = []
     daemon.finalize_terminal_task = finalized.append
-
-    assert outcome.status == "interrupted"
-    assert store.get(task.id).status == TaskStatus.running
     assert daemon._run_task_worker(task.id) is False
+    assert not TaskStatus(store.get(task.id).status).terminal, store.get(task.id).summary
+    assert store.get_execution(task.id).state == "active"
+    assert store.get_pipeline(pipeline.id).state == "active"
+    assert executor.advance_once(task.id).status == "in_progress"
+    assert len(calls) == 1
     assert finalized == []
+    daemon.shutdown()
+
+    class CompletingSupervisor(FakeSupervisor):
+        def _complete(self, run):
+            result = super()._complete(run)
+            message = {
+                "planning": json.dumps({"summary": "plan", "assumptions": [], "steps": [{"title": "edit", "detail": "edit readme", "files": ["README.md"]}], "validation": ["test"], "risks": [], "non_goals": []}),
+                "implementation": "done",
+                "review": json.dumps(review),
+                "formality": '{"dispositions": []}',
+            }[phase]
+            result.last_message_path.write_text(message, encoding="utf-8")
+            if phase == "implementation":
+                (config.repo_root / "README.md").write_text("recovered\n", encoding="utf-8")
+            return result
+
+    supervisor = CompletingSupervisor(config, store)
+    restarted = StewardDaemon(config, TaskStore.open(config.db_path), session_supervisor=supervisor)
+    outcome = restarted.startup_reconcile()[0]
+    assert outcome.disposition == "resumed"
+    assert not TaskStatus(store.get(task.id).status).terminal, store.get(task.id).summary
+    expected = {"planning": "implementation", "implementation": "validation", "review": "integration", "formality": "integration"}[phase]
+    assert restarted.executor._pipeline_cursor(task.id, pipeline.id).value == expected
+    if phase == "planning":
+        assert store.get_plan_run(task.id, 0).completed
+    restarted.startup_reconcile()
+    assert len([call for call in supervisor.calls if call[0] in {"resume", "recover"}]) == 1
+    assert len(calls) == 1
 
 
 def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config, monkeypatch):
@@ -7110,3 +7151,147 @@ def test_reconcile_publication_usage_waits_after_backfill_provider_failure() -> 
     assert daemon._reconcile_publication_usage(Publisher()) is False
     assert daemon._publication_backfill_cursor == "cursor-before"
     assert daemon._publication_backfill_blocked is False
+
+
+@pytest.mark.parametrize("mode", ["normal", "resume", "fresh", "adopted-resume"])
+@pytest.mark.parametrize("crash_at", ["success", "phase-finish", "receipt"])
+def test_successful_unconsumed_result_converges_after_restart(config, monkeypatch, mode, crash_at):
+    store = TaskStore.create(config.db_path)
+    task, pipeline, original = _interrupted_run(config, store)
+    task.worktree_path = config.repo_root
+    store.save(task)
+    store.start_worker(task.id, "implementation")
+    store.begin_iteration(task.id, 0, "implementation", worker_name="implementation", worker_prompt_path=config.prompts_dir / "test.md", worker_transcript_path=config.logs_dir / "test.jsonl", worker_last_message_path=config.logs_dir / "test.md")
+    store.add_event(task.id, "pipeline.phase.finished", "provisioned", {
+        "pipeline_id": pipeline.id,
+        "output": {"action_id": "provisioned", "next_phase": "implementation"},
+    })
+    supervisor = FakeSupervisor(config, store)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    if mode == "normal":
+        with store.engine.begin() as connection:
+            connection.exec_driver_sql("UPDATE task_runs SET state = 'running', completed_at = NULL WHERE id = ?", (original.id,))
+        completed = original
+    elif mode in {"resume", "adopted-resume"}:
+        completed = store.create_run(task.id, pipeline.id, original.session_id, role="implementation", resume_of_run_id=original.id, image_version=original.image_version, runtime_version=original.runtime_version, checkpoint_id=original.checkpoint_id, provider_store_identity=original.provider_store_identity)
+    else:
+        session = store.create_session(
+            task.id, pipeline.id, cwd=config.repo_root,
+            owner_role="implementation", idempotency_key=f"fresh-recovery:{original.id}",
+        )
+        completed = store.create_run(task.id, pipeline.id, session.id, role="implementation", retry_of_run_id=original.id)
+    if mode == "adopted-resume":
+        supervisor.live = True
+        assert daemon.startup_reconcile()[0].disposition == "adopted"
+        assert daemon._adopted_runs[task.id] == completed.id
+    (config.repo_root / "README.md").write_text("completed patch\n", encoding="utf-8")
+    result = supervisor._complete(completed)
+    completed = store.get_run(completed.id)
+    archive = TaskArchiveWriter(config)
+    archive.materialize_ledger(store.get(task.id), pipeline, store.list_runs(task.id))
+    (result.last_message_path.parent / "result.json").write_text(json.dumps({
+        "status": "available", "summary": "completed", "path": None,
+        "task_id": task.id, "pipeline_id": pipeline.id, "session_id": completed.session_id,
+        "run_id": completed.id, "output_checkpoint": worktree_checkpoint(config, config.repo_root),
+    }), encoding="utf-8")
+    if crash_at != "success":
+        target, method = (daemon.executor, "_phase_finish") if crash_at == "phase-finish" else (daemon, "_add_recovery_event_once")
+        with monkeypatch.context() as patch:
+            patch.setattr(target, method, lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("crash")))
+            with pytest.raises(SystemExit):
+                daemon._complete_atomic_run_result(store.get(task.id), completed)
+    if mode == "adopted-resume" and crash_at == "success":
+        daemon._poll_adopted_runs()
+        assert task.id not in daemon._adopted_runs
+    restarted = StewardDaemon(config, TaskStore.open(config.db_path), session_supervisor=supervisor)
+    for _ in range(3):
+        outcome = restarted._reconcile_task(store.get(task.id))
+        assert outcome.disposition in {"ingested", "unchanged"}, outcome
+    assert restarted.executor._pipeline_cursor(task.id, pipeline.id) == PipelineCursorPhase.validation
+    finishes = [event for event in store.events(task.id) if event.kind == "pipeline.phase.finished" and event.data.get("phase") == "implementation"]
+    assert len(finishes) == 1
+    assert len(store.list_runs(task.id)) == (1 if mode == "normal" else 2)
+    assert not any(call[0] in {"resume", "recover"} for call in supervisor.calls)
+    assert result.last_message_path.read_text() == "done\n"
+    assert (config.repo_root / "README.md").read_text() == "completed patch\n"
+
+
+@pytest.mark.parametrize("damage", ["missing-result", "missing-message", "missing-transcript", "wrong-run", "changed-tree"])
+def test_unconsumed_success_fails_closed_without_exact_artifacts(config, damage):
+    store = TaskStore.create(config.db_path)
+    task, pipeline, run = _interrupted_run(config, store)
+    task.worktree_path = config.repo_root
+    store.save(task)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE task_runs SET state = 'running', completed_at = NULL WHERE id = ?", (run.id,))
+    supervisor = FakeSupervisor(config, store)
+    result = supervisor._complete(run)
+    archive = TaskArchiveWriter(config)
+    archive.materialize_ledger(task, pipeline, store.list_runs(task.id))
+    if damage != "missing-result":
+        (result.last_message_path.parent / "result.json").write_text(json.dumps({
+            "status": "available", "task_id": task.id, "pipeline_id": pipeline.id,
+            "session_id": run.session_id, "run_id": "wrong" if damage == "wrong-run" else run.id,
+            "output_checkpoint": worktree_checkpoint(config, config.repo_root),
+        }), encoding="utf-8")
+    if damage == "missing-message":
+        result.last_message_path.unlink()
+    if damage == "missing-transcript":
+        result.transcript_path.unlink()
+    if damage == "changed-tree":
+        (config.repo_root / "README.md").write_text("unowned edit\n", encoding="utf-8")
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    for _ in range(2):
+        outcome = daemon._reconcile_task(store.get(task.id))
+        assert outcome.disposition == "blocked"
+        assert "incomplete result artifacts" in outcome.detail
+    assert len(store.list_runs(task.id)) == 1
+    assert not any(call[0] in {"resume", "recover"} for call in supervisor.calls)
+
+
+@pytest.mark.parametrize("phase", ["planning", "review", "formality"])
+def test_readonly_success_ingestion_does_not_duplicate_phase_evidence(config, monkeypatch, phase):
+    role = {"planning": "planner", "review": "reviewer", "formality": "formality"}[phase]
+    store = TaskStore.create(config.db_path)
+    task, pipeline, original = _interrupted_run(config, store, role=role)
+    task.worktree_path = config.repo_root
+    if phase == "planning":
+        task.spec.workflow = "feature"
+    store.save(task)
+    store.start_worker(task.id, "started")
+    action = store.get_session(original.session_id).idempotency_key
+    store.add_event(task.id, "pipeline.phase.finished", "provisioned", {"pipeline_id": pipeline.id, "output": {"action_id": "provisioned", "next_phase": phase}})
+    store.add_event(task.id, "pipeline.phase.started", phase, {"pipeline_id": pipeline.id, "phase": phase, "action_id": action, "input": {"payload": {"attempt": 0}}})
+    review = {"verdict": "approve", "summary": "ok", "findings": [], "validation_gaps": [], "remaining_risk": ""}
+    if phase == "planning":
+        store.begin_plan_run(task.id, 0, prompt_path=config.prompts_dir / "plan.md", transcript_path=config.logs_dir / "plan.jsonl", last_message_path=config.logs_dir / "plan.md", model=None, reasoning_effort=None)
+    if phase == "formality":
+        store.add_event(task.id, "pipeline.review.raw", "review", {"pipeline_id": pipeline.id, "review": review})
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE task_runs SET state = 'running', completed_at = NULL WHERE id = ?", (original.id,))
+    supervisor = FakeSupervisor(config, store)
+    result = supervisor._complete(original)
+    message = {
+        "planning": {"summary": "plan", "assumptions": [], "steps": [{"title": "edit", "detail": "edit readme", "files": ["README.md"]}], "validation": ["test"], "risks": [], "non_goals": []},
+        "review": review,
+        "formality": {"dispositions": []},
+    }[phase]
+    result.last_message_path.write_text(json.dumps(message))
+    archive = TaskArchiveWriter(config)
+    archive.materialize_ledger(task, pipeline, store.list_runs(task.id))
+    (result.last_message_path.parent / "result.json").write_text(json.dumps({
+        "status": "available", "task_id": task.id, "pipeline_id": pipeline.id,
+        "session_id": original.session_id, "run_id": original.id,
+        "output_checkpoint": worktree_checkpoint(config, config.repo_root),
+    }))
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    with monkeypatch.context() as patch:
+        patch.setattr(daemon.executor, "_phase_finish", lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("crash before receipt")))
+        with pytest.raises(SystemExit):
+            daemon._complete_atomic_run_result(task, store.get_run(original.id))
+    restarted = StewardDaemon(config, TaskStore.open(config.db_path), session_supervisor=supervisor)
+    assert restarted._reconcile_task(store.get(task.id)).disposition == "ingested"
+    assert restarted._reconcile_task(store.get(task.id)).disposition == "unchanged"
+    kind = {"planning": "pipeline.plan.result", "review": "pipeline.review.raw", "formality": "pipeline.formality.effective"}[phase]
+    assert len(store.events(task.id, kinds=(kind,))) == 1
+    assert len(store.list_runs(task.id)) == 1

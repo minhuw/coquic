@@ -28,6 +28,30 @@ Revision scope control:
 """
 
 
+MAX_VALIDATION_EVIDENCE_BYTES = 16_384
+
+
+def bounded_validation_evidence(
+    evidence: list[dict[str, Any]], artifact: str,
+) -> list[dict[str, Any]]:
+    """Bound aggregate control evidence; the full private artifact stays intact."""
+    if len(json.dumps({"validation_evidence": evidence}, indent=2, ensure_ascii=True).encode()) <= MAX_VALIDATION_EVIDENCE_BYTES:
+        return evidence
+    summary = {
+        "gate_count": len(evidence),
+        "failed_count": sum(item.get("passed") is False for item in evidence),
+        "artifact": artifact,
+        "omitted_details": len(evidence),
+    }
+    selected: list[dict[str, Any]] = [summary]
+    for item in sorted(evidence, key=lambda item: item.get("passed") is not False):
+        if len(json.dumps({"validation_evidence": [*selected, item]}, indent=2, ensure_ascii=True).encode()) > MAX_VALIDATION_EVIDENCE_BYTES:
+            continue
+        selected.append(item)
+        summary["omitted_details"] -= 1
+    return selected
+
+
 def render_review_prompt(
     task: TaskRecord,
     config: StewardConfig,

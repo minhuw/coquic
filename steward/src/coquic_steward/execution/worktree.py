@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from dataclasses import dataclass
+from typing import Any
 import shutil
 import tempfile
 from pathlib import Path
@@ -298,109 +299,127 @@ class Worktrees:
             check=True,
         )
 
-    def prepare_patch_worktree(
-        self,
-        task: TaskRecord,
-        *,
-        ordinal: int,
-        base_identity: str,
-        patch_text: str,
-        accepted_tree: str | None = None,
-    ) -> PreparedPatchWorktree:
-        """Apply an accepted patch to a new base without discarding its source bytes."""
-
+    def patch_preparation_intent(
+        self, task: TaskRecord, *, ordinal: int, base_identity: str,
+        patch_text: str, accepted_tree: str | None,
+    ) -> dict[str, Any]:
+        """Calculate authorized trees before touching the worktree or stash."""
+        if task.worktree_path is None:
+            raise RuntimeError("base-change preparation requires accepted worktree identity")
+        path = Path(task.worktree_path)
+        accepted_tree = accepted_tree or self.tree(path)
+        source_base = self.base_commit(path)
+        if self.tree(path) != accepted_tree:
+            raise RuntimeError("source worktree differs from the accepted tree")
+        existing_patch = self.diff(path)
+        if existing_patch and existing_patch != patch_text:
+            raise RuntimeError("source worktree differs from the accepted patch")
         source_branch = task.branch_name or f"steward/{_slug(task.spec.kind)}/{_slug(task.id)}"
         branch = f"{source_branch}-pipeline-{ordinal}"
+        if run_command(["git", "show-ref", "--verify", f"refs/heads/{branch}"], cwd=path).ok:
+            raise RuntimeError("preparation branch already exists without durable intent")
+        with tempfile.TemporaryDirectory(prefix="coquic-steward-prepare-") as temporary:
+            env = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
+            run_command(["git", "read-tree", base_identity], cwd=path, env=env, check=True)
+            input_tree = run_command(["git", "write-tree"], cwd=path, env=env, check=True).stdout.strip()
+            result = run_command(["git", "apply", "--cached", "--binary", "-"], cwd=path, env=env, input_text=patch_text)
+            output_tree = run_command(["git", "write-tree"], cwd=path, env=env, check=True).stdout.strip()
+        return {
+            "source_base": source_base, "source_branch": source_branch,
+            "accepted_tree": accepted_tree, "base_identity": base_identity,
+            "input_tree": input_tree, "output_tree": output_tree,
+            "branch": branch, "ordinal": ordinal, "applied": result.ok,
+            "detail": (result.stderr or result.stdout).strip()[-2000:],
+            "stash_marker": f"steward-base-change-{task.id}-{ordinal}",
+        }
+
+    def prepare_patch_worktree(
+        self, task: TaskRecord, *, ordinal: int, base_identity: str,
+        patch_text: str, accepted_tree: str | None = None,
+        preparation: dict[str, Any] | None = None,
+    ) -> PreparedPatchWorktree:
+        """Reconcile only exact states authorized by the persisted preparation."""
         if task.worktree_path is None:
             raise RuntimeError("base-change preparation requires the task worktree")
+        accepted_tree = accepted_tree or (
+            preparation["accepted_tree"] if preparation else self.tree(Path(task.worktree_path))
+        )
+        intent = preparation or self.patch_preparation_intent(
+            task, ordinal=ordinal, base_identity=base_identity,
+            patch_text=patch_text, accepted_tree=accepted_tree,
+        )
         path = Path(task.worktree_path)
-        if not path.is_dir():
-            raise RuntimeError(f"task worktree is unavailable: {path}")
-        actual_base = self.base_commit(path)
-        existing_patch = self.diff(path)
-        if actual_base == base_identity:
-            if existing_patch and existing_patch != patch_text:
-                raise RuntimeError("prepared worktree contains an unexpected patch")
-        else:
-            head_tree = run_command(
-                ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
-            ).stdout.strip()
-            committed_source = (
-                not existing_patch
-                and accepted_tree is not None
-                and head_tree == accepted_tree
-            )
-            if not committed_source and existing_patch != patch_text:
-                raise RuntimeError("source worktree differs from the accepted patch")
-            stash_created = False
-            if existing_patch:
-                stash = run_command(
-                    [
-                        "git",
-                        "stash",
-                        "push",
-                        "--include-untracked",
-                        "--message",
-                        f"steward pipeline {ordinal} base change",
-                    ],
-                    cwd=path,
-                    check=True,
-                )
-                stash_created = "No local changes to save" not in stash.stdout
+        branch = intent["branch"]
+        marker = intent["stash_marker"]
+        if (intent["base_identity"], intent["accepted_tree"], intent["ordinal"]) != (base_identity, accepted_tree, ordinal):
+            raise RuntimeError("preparation intent mismatch")
+
+        def owned_stashes() -> list[tuple[str, str]]:
+            rows = run_command(["git", "stash", "list", "--format=%gd%x09%H%x09%gs"], cwd=path, check=True).stdout.splitlines()
+            return [(ref, oid) for ref, oid, subject in (row.split("\t", 2) for row in rows) if subject.endswith(": " + marker)]
+
+        owned = owned_stashes()
+        if len(owned) > 1:
+            raise RuntimeError("ambiguous preparation stash ownership")
+        def verify_stash(oid: str) -> None:
+            if run_command(["git", "rev-parse", oid + "^1"], cwd=path, check=True).stdout.strip() != intent["source_base"]:
+                raise RuntimeError("preparation stash base mismatch")
+            with tempfile.TemporaryDirectory(prefix="coquic-steward-stash-") as temporary:
+                env = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
+                run_command(["git", "read-tree", oid], cwd=path, env=env, check=True)
+                if run_command(["git", "rev-parse", "--verify", oid + "^3"], cwd=path).ok:
+                    run_command(["git", "read-tree", "--prefix=", oid + "^3"], cwd=path, env=env, check=True)
+                tree = run_command(["git", "write-tree"], cwd=path, env=env, check=True).stdout.strip()
+                if tree != accepted_tree:
+                    raise RuntimeError("preparation stash differs from accepted bytes")
+
+        for _, oid in owned:
+            verify_stash(oid)
+        head = self.base_commit(path)
+        tree = self.tree(path)
+        if head == intent["source_base"] and head != base_identity:
+            source_branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=path).stdout.strip()
+            if source_branch != intent["source_branch"]:
+                raise RuntimeError("source branch differs from durable intent")
+            if tree == accepted_tree:
                 if self.has_changes(path):
-                    raise RuntimeError(
-                        "accepted patch could not be preserved before base change"
-                    )
-            run_command(
-                [
-                    "git",
-                    "switch",
-                    "--detach",
-                    base_identity,
-                ],
-                cwd=path,
-                check=True,
-            )
-            run_command(
-                ["git", "switch", "-C", branch, base_identity],
-                cwd=path,
-                check=True,
-            )
-            if stash_created:
-                run_command(["git", "stash", "drop"], cwd=path, check=True)
-        actual_base = self.base_commit(path)
-        if actual_base != base_identity:
-            raise RuntimeError(
-                f"prepared worktree base mismatch: expected {base_identity}, "
-                f"found {actual_base}"
-            )
-        input_tree = run_command(
-            ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
-        ).stdout.strip()
-        existing_patch = self.diff(path)
-        if existing_patch:
-            applied = existing_patch == patch_text
-            detail = "adopted existing prepared patch" if applied else "prepared worktree contains an unexpected patch"
-        else:
-            result = run_command(
-                ["git", "apply", "--binary", "-"],
-                cwd=path,
-                input_text=patch_text,
-            )
-            applied = result.ok
-            detail = (result.stderr or result.stdout).strip()[-2_000:]
-        output_tree = self.tree(path)
-        if not applied and output_tree != input_tree:
-            raise RuntimeError("failed patch application changed the prepared worktree")
+                    if owned:
+                        raise RuntimeError("source patch and preparation stash both present")
+                    run_command(["git", "stash", "push", "--include-untracked", "--message", marker], cwd=path, check=True)
+                    owned = owned_stashes()
+            elif self.has_changes(path) or not owned:
+                raise RuntimeError("source changed outside recorded preparation")
+            if self.has_changes(path):
+                raise RuntimeError("preparation did not preserve the accepted patch")
+            for _, oid in owned:
+                verify_stash(oid)
+            run_command(["git", "switch", "--detach", "--no-overwrite-ignore", base_identity], cwd=path, check=True)
+            head, tree = self.base_commit(path), self.tree(path)
+        if head != base_identity or tree not in {intent["input_tree"], intent["output_tree"]}:
+            raise RuntimeError("worktree differs from authorized preparation states")
+        current_branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=path).stdout.strip()
+        if current_branch != branch:
+            if current_branch and not (
+                current_branch == intent["source_branch"]
+                and intent["source_base"] == base_identity
+            ):
+                raise RuntimeError("unexpected branch during preparation")
+            exists = run_command(["git", "show-ref", "--verify", f"refs/heads/{branch}"], cwd=path).ok
+            if exists:
+                raise RuntimeError("preparation branch is owned elsewhere")
+            run_command(["git", "switch", "-c", branch, base_identity], cwd=path, check=True)
+        if tree == intent["input_tree"] and intent["applied"]:
+            run_command(["git", "apply", "--binary", "-"], cwd=path, input_text=patch_text, check=True)
+        if self.tree(path) != intent["output_tree"]:
+            raise RuntimeError("prepared tree does not match durable intent")
+        # Drop only our exact stash, never the shared repository's newest entry.
+        for ref, oid in owned_stashes():
+            if run_command(["git", "rev-parse", ref], cwd=path, check=True).stdout.strip() != oid:
+                raise RuntimeError("stash ownership changed during preparation")
+            run_command(["git", "stash", "drop", ref], cwd=path, check=True)
         return PreparedPatchWorktree(
-            path=path,
-            branch=branch,
-            base_identity=actual_base,
-            input_identity=input_tree,
-            output_identity=output_tree,
-            patch_identity=self.patch_identity(path),
-            applied=applied,
-            detail=detail,
+            path, branch, base_identity, intent["input_tree"], intent["output_tree"],
+            self.patch_identity(path), intent["applied"], intent["detail"],
         )
 
     def reset_to_main(self, path: Path) -> None:

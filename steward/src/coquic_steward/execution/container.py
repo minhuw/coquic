@@ -406,8 +406,14 @@ class TaskContainerRuntime:
             raise ValueError("invalid helper cleanup labels")
         target = identity or name
         with use_subprocess_owner(None):
-            inspected = self.client.run(["container", "inspect", target],
-                                        timeout=10, max_output_bytes=16384)
+            # Full inspect duplicates the embedded helper source in Args and
+            # Config.Cmd. Project only ownership fields before bounded capture.
+            inspected = self.client.run([
+                "container", "inspect", "--format",
+                '[{"Id":{{json .Id}},"Name":{{json .Name}},'
+                '"Image":{{json .Image}},"Config":{"Labels":{{json .Config.Labels}}}}]',
+                target,
+            ], timeout=10, max_output_bytes=16384)
             if inspected.returncode:
                 absent = inspected.stderr.strip() == (
                     f"Error response from daemon: No such container: {target}".encode()

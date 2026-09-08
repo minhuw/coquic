@@ -49,7 +49,7 @@ class FakeDocker(SubprocessDockerClient):
         if argv[0] == "create" and "session-files-v1" in " ".join(argv):
             self.helper_argv = argv
             return subprocess.CompletedProcess(argv, 0, ("d" * 64).encode(), b"")
-        if argv == ["container", "inspect", "d" * 64]:
+        if argv[:3] == ["container", "inspect", "--format"] and argv[-1] == "d" * 64:
             return subprocess.CompletedProcess(argv, 1, b"[]", ("Error response from daemon: No such container: " + "d" * 64).encode())
         if argv == ["start", "--attach", "--interactive", "d" * 64]:
             helper = self.helper_argv

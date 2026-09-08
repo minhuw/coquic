@@ -228,6 +228,7 @@ class HelperDocker(SubprocessDockerClient):
             self.name = argv[argv.index("--name") + 1]
             self.labels = dict(argv[index + 1].split("=", 1)
                                for index, arg in enumerate(argv) if arg == "--label")
+            self.command = argv[argv.index("--entrypoint") + 3:]
             self.materialize()
             return subprocess.CompletedProcess(argv, 0, (self.identity + "\n").encode(), b"")
         if argv[0] == "start":
@@ -236,16 +237,26 @@ class HelperDocker(SubprocessDockerClient):
         assert current_subprocess_owner() is None
         assert kwargs["timeout"] == 10
         if argv[:2] == ["container", "inspect"]:
-            objects = [item for item in self.objects.values() if argv[2] in {item["Id"], item["Name"][1:]}]
-            return subprocess.CompletedProcess(argv, 0 if objects else 1, json.dumps(objects).encode(),
-                b"" if objects else f"Error response from daemon: No such container: {argv[2]}\n".encode())
+            assert kwargs["max_output_bytes"] == 16384
+            target = argv[-1]
+            objects = [item for item in self.objects.values() if target in {item["Id"], item["Name"][1:]}]
+            if len(argv) > 3:
+                assert argv[2:-1] == ["--format",
+                    '[{"Id":{{json .Id}},"Name":{{json .Name}},'
+                    '"Image":{{json .Image}},"Config":{"Labels":{{json .Config.Labels}}}}]']
+                objects = [{"Id": item["Id"], "Name": item["Name"], "Image": item["Image"],
+                            "Config": {"Labels": item["Config"]["Labels"]}} for item in objects]
+            output = json.dumps(objects).encode()[:kwargs["max_output_bytes"]]
+            return subprocess.CompletedProcess(argv, 0 if objects else 1, output,
+                b"" if objects else f"Error response from daemon: No such container: {target}\n".encode())
         assert argv == ["rm", "--force", self.identity]
         self.objects.pop(self.identity, None)
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     def materialize(self):
         self.objects[self.identity] = {"Id": self.identity, "Name": "/" + self.name,
-            "Image": "sha256:" + "a" * 64, "Config": {"Labels": self.labels}}
+            "Image": "sha256:" + "a" * 64, "Path": "python", "Args": self.command,
+            "Config": {"Labels": self.labels, "Cmd": self.command, "Entrypoint": ["python"]}}
 
 
 def helper_runtime(config, client):
@@ -278,6 +289,70 @@ def test_helper_timeout_removes_only_its_exact_generated_container(config):
     assert argv.count("--mount") == 1
     assert "/var/run/docker.sock" not in " ".join(argv)
     assert not list((config.private_dir / ".file-helper-cleanup").glob("*.json"))
+
+
+def test_cancelled_helper_cleanup_projects_oversized_inspection(config):
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner, use_subprocess_owner
+
+    owner = ProcessGroupCancellationOwner("oversized-helper-inspect")
+
+    class CancelAfterCreateDocker(HelperDocker):
+        def run(self, argv, **kwargs):
+            result = super().run(argv, **kwargs)
+            if argv[0] == "create":
+                # Docker duplicates the exact embedded Python source in both
+                # Args and Config.Cmd, even before the helper is ever started.
+                full_inspection = json.dumps([self.objects[self.identity]]).encode()
+                assert len(full_inspection) > 16384
+                with pytest.raises(json.JSONDecodeError):
+                    json.loads(full_inspection[:16384])
+                owner.force_cancel()
+            return result
+
+    client = CancelAfterCreateDocker()
+    client.objects["foreign"] = {"Id": "foreign", "Name": "/foreign-container"}
+    runtime = helper_runtime(config, client)
+    with use_subprocess_owner(owner), pytest.raises(InterruptedError, match="start cancelled"):
+        runtime.provision_session(session_id="session-one", session_uid=12345)
+    assert [argv[0] for argv in client.calls] == ["create", "container", "rm"]
+    assert client.calls[1][2] == "--format"
+    assert client.calls[1][-1] == client.identity
+    assert client.calls[-1] == ["rm", "--force", client.identity]
+    assert set(client.objects) == {"foreign"}
+    assert not list((config.private_dir / ".file-helper-cleanup").glob("*.json"))
+    # Cleanup must not leave an intent that blocks the next uncancelled helper.
+    assert runtime.provision_session(session_id="session-two", session_uid=12346) is None
+    assert set(client.objects) == {"foreign"}
+
+
+@pytest.mark.parametrize("field", [
+    "Id", "Name", "Image", "coquic.steward.owner", "coquic.steward.runtime", "coquic.steward.helper",
+])
+def test_projected_helper_inspection_rejects_each_ownership_mismatch(config, field):
+    class MismatchedDocker(HelperDocker):
+        def run(self, argv, **kwargs):
+            result = super().run(argv, **kwargs)
+            if argv[:2] == ["container", "inspect"]:
+                objects = json.loads(result.stdout)
+                found = objects[0]
+                if field.startswith("coquic."):
+                    found["Config"]["Labels"][field] = "foreign"
+                else:
+                    found[field] = "e" * 64 if field == "Id" else "foreign"
+                return subprocess.CompletedProcess(argv, 0, json.dumps(objects).encode(), b"")
+            return result
+
+    client = MismatchedDocker()
+    runtime = helper_runtime(config, client)
+    with pytest.raises(ContainerBoundaryError, match="cleanup is unverified") as caught:
+        runtime.provision_session(session_id="session-one", session_uid=12345)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert str(caught.value.__cause__) == "helper cleanup ownership mismatch"
+    assert all(argv[0] != "rm" for argv in client.calls)
+    assert client.identity in client.objects
+    pending = list((config.private_dir / ".file-helper-cleanup").glob("*.json"))
+    assert len(pending) == 1
+    assert json.loads(pending[0].read_text())["id"] == client.identity
 
 
 def test_planner_schema_rejection_has_daemon_owned_evidence(config):

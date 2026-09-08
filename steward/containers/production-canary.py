@@ -1,15 +1,16 @@
 """Real Docker boundary canary, launched by production-canary.sh, never a daemon service."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
-from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import CodexRunState, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.core.subprocesses import run_command
 from coquic_steward.execution.container import ContainerBoundaryError
 from coquic_steward.execution.container_config import TaskRole
-from coquic_steward.execution.session import session_supervisor_for_config
+from coquic_steward.execution.session import InvocationStatus, session_supervisor_for_config, worktree_checkpoint
 from coquic_steward.execution.validation import _docker_validation_runner, default_gates, run_validation
 from coquic_steward.storage import TaskStore
 
@@ -70,8 +71,14 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = --output-last-message ]; then last="$2"; shift 2; else shift; fi
 done
 cat >/dev/null
+test ! -S /var/run/docker.sock
+test ! -e /run/secrets
+if [ "$COQUIC_STEWARD_ROLE" = implementation ]; then
+  printf 'model implementation\\n' >>/task/worktree/README.md
+fi
 printf '%s\\n' '{"type":"thread.started","thread_id":"canary-provider"}'
 printf 'deterministic completion\\n' >"$last"
+printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
 ''')
     fake.chmod(0o755)
     store = TaskStore.create(config.db_path)
@@ -116,10 +123,20 @@ printf 'deterministic completion\\n' >"$last"
     try:
         sessions = []
         for role in (TaskRole.implementation, TaskRole.reviewer):
+            before_checkpoint = worktree_checkpoint(config, worktree)
             result = supervisor.start(task.id, pipeline.id, role=role, prompt="canary",
                                       cwd=worktree, timeout_seconds=30)
-            assert result.exit_code == 0, result
+            assert result.status is InvocationStatus.succeeded and result.exit_code == 0, result
             assert result.last_message_path.read_text() == "deterministic completion\n"
+            assert TaskStore.open(config.db_path).get_run(result.run_id).state == CodexRunState.succeeded
+            receipt = json.loads(result.last_message_path.with_name("result.json").read_text())
+            assert receipt["status"] == "available", receipt
+            assert (receipt["task_id"], receipt["pipeline_id"], receipt["session_id"], receipt["run_id"]) == (
+                task.id, pipeline.id, result.session_id, result.run_id,
+            ), receipt
+            assert receipt["output_checkpoint"] == worktree_checkpoint(config, worktree), receipt
+            if role is TaskRole.implementation:
+                assert receipt["output_checkpoint"] != before_checkpoint, receipt
             sessions.append(store.get_session(result.session_id))
         runtime = runtimes[0]
         inspection = runtime.adopt()

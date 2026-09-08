@@ -118,6 +118,7 @@ max_scratch_bytes = 8589934592
 # model = "gpt-5.6-terra"
 # reasoning_effort = "medium"
 
+# Compatibility-only: the durable pipeline now uses deterministic commit wording.
 [steward.codex.commit_message]
 # model = "gpt-5.6-terra"
 # reasoning_effort = "low"

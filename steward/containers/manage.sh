@@ -739,6 +739,21 @@ status_service() {
 
 logs_service() { require_paths; validate_socket; compose_run logs --tail 100 steward; }
 
+require_runtime_health_contract() {
+  local release="$1" health status=0
+  select_release "$release"
+  [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]] && return 0
+  # Probe the exact fallback image, not the running service or a release-record
+  # assertion. This runs only the read-only CLI, never the fallback daemon.
+  health="$(compose_run run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health 2>/dev/null)" || status=$?
+  [[ "$status" == 0 || "$status" == 1 ]] || die 'runtime health contract probe failed; see stopped legacy transition in CONTAINER_OPERATIONS.md'
+  python -c '
+import json, sys
+value = json.load(sys.stdin)
+raise SystemExit(0 if value.get("mode") == "runtime" and type(value.get("runtimeHealthy")) is bool and type(value.get("releaseMatches")) is bool else 1)
+' <<<"$health" || die 'release lacks the runtime health contract; see stopped legacy transition in CONTAINER_OPERATIONS.md'
+}
+
 verify_release_health() {
   local release="$1" health attempt
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
@@ -774,6 +789,7 @@ recreate_release() {
 
 restore_release() {
   local release="$1"
+  require_runtime_health_contract "$release"
   journal restore failure
   recreate_release "$release" && verify_release_health "$release" || die 'candidate failed and the previous release could not be restored'
 }
@@ -795,11 +811,13 @@ upgrade_service() {
   local force=0 arg
   for arg in "$@"; do [[ "$arg" == --force ]] && force=1 || die 'upgrade accepts only --force'; done
   [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'
+  local old candidate before_previous='__NONE__'
+  old="$(selector_value current)"
+  require_runtime_health_contract "$old"
+  verify_release_health "$old" || die 'upgrade fallback runtime health is unverified'
   if (( force == 0 )); then
     require_quiescence upgrade
   fi
-  local old candidate before_previous='__NONE__'
-  old="$(selector_value current)"
   if [[ -e "$deployment/previous" ]]; then
     before_previous="$(selector_value previous)"
   fi
@@ -834,7 +852,9 @@ rollback_service() {
   previous="$(selector_value previous)"
   current="$(selector_value current)"
   before_previous="$previous"
-  select_release "$previous"
+  require_runtime_health_contract "$previous"
+  require_runtime_health_contract "$current"
+  verify_release_health "$current" || die 'rollback fallback runtime health is unverified'
   require_quiescence rollback
   journal rollback
   if ! recreate_release "$previous" || ! verify_release_health "$previous"; then

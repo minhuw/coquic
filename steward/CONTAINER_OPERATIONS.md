@@ -300,17 +300,29 @@ facts, not remote-provider checks. Quiescence requires healthy runtime evidence,
 an explicitly recorded idle cycle state and no observed task, planner, archive,
 or cleanup work.
 
-`upgrade` first proves quiescence through the daemon health API. Without
-`--force`, active task/planner work, integration, archive writing, or cleanup
-refuses the operation. It then builds a candidate, recreates only the Steward
+`upgrade` first probes the exact current daemon image for the runtime health
+contract and verifies the running current release as a usable fallback. The probe
+runs only the read-only `health` CLI in a disposable Compose container, never a
+second daemon. Its `mode: runtime` and boolean `runtimeHealthy`/`releaseMatches`
+fields establish API compatibility, not liveness; false values and exit 1 are
+allowed for this capability probe only. Running-service verification remains
+strict. The fallback check precedes build, journaling, stop, and recreation,
+including with `--force`; force bypasses quiescence, not fallback safety.
+
+Without `--force`, upgrade also proves quiescence through the daemon health API;
+active task/planner work, integration, archive writing, or cleanup refuses the
+operation. It then builds a candidate, recreates only the Steward
 service, verifies the candidate release and heartbeat, and moves `current` and
 `previous` atomically. A failed candidate is restored to the prior verified
 release; the failed candidate remains recorded for diagnosis. `--force` is a
 separate, visibly disruptive stop that preserves interruption evidence before
 the recreate.
 
-`rollback` requires a recorded compatible `previous` release and proven
-quiescence. It verifies health before swapping selectors. If the previous pair
+`rollback` probes both the recorded `previous` image and the current fallback
+for the same contract, verifies the running current release, and requires proven
+quiescence before journaling or recreation. A legacy target is refused without
+stopping the current service or attempting a recreate/restore loop. It verifies
+the started target's health before swapping selectors. If the previous pair
 cannot start cleanly, the current pair is restored and the operation fails
 closed. Neither upgrade nor rollback changes Pulumi, D1, R2, Site configuration,
 or publication objects.
@@ -348,6 +360,89 @@ selector phase with a non-pending outcome, or running release outside the
 recorded pair refuses the operation. Repeating recovery after either exact pair
 is complete only revalidates it and marks the journal complete; it never guesses
 a release or performs Docker cleanup.
+
+### Stopped legacy transition
+
+Releases such as `3fedb2d6` report synthetic `heartbeat: ok` and `lifecycle:
+running` from database readability and lack the new runtime health fields. They
+are **not supported automatic upgrade fallbacks or rollback targets**. Neither
+Docker's old healthcheck nor a successful legacy `health` command proves daemon
+liveness. Do not add fields to release records, forge daemon evidence, or retry
+with `--force`. Ordinary refusal leaves selectors, the operation journal, and the
+service unchanged (apart from normal lock acquisition and disposable probes).
+An already pending selector journal still goes through strict recovery first;
+legacy or ambiguous runtime evidence leaves that journal untouched for review.
+Restore also probes compatibility before journaling or recreating a fallback.
+
+For an existing legacy installation, use this explicit maintenance-window
+transition instead of `upgrade`. It deliberately gives up automatic rollback
+across the health-contract boundary:
+
+1. Retain the old immutable image IDs, release records, configuration, management
+   assets, and a private backup location. Inspect any interrupted operation first;
+   do not discard a pending journal to make a command pass. Arrange downtime and
+   prevent concurrent operator or automated lifecycle commands.
+2. Stop Steward with `manage.sh stop`. Verify the exact project/service container
+   ID, image ID, and `coquic.steward.owner`, deployment, and release labels using
+   Docker inspection, then verify `.State.Running` is false. If a pending selector
+   journal prevents the wrapper from stopping, manually stop only that inspected
+   container ID with `docker stop --time 45 <verified-container-id>` (use the
+   configured grace). This is an explicit recovery exception to the wrapper-only
+   interface, not liveness proof. Preserve interrupted task containers and resolve
+   outstanding writers before taking a consistent offline backup of the private
+   home, including SQLite/WAL, task state, and deployment metadata. Never prune or
+   remove containers to force quiescence.
+3. Update the canonical clean repository to the reviewed compatible revision on
+   the configured branch. Keep the same home, credentials, and cloud identities.
+   With the service confirmed stopped and the backup retained, retire only the
+   old selector/journal pair under the existing lock. For example, after reviewing
+   `operation.journal` and resolving its exact interrupted state:
+
+   ```sh
+   deployment="$COQUIC_HOME/private/deployment"
+   (
+     flock -n 9 || exit 1
+     archive="$deployment/legacy-transition-$(date -u +%Y%m%dT%H%M%SZ)"
+     mkdir -m 700 "$archive" || exit 1
+     for name in current previous operation.journal last-outcome.json; do
+       if [ -e "$deployment/$name" ]; then
+         mv -- "$deployment/$name" "$archive/$name" || exit 1
+       fi
+     done
+   ) 9>"$deployment/operation.lock"
+   ```
+
+   Do not move/replace the lock file, delete release records, or populate
+   `previous` with the legacy release. If interrupted, inspect the archive and
+   finish that exact retirement before bootstrap; do not start either release
+   against a partial selector pair.
+4. Using the new management assets, run `bootstrap → init → start`. Bootstrap
+   now records the new first selector while preserving retained release records;
+   `init` validates the existing exact Store, and `start` still uses Store-only
+   readiness. A schema/configuration mismatch stops this procedure: restore the
+   stopped backup or arrange a separately reviewed migration, never delete or
+   rewrite the Store to bypass it. This health change performs no schema migration.
+5. Before accepting the transition, inspect `status` and execute default health
+   in that exact running container:
+
+   ```sh
+   docker exec --workdir "$COQUIC_HOME/repository" <verified-container-id> /usr/bin/env coquic-steward health
+   ```
+
+   Require exit 0,
+   `runtimeHealthy: true`, `releaseMatches: true`, the expected release and
+   protocol, and fresh persisted owner-bound heartbeat evidence. Start alone is
+   not runtime verification. Subsequent compatible upgrades establish a new
+   `previous` and support ordinary rollback.
+
+If the first compatible launch fails, stop and inspect it; there is intentionally
+no automatic legacy restore. To return to legacy operation, keep both daemons
+stopped, assess any work/publication performed since the backup, and explicitly
+restore the coherent stopped backup, old deployment selectors, and old management
+assets before starting the retained old image. Never restore SQLite underneath a
+running daemon or rewind state after external effects without reconciliation.
+Legacy health still cannot certify runtime liveness; remaining on the old release
+requires operator supervision, not a successful new-wrapper rollback claim.
 
 ## Pressure and cleanup
 
@@ -425,7 +520,10 @@ publication or a production lifecycle action.
 ## Local proof
 
 The deterministic management tests use fake credentials, a local bare remote,
-and fake Docker state only:
+and fake Docker state only. The lifecycle mode also exercises real health
+parsers and journaling with mixed-version JSON: incompatible transitions preserve
+selectors/journal/service, failed candidates restore compatible fallbacks, and
+compatible upgrade/rollback remains supported.
 
 ```sh
 nix develop -c bash steward/containers/test-manage.sh --config

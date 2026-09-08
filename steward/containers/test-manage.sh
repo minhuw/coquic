@@ -532,6 +532,143 @@ check_health_contract() (
   expect_health_refusal running_release_identity
 )
 
+# Run the real lifecycle/journal and health parsers; intercept only image builds
+# and Docker. Legacy replies deliberately fabricate the old DB-only liveness.
+check_mixed_version_lifecycle() (
+  source <(sed '/^command="${1:-}"/,$d' "$manage")
+  deployment="$home/private/deployment"
+  unset STEWARD_MANAGE_FAKE
+  local legacy_release='' failed_release='' probe_format=runtime probe_status=1
+  local events="$tmp/contract.events" original target candidate before output
+  : >"$events"
+  validate_socket() { :; }
+  docker() { [[ "$*" == info ]]; }
+  sleep() { :; }
+  eval "$(declare -f build_release | sed '1s/build_release/build_fixture_release/')"
+  build_release() (
+    printf 'build\n' >>"$events"
+    export STEWARD_MANAGE_FAKE=1
+    build_fixture_release
+  )
+  compose_run() {
+    local release
+    case "$*" in
+      'run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health')
+        release="$STEWARD_RELEASE_ID"
+        if [[ "$release" != "$legacy_release" ]]; then
+          # A stopped/nonselected compatible image need not report live health.
+          case "$probe_format" in
+            runtime) printf '%s\n' '{"mode":"runtime","runtimeHealthy":false,"releaseMatches":false}' ;;
+            store-only) printf '%s\n' '{"mode":"store-only","store":"ok"}' ;;
+            malformed) printf '{malformed\n' ;;
+            mistyped) printf '%s\n' '{"mode":"runtime","runtimeHealthy":"true","releaseMatches":true}' ;;
+          esac
+          return "$probe_status"
+        fi
+        ;;
+      "exec -T --workdir $repository steward /usr/bin/env coquic-steward health")
+        [[ -f "$deployment/service.running" ]] || return 1
+        release="$(cat "$deployment/service.release")"
+        if [[ "$release" != "$legacy_release" ]]; then
+          local healthy=true
+          [[ "$release" != "$failed_release" ]] || healthy=false
+          printf '{"mode":"runtime","runtimeHealthy":%s,"releaseMatches":true,"lifecycle":"running","heartbeat":"ok","release":"%s","runtimeProtocol":"task-container-v1","quiescent":true}\n' "$healthy" "$release"
+          [[ "$healthy" == true ]]
+          return
+        fi
+        ;;
+      'up -d --no-deps --force-recreate steward')
+        printf 'recreate %s\n' "$STEWARD_RELEASE_ID" >>"$events"
+        : >"$deployment/service.running"
+        printf '%s\n' "$STEWARD_RELEASE_ID" >"$deployment/service.release"
+        return ;;
+      *) printf 'unexpected Compose call: %s\n' "$*" >&2; return 1 ;;
+    esac
+    printf '{"lifecycle":"running","heartbeat":"ok","release":"%s","runtimeProtocol":"task-container-v1","quiescent":true}\n' "$release"
+  }
+  refuse_unchanged() {
+    local expected="$1" before event_before output
+    shift
+    before="$(release_snapshot)"
+    event_before="$(cat "$events")"
+    if output="$( ("$@") 2>&1)"; then
+      printf 'expected contract refusal: %s\n' "$*" >&2
+      exit 1
+    fi
+    [[ "$output" == *"$expected"* ]]
+    [[ "$(release_snapshot)" == "$before" ]]
+    [[ "$(cat "$events")" == "$event_before" ]]
+  }
+  original="$(selector_value current)"
+  target="$(selector_value previous)"
+  set_fake_pair 7 8
+  candidate="$(release_for_fake_pair)"
+  [[ "$candidate" != "$original" && "$candidate" != "$target" ]]
+
+  legacy_release="$original" failed_release="$candidate"
+  if verify_release_health "$original"; then exit 1; fi
+  if running_release_identity; then exit 1; fi
+  refuse_unchanged 'lacks the runtime health contract' upgrade_service
+  refuse_unchanged 'lacks the runtime health contract' upgrade_service --force
+  refuse_unchanged 'lacks the runtime health contract' rollback_service
+  legacy_release="$target"
+  refuse_unchanged 'lacks the runtime health contract' rollback_service
+  refuse_unchanged 'lacks the runtime health contract' rollback_service
+  legacy_release=''
+  for probe_format in store-only malformed mistyped; do
+    refuse_unchanged 'lacks the runtime health contract' upgrade_service --force
+  done
+  probe_format=runtime probe_status=125
+  refuse_unchanged 'contract probe failed' rollback_service
+  probe_status=1
+  failed_release="$original"
+  refuse_unchanged 'fallback runtime health is unverified' upgrade_service --force
+  refuse_unchanged 'fallback runtime health is unverified' rollback_service
+
+  # An already failed/interrupted candidate must not destructively retry a
+  # legacy restore, even if the current wrapper did not initiate that upgrade.
+  legacy_release="$original" failed_release=''
+  journal recreate pending "$candidate"
+  printf '%s\n' "$target" >"$deployment/service.release"
+  refuse_unchanged 'lacks the runtime health contract' restore_release "$original"
+  refuse_unchanged 'lacks the runtime health contract' restore_release "$original"
+  printf '%s\n' "$original" >"$deployment/service.release"
+  # Recovery validates both records before it checks the old daemon response.
+  (export STEWARD_MANAGE_FAKE=1; build_fixture_release >/dev/null)
+  selector_journal upgrade "$original" "$candidate" previous "$original" "$target" "$candidate" "$original"
+  refuse_unchanged 'running release is unverified' start_service
+  journal complete success
+
+  # Compatible fallback: a failed new candidate is recreated once, then the
+  # fallback is recreated once and verified with the real strict parser.
+  legacy_release='' failed_release="$candidate"
+  before="$(cat "$deployment/current" "$deployment/previous")"
+  if output="$( (upgrade_service) 2>&1)"; then exit 1; fi
+  [[ "$output" == *'previous release restored'* ]]
+  [[ "$(cat "$deployment/current" "$deployment/previous")" == "$before" ]]
+  [[ "$(cat "$deployment/service.release")" == "$original" ]]
+  [[ "$(cat "$events")" == "$(printf 'build\nrecreate %s\nrecreate %s' "$candidate" "$original")" ]]
+  [[ "$(cat "$deployment/operation.journal")" == '{"phase":"restore","outcome":"failure"}' ]]
+  [[ "$(cat "$deployment/last-outcome.json")" == '{"operation":"upgrade","result":"failure"}' ]]
+
+  failed_release='' probe_status=0
+  (upgrade_service)
+  [[ "$(selector_value current)" == "$candidate" && "$(selector_value previous)" == "$original" ]]
+  # Rollback health failure restores the new current, with selectors unchanged.
+  failed_release="$original"
+  : >"$events"
+  if output="$( (rollback_service) 2>&1)"; then exit 1; fi
+  [[ "$output" == *'current release restored'* ]]
+  [[ "$(selector_value current)" == "$candidate" && "$(selector_value previous)" == "$original" ]]
+  [[ "$(cat "$deployment/service.release")" == "$candidate" ]]
+  [[ "$(cat "$events")" == "$(printf 'recreate %s\nrecreate %s' "$original" "$candidate")" ]]
+  failed_release=''
+  (rollback_service)
+  [[ "$(selector_value current)" == "$original" && "$(selector_value previous)" == "$candidate" ]]
+  [[ "$(cat "$deployment/service.release")" == "$original" ]]
+  [[ "$(cat "$deployment/operation.journal")" == '{"phase":"complete","outcome":"success"}' ]]
+)
+
 case "$mode" in
   --config)
     check_environment_template
@@ -712,6 +849,7 @@ PY
       interrupt_rollback_and_recover "$point"
     done
     selector_recovery_negative_fixtures
+    check_mixed_version_lifecycle
     ;;
 esac
 printf 'management smoke test passed (%s; fake credentials, remote, and Docker state only)\n' "$mode"

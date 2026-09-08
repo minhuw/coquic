@@ -891,7 +891,7 @@ class TaskContainerRuntime:
         self, container_id: str | None = None, *, timeout: float | None = None
     ) -> None:
         identifier = container_id or self.config.container_name
-        grace = max(1, int(timeout or 10))
+        grace = max(0, int(10 if timeout is None else timeout))
         result = self._run(
             ["stop", "--time", str(grace), identifier],
             allow_not_found=True,
@@ -1490,7 +1490,9 @@ class ValidationContainerRuntime:
     def stop(
         self, *, identifier: str | None = None, timeout: float | None = None
     ) -> None:
-        grace = max(1, int(timeout or self.config.limits.stop_timeout_seconds))
+        grace = max(
+            0, int(self.config.limits.stop_timeout_seconds if timeout is None else timeout)
+        )
         try:
             self._run(
                 ["stop", "--time", str(grace), identifier or self.config.container_name],

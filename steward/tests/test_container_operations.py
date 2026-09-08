@@ -106,7 +106,7 @@ def test_validation_container_is_no_network_and_separate_from_task_image(
 
 
 @pytest.mark.parametrize("kind", ["task", "validation"])
-@pytest.mark.parametrize("timeout", [None, 0.2, 1, 5])
+@pytest.mark.parametrize("timeout", [None, -1, 0, 0.2, 1, 5])
 def test_stop_leaves_bounded_docker_acknowledgement_headroom(kind, timeout) -> None:
     calls = []
 
@@ -126,7 +126,7 @@ def test_stop_leaves_bounded_docker_acknowledgement_headroom(kind, timeout) -> N
     else:
         runtime.stop(identifier="d" * 64, timeout=timeout)
         default_grace = config.limits.stop_timeout_seconds
-    grace = max(1, int(timeout or default_grace))
+    grace = max(0, int(default_grace if timeout is None else timeout))
     assert calls == [(["stop", "--time", str(grace), "d" * 64], grace + 2)]
 
 

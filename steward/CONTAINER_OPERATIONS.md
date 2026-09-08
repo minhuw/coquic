@@ -551,7 +551,12 @@ disabled, including flake evaluation, to catch missing locked source closures:
 nix develop -c bash steward/containers/smoke-test.sh --images --full-validation
 nix develop -c bash steward/containers/smoke-test.sh --isolation
 nix develop -c bash steward/containers/smoke-test.sh --shutdown
+nix develop -c bash steward/containers/production-canary.sh
 ```
+
+The canary exercises real production-identity provisioning, sessions, and
+checkpoints, plus rejection of a deliberately failing candidate test. Only the
+model executable is fake; it does not launch a live service or contact a provider.
 
 These checks use fake inputs where possible and do not publish anything or
 contact Cloudflare. No local proof command performs a live Cloudflare, Site

@@ -16,8 +16,9 @@ phase artifacts:
 
 Planning is required for feature work. A narrowly scoped fix records a stable
 skip reason. Validation is deterministic and runs the complete gate set. Every
-planning, implementation, review, formality, and commit-message action starts a
-fresh Plan 003 session. Ordinary repair paths never resume a provider session.
+planning, implementation, review, and formality action starts a fresh Plan 003
+session. Commit messages are deterministic and never start a model session.
+Ordinary repair paths never resume a provider session.
 
 Before an external boundary Steward stores task, pipeline, phase, action, base,
 input tree, and expected identity. Each task also carries a Store-owned

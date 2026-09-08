@@ -1208,7 +1208,7 @@ def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path
     assert store.blocked == [(intent.intent_id, "cleanup_failed")]
     assert store.completed == []
 
-def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path) -> None:
+def test_session_completion_enqueues_every_materialized_revision(config, tmp_path: Path) -> None:
     completed_ids: list[str] = []
 
     class Archive:
@@ -1291,7 +1291,7 @@ def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path)
         supervisor = object.__new__(session_module.SessionSupervisor)
         supervisor.archive = Archive()
         supervisor.store = store
-        supervisor.config = SimpleNamespace(dry_run=False)
+        supervisor.config = config
         supervisor._active = {}
         supervisor._active_lock = threading.RLock()
         supervisor._enqueue_completed_run = lambda _task, saved: completed_ids.append(
@@ -1299,7 +1299,7 @@ def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path)
         )
         task = SimpleNamespace(id=f"task-{role}")
         session = SimpleNamespace(id=f"session-{role}", checkpoint_id=None, private_home_path=None)
-        request = SimpleNamespace(output_last_message=tmp_path / f"private-{role}.md")
+        request = SimpleNamespace(cwd=config.repo_root, output_last_message=tmp_path / f"private-{role}.md")
 
         supervisor._execute(
             task,

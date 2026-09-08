@@ -3582,3 +3582,38 @@ def test_patch_preparation_same_base_keeps_legacy_optional_tree_argument(config)
     result = worktrees.prepare_patch_worktree(task, ordinal=2, base_identity=worktrees.base_commit(task.worktree_path), patch_text=patch)
     assert result.applied
     assert (task.worktree_path / "README.md").read_text() == "accepted\n"
+
+
+@pytest.mark.parametrize("passed", [True, False])
+def test_validation_retains_complete_gate_log_in_task_archive(config, monkeypatch, passed):
+    log = config.logs_dir / "captured-gate.log"
+    content = b"original gate evidence\n" * 60_000 + b"FINAL TAIL\n"
+    log.write_bytes(content)
+
+    def gates(config, task_id, cwd, **kwargs):
+        result = ValidationResult(command=["gate"], cwd=cwd, passed=passed, exit_code=0 if passed else 1, output_path=log)
+        kwargs["on_gate_result"](0, result)
+        return [result]
+
+    monkeypatch.setattr(executor_module, "run_gates", gates)
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="retain gate logs", prompt="change README"))
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    assert executor.advance_once(task.id).next_phase == PipelineCursorPhase.implementation
+    assert executor.advance_once(task.id).next_phase == PipelineCursorPhase.validation
+    # Give the archive a real run owner; the light FakeRunner has no ledger.
+    from test_codex_sessions import FakeInvoker
+    pipeline = store.list_pipelines(task.id)[0]
+    supervisor = SessionSupervisor(config, store, invoker=FakeInvoker(), image_digest="sha256:" + "a" * 64)
+    supervisor.start(task.id, pipeline.id, role="implementation", prompt="complete", cwd=store.get(task.id).worktree_path, api_key="fake-key")
+    executor.advance_once(task.id)
+    event = store.events(task.id, kinds=("pipeline.validation.result",))[-1]
+    summary = event.data["validations"][0]
+    archive = TaskArchiveWriter(config)
+    retained = archive.task_path(task.id, summary["output_artifact"])
+    log.unlink()
+    assert retained.read_bytes() == content
+    assert summary["output"] == ("" if passed else content[-2048:].decode())
+    assert len(json.dumps(event.data)) < 16_384
+    full = json.loads(archive.task_path(task.id, event.data["validation_artifact"]).read_text())
+    assert full["validations"][0]["output_artifact"] == summary["output_artifact"]

@@ -1381,6 +1381,7 @@ class StewardDaemon:
             lease_seconds=lease_seconds,
             retry_backoff_seconds=retry_backoff_seconds,
             retry_policy=retry_policy,
+            cancel_event=self._publication_stop,
         )
 
     def _publication_retry_interval(self) -> float:

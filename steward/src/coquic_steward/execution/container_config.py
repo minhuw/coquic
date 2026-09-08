@@ -394,7 +394,7 @@ class PlannerContainerConfig:
 
 @dataclass(frozen=True)
 class ValidationContainerConfig:
-    """One-shot no-Codex boundary for the canonical four validation gates."""
+    """One-shot no-Codex boundary for the canonical validation gates."""
 
     run_id: str
     image: str

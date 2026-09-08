@@ -375,3 +375,62 @@ def test_real_docker_provisioning_from_nonroot_capability_free_daemon(config, pl
     finally:
         # Return only this disposable fixture to its original daemon owner.
         runtime._trusted_files(root, "tree", {"uid": os.geteuid(), "gid": os.getegid(), "worktree": False})
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "cancelled", "exception", "interrupt"])
+@pytest.mark.parametrize("cleanup", ["removed", "absent", "nonzero", "timeout", "exception"])
+def test_abnormal_helper_exit_cleans_exact_name_outside_cancelled_owner(config, failure, cleanup):
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner, current_subprocess_owner, use_subprocess_owner
+    from coquic_steward.execution.container import ContainerErrorCategory
+
+    owner = ProcessGroupCancellationOwner("cancelled-helper")
+    containers = {"foreign-container"}
+    calls = []
+
+    class Docker(SubprocessDockerClient):
+        def run(self, argv, **kwargs):
+            calls.append(argv)
+            if argv[0] == "run":
+                assert current_subprocess_owner() is owner
+                containers.add(argv[argv.index("--name") + 1])
+                owner.force_cancel()
+                if failure == "exception":
+                    raise OSError("CLI failure")
+                if failure == "interrupt":
+                    raise KeyboardInterrupt()
+                return subprocess.CompletedProcess(argv, -9 if failure == "cancelled" else 1, b"", b"private content")
+            assert current_subprocess_owner() is None
+            assert kwargs == {"timeout": 10, "max_output_bytes": 4096}
+            name = calls[0][calls[0].index("--name") + 1]
+            assert argv == ["rm", "--force", name]
+            assert name.startswith("coquic-steward-files-")
+            assert len(name.removeprefix("coquic-steward-files-")) == 32
+            if cleanup == "timeout":
+                raise subprocess.TimeoutExpired(argv, 10)
+            if cleanup == "exception":
+                raise OSError("cleanup connection lost")
+            if cleanup == "nonzero":
+                return subprocess.CompletedProcess(argv, 1, b"", b"daemon plugin not found")
+            containers.remove(name)
+            return subprocess.CompletedProcess(argv, 1 if cleanup == "absent" else 0, b"", f"Error response from daemon: No such container: {name}\n".encode() if cleanup == "absent" else b"")
+
+    runtime = PlannerContainerRuntime(PlannerContainerConfig(
+        image="synthetic", image_digest="sha256:" + "a" * 64,
+        history_root=config.repo_root, private_root=config.private_sessions_dir,
+        output_root=config.private_dir,
+    ), client=Docker())
+    cleanup_failed = cleanup in {"nonzero", "timeout", "exception"}
+    expected = ContainerBoundaryError if cleanup_failed or failure in {"nonzero", "cancelled"} else OSError if failure == "exception" else KeyboardInterrupt
+    with use_subprocess_owner(owner):
+        with pytest.raises(expected) as caught:
+            runtime.provision_session(session_id="session-one", session_uid=12345)
+        assert current_subprocess_owner() is owner
+    assert len(calls) == 2
+    if cleanup_failed:
+        assert caught.value.category is ContainerErrorCategory.ambiguous
+        assert "cleanup is unverified" in str(caught.value)
+        assert len(containers) == 2
+    else:
+        assert containers == {"foreign-container"}
+    assert "foreign-container" in containers
+    assert "private content" not in str(caught.value)

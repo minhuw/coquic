@@ -1165,9 +1165,14 @@ class StewardExecutor:
         self.worktrees.save_patch(worktree, patch_path)
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         validation_artifact = f"pipelines/{pipeline.id}/validations/gates-{iteration}.json"
-        full_evidence = [self._validation_evidence(item) for item in validations]
-        self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": full_evidence})
-        summaries = bounded_validation_evidence(full_evidence, validation_artifact)
+        gate_evidence = [self._validation_evidence(item) for item in validations]
+        for position, (validation, summary) in enumerate(zip(validations, gate_evidence)):
+            if validation.output_path.is_file():
+                relative = f"validations/iteration-{iteration}/gate-{position}.log"
+                self._archive_bytes(task, pipeline, relative, validation.output_path.read_bytes())
+                summary["output_artifact"] = f"pipelines/{pipeline.id}/{relative}"
+        self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": gate_evidence})
+        summaries = bounded_validation_evidence(gate_evidence, validation_artifact)
         self._archive_bytes(task, pipeline, f"patches/iteration-{iteration}.patch", patch_path.read_bytes())
         pipeline = self.store.update_pipeline_identity(
             pipeline.id,

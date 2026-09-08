@@ -29,6 +29,7 @@ from ..core.subprocesses import (
     _communicate_bounded,
     _validate_capture_limit,
     current_subprocess_owner,
+    use_subprocess_owner,
 )
 from .container_config import (
     ContainerMount,
@@ -398,19 +399,35 @@ class TaskContainerRuntime:
             result = self.client.run(
                 argv, input=data, timeout=120, max_output_bytes=16 * 1024 * 1024 + 4096,
             )
-        except subprocess.TimeoutExpired as exc:
-            # Killing a Docker CLI does not stop its server-side process. This
-            # unguessable name belongs only to the helper just launched here.
-            self.client.run(["rm", "--force", helper_name], timeout=10, max_output_bytes=4096)
-            raise ContainerBoundaryError(
-                ContainerErrorCategory.timeout, "private filesystem helper timed out"
-            ) from exc
-        if result.returncode:
-            # Do not copy worker-controlled filenames or content into diagnostics.
-            raise ContainerBoundaryError(
-                ContainerErrorCategory.rejected, "private filesystem boundary rejected handoff"
-            )
-        return result.stdout
+            if result.returncode:
+                # Never copy worker-controlled content into diagnostics.
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.rejected, "private filesystem boundary rejected handoff"
+                )
+            return result.stdout
+        except BaseException as exc:
+            # A cancelled/failed CLI can leave its server-side helper alive.
+            # Only this invocation knows the unguessable name; cleanup must not
+            # inherit the already-cancelled owner which killed the first CLI.
+            try:
+                with use_subprocess_owner(None):
+                    removed = self.client.run(
+                        ["rm", "--force", helper_name], timeout=10, max_output_bytes=4096,
+                    )
+                absent = removed.stderr.strip() == (
+                    f"Error response from daemon: No such container: {helper_name}".encode()
+                )
+                if removed.returncode and not absent:
+                    raise RuntimeError("helper removal failed")
+            except Exception as cleanup_error:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.ambiguous, "private filesystem helper cleanup is unverified"
+                ) from cleanup_error
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.timeout, "private filesystem helper timed out"
+                ) from exc
+            raise
 
     def provision_task_paths(self) -> None:
         """Provision worktree/scratch as host daemon owner plus exact role GID."""

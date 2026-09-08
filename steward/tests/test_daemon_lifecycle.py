@@ -7295,3 +7295,203 @@ def test_readonly_success_ingestion_does_not_duplicate_phase_evidence(config, mo
     kind = {"planning": "pipeline.plan.result", "review": "pipeline.review.raw", "formality": "pipeline.formality.effective"}[phase]
     assert len(store.events(task.id, kinds=(kind,))) == 1
     assert len(store.list_runs(task.id)) == 1
+
+
+@pytest.mark.parametrize("mode", ["start", "resume", "fresh"])
+@pytest.mark.parametrize("crash_at", [None, "before-result", "after-result", "checkpoint", "changed-tree", "wrong-session"])
+def test_real_session_result_recovers_once_or_fails_closed(config, monkeypatch, mode, crash_at):
+    from coquic_steward.execution import session as session_module
+
+    store = TaskStore.create(config.db_path)
+    if mode == "start":
+        task, pipeline = _task(store, "real completion recovery")
+        original = None
+        action = f"{task.id}:{pipeline.id}:implementation-0"
+        store.add_event(task.id, "pipeline.phase.started", "implementation", {
+            "pipeline_id": pipeline.id, "phase": "implementation", "action_id": action,
+            "input": {"payload": {"iteration": 0}},
+        })
+    else:
+        task, pipeline, original = _interrupted_run(config, store)
+        action = store.get_session(original.session_id).idempotency_key
+    task.worktree_path = config.repo_root
+    store.save(task)
+    store.start_worker(task.id, "implementation")
+    store.begin_iteration(task.id, 0, "implementation", worker_name="implementation", worker_prompt_path=config.prompts_dir / "test.md", worker_transcript_path=config.logs_dir / "test.jsonl", worker_last_message_path=config.logs_dir / "test.md")
+    store.add_event(task.id, "pipeline.phase.finished", "provisioned", {
+        "pipeline_id": pipeline.id,
+        "output": {"action_id": "provisioned", "next_phase": "implementation"},
+    })
+    calls = []
+
+    class Invoker(LocalSessionInvoker):
+        def invoke(self, request, *, append, observe, on_started, **kwargs):
+            calls.append(request.run_id)
+            on_started(ExecIdentity("fake", request.run_id, 4321, request.session_uid))
+            (request.cwd / "README.md").write_text("completed real producer patch\n")
+            request.output_last_message.write_text("done\n")
+            append(b'{"type":"thread.started","thread_id":"private-provider-id"}\n')
+            return InvocationOutcome(exit_code=0, stdout=b"", stderr=b"", incomplete_suffix=b"", events=(), provider_session_id="private-provider-id")
+
+    supervisor = SessionSupervisor(config, store, invoker=Invoker(), image_digest=IMAGE, codex_identity="codex-test")
+    if original is not None:
+        supervisor.archive.materialize_ledger(task, pipeline, [original])
+    before = worktree_checkpoint(config, config.repo_root)
+    write = supervisor.archive.write_run_file
+
+    def crash_write(task_id, pipeline_id, run_id, name, value):
+        if name == "result.json" and crash_at == "before-result":
+            raise SystemExit("crash before result")
+        result = write(task_id, pipeline_id, run_id, name, value)
+        if name == "result.json" and crash_at == "after-result":
+            raise SystemExit("crash after result")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(supervisor.archive, "write_run_file", crash_write)
+        if crash_at == "checkpoint":
+            def checkpoint(*args):
+                if calls:
+                    raise SystemExit("checkpoint crash")
+                return worktree_checkpoint(*args)
+            patch.setattr(session_module, "worktree_checkpoint", checkpoint)
+
+        def invoke():
+            if mode == "resume":
+                result = supervisor.resume(original.id, prompt="continue", checkpoint_id=before)
+                assert result.category is ResumeCategory.success
+                return result.result
+            return supervisor.start(task.id, pipeline.id, role="implementation", prompt="complete", cwd=config.repo_root, checkpoint_id=before, idempotency_key=action if mode == "start" else f"fresh-recovery:{original.id}", retry_of_run_id=original.id if original else None)
+
+        if crash_at in {"before-result", "after-result", "checkpoint"}:
+            with pytest.raises(SystemExit):
+                invoke()
+        else:
+            assert invoke().status is InvocationStatus.succeeded
+
+    run = store.get_run(calls[0])
+    assert run.state == "succeeded"
+    result_path = supervisor.archive.task_path(task.id, f"pipelines/{pipeline.id}/runs/{run.id}/result.json")
+    if crash_at not in {"before-result", "checkpoint"}:
+        metadata = json.loads(result_path.read_text())
+        assert (metadata["task_id"], metadata["pipeline_id"], metadata["session_id"], metadata["run_id"]) == (task.id, pipeline.id, run.session_id, run.id)
+        assert metadata["output_checkpoint"] == worktree_checkpoint(config, config.repo_root) != before
+        if crash_at == "wrong-session":
+            metadata["session_id"] = "unowned-session"
+            result_path.write_text(json.dumps(metadata))
+    else:
+        assert not result_path.exists()
+    if crash_at == "changed-tree":
+        (config.repo_root / "README.md").write_text("unowned edit\n")
+
+    reopened = TaskStore.open(config.db_path)
+    restarted_supervisor = SessionSupervisor(config, reopened, invoker=supervisor.invoker, image_digest=IMAGE, codex_identity="codex-test")
+    restarted = StewardDaemon(config, reopened, session_supervisor=restarted_supervisor)
+    blocked = crash_at in {"before-result", "checkpoint", "changed-tree", "wrong-session"}
+    outcomes = [restarted._reconcile_task(reopened.get(task.id)) for _ in range(3)]
+    assert [outcome.disposition for outcome in outcomes] == (["blocked"] * 3 if blocked else ["ingested", "unchanged", "unchanged"]), [(outcome.detail, outcome.evidence) for outcome in outcomes]
+    assert restarted.executor._pipeline_cursor(task.id, pipeline.id) == (PipelineCursorPhase.implementation if blocked else PipelineCursorPhase.validation)
+    finishes = [event for event in reopened.events(task.id) if event.kind == "pipeline.phase.finished" and event.data.get("phase") == "implementation"]
+    assert len(finishes) == (0 if blocked else 1)
+    assert len(calls) == 1
+    assert len(reopened.list_runs(task.id)) == (1 if mode == "start" else 2)
+
+
+@pytest.mark.parametrize("phase", ["compose", "transport"])
+def test_daemon_built_publisher_cancels_admitted_work(config, tmp_path, monkeypatch, phase):
+    import sys
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner
+    from coquic_steward.publication.cancellation import run_publication_process
+    from coquic_steward.publication.generation import PublicationComposer
+    from publication_harness import enabled_publication_config
+    from test_cloud_publisher import _composed, _sqlite_generation, _sqlite_store, _SQLitePublicationProvider, IDENTITY
+
+    config = replace(config, dry_run=False, publication=enabled_publication_config(tmp_path, "synthetic-token"))
+    store = _sqlite_store(config.db_path)
+    store.enqueue_publication(_sqlite_generation())
+    daemon = StewardDaemon(config, store)
+    entered = threading.Event()
+    closed = threading.Event()
+    owners = []
+    registered = ProcessGroupCancellationOwner.register
+
+    def register(owner, process):
+        registered(owner, process)
+        owners.append(owner)
+        entered.set()
+
+    class Stream:
+        def write(self, data, timeout=None):
+            pass
+
+        def read(self, maximum, timeout=None):
+            entered.set()
+            assert closed.wait(5), "daemon must close the blocked transport"
+            raise OSError("closed")
+
+        def close(self):
+            closed.set()
+
+        def get_extra_info(self, name):
+            return None
+
+    class Backend:
+        def connect_tcp(self, **kwargs):
+            return Stream()
+
+    r2 = _botocore_transport_double()
+    provider = _SQLitePublicationProvider()
+    r2.put_object = provider.put_object
+    d1 = _d1_transport_double()
+    d1._client._transport._pool._network_backend = Backend()
+    monkeypatch.setattr(D1PublicationClient, "endpoint", property(lambda _: "http://publication.example.test/query"))
+    d1.stage = lambda payload: d1._post([("SELECT 1", ())])
+    d1.expose = lambda payload: pytest.fail("cancelled publication must never expose")
+    monkeypatch.setattr(daemon_module, "R2Client", lambda **kwargs: r2)
+    monkeypatch.setattr(daemon_module, "D1PublicationClient", lambda **kwargs: d1)
+    monkeypatch.setattr(daemon, "_publication_source", lambda generation: {"stable": True})
+    monkeypatch.setattr(daemon, "_reconcile_publication_usage", lambda publisher: False)
+    if phase == "compose":
+        monkeypatch.setattr(ProcessGroupCancellationOwner, "register", register)
+
+    def compose(source, **kwargs):
+        if phase == "compose":
+            run_publication_process([sys.executable, "-c", "import time; time.sleep(60)"], capture_output=True, text=False, timeout=60, check=False, pass_fds=(), env={})
+        return _composed()
+
+    build = daemon._build_publication_publisher
+    publishers = []
+
+    def configured_builder():
+        publisher = build()  # Exercise the actual daemon -> CloudPublisher wiring.
+        publishers.append(publisher)
+        publisher.compose = PublicationComposer(compose)
+        return publisher
+
+    monkeypatch.setattr(daemon, "_build_publication_publisher", configured_builder)
+    previous_callback = store.on_change
+    daemon.start_publication_worker()
+    worker = daemon._publication_thread
+    try:
+        assert entered.wait(3)
+        assert publishers[0].cancel_event is daemon._publication_stop
+        before = store.get_publication_generation(IDENTITY.publication_id)
+        receipts = store.list_publication_receipts(IDENTITY.publication_id)
+        assert daemon.stop_publication_worker(deadline=time.monotonic() + 3)
+        assert not worker.is_alive()
+        assert store.on_change is previous_callback
+        assert daemon._publication_cancel is None
+        assert store.get_publication_generation(IDENTITY.publication_id) == before
+        assert store.list_publication_receipts(IDENTITY.publication_id) == receipts
+        assert provider.hide_attempts == 0
+        if phase == "compose":
+            assert owners and all(owner.active_count == 0 for owner in owners)
+            assert provider.put_attempts == 0
+        else:
+            assert closed.is_set()
+            assert provider.put_attempts == 1
+    finally:
+        closed.set()
+        daemon.stop_publication_worker(deadline=time.monotonic() + 3)
+        d1.close()
+        store.engine.dispose()

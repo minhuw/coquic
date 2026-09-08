@@ -2107,13 +2107,23 @@ class SessionSupervisor:
                 "reason": "provider telemetry was not produced",
             },
         )
+        # Persist terminal success before final artifacts: a crash here must
+        # block recovery, not repeat an invocation whose effects already ran.
+        # Only the post-invocation tree can authenticate this completed output.
+        completed = outcome.completed and self.store.get_run(run.id).state == CodexRunState.succeeded.value
+        output_checkpoint = worktree_checkpoint(self.config, request.cwd) if completed else None
         self.archive.write_run_file(
             task.id,
             run.pipeline_id,
             run.id,
             "result.json",
             {
-                "status": "available" if outcome.completed else "partial" if outcome.interrupted or outcome.forced else "unavailable",
+                "task_id": task.id,
+                "pipeline_id": run.pipeline_id,
+                "session_id": session.id,
+                "run_id": run.id,
+                "output_checkpoint": output_checkpoint,
+                "status": "available" if completed else "partial" if outcome.interrupted or outcome.forced else "unavailable",
                 "summary": "completed" if outcome.completed else "interrupted" if outcome.interrupted else "forced termination" if outcome.forced else "invocation failed",
                 "path": None,
             },

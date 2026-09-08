@@ -187,8 +187,12 @@ def test_planner_allocation_drops_reserved_metadata_and_preserves_dedupe(
     store = TaskStore.create(tmp_path / "planner-allocation.sqlite", dry_run=False)
     dedupe_key = "planner-owned-allocation"
 
+    item = SignalItem(provider="synthetic", kind="synthetic.alert", fingerprint="planner-allocation", title="Selected finding")
+    store.ingest_signal_collection(SignalFetchRun(provider=item.provider, status=SignalFetchStatus.ok), [item])
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+
     def allocate(run_id: str, spec: TaskSpec):
-        store.control_loop.claim_planner_run(run_id, [])
+        store.control_loop.claim_planner_run(run_id, [signal_id])
         committed = store.commit_planner_decision(
             run_id,
             planned=[(spec, dedupe_key)],
@@ -197,13 +201,13 @@ def test_planner_allocation_drops_reserved_metadata_and_preserves_dedupe(
                     outcome="accepted",
                     reason_code="accepted",
                     dedupe_key=dedupe_key,
-                    signal_ids=[],
+                    signal_ids=[item.id],
                     proposal={"title": spec.title},
                 )
             ],
             consumed_item_ids=[],
-            selected_item_ids_by_dedupe={},
-            canonical_signal_by_item={},
+            selected_item_ids_by_dedupe={dedupe_key: [item.id]},
+            canonical_signal_by_item={item.id: signal_id},
             state="succeeded",
             result={},
             diagnostics={},

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 import json
+import sqlite3
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -561,3 +562,119 @@ def test_replayed_fetch_cannot_rewind_a_newer_cursor(config):
         store.signal_collection_cursors(["code-scanning"])["code-scanning"]
         == page_three
     )
+
+
+@pytest.mark.parametrize("include_dispositions", [True, False])
+def test_accepted_unconsumed_selection_is_linked_and_consumed(
+    config, monkeypatch, include_dispositions
+):
+    store = TaskStore.create(config.db_path)
+    item = _item()
+    _ingest(store, item)
+    verified = PlanVerifier().verify_plan(
+        json.dumps({"tasks": [_proposal()], "consumed_item_ids": []}),
+        ProjectSignals(repository=config.github_repository, items=[item]),
+        [],
+    )
+    assert len(verified.planned) == 1 and verified.consumed_item_ids == []
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *a, **kw: PlannerRun(
+            planned=verified.planned,
+            accepted_count=1,
+            proposed_count=1,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.logs_dir / "selected.jsonl",
+            thread_id=None,
+            dispositions=verified.dispositions if include_dispositions else [],
+        ),
+    )
+    result = TickResult()
+    StewardDaemon(config, store)._plan(result, [item])
+    assert result.enqueued == 1
+    assert not store.pending_signal_items()
+    assert store.control_loop.pending_retry("planner") is None
+    run = store.control_loop.list_planner_runs()[-1]
+    proposal = store.control_loop.list_proposals(run.planner_run_id)[0]
+    task = store.list_tasks()[0]
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    assert proposal.signal_ids == [signal_id] and proposal.task_id == task.id
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT status FROM control_loop_signals WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone()[0]
+            == "planned"
+        )
+        assert db.execute(
+            "SELECT status,planned_task_id FROM signal_items WHERE id=?", (item.id,)
+        ).fetchone() == ("planned", task.id)
+
+
+@pytest.mark.parametrize("mapping", [{}, {"wi-current": "missing-canonical"}])
+def test_planner_cannot_create_task_without_canonical_links(config, mapping):
+    store = TaskStore.create(config.db_path)
+    item = _item()
+    _ingest(store, item)
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    store.control_loop.claim_planner_run("planner-no-phantom", [signal_id])
+    spec = TaskSpec(
+        kind=TaskKind.custom, worker=WorkerKind.custom, title="Phantom", prompt="P"
+    )
+    with pytest.raises(ValueError, match="matching canonical signal"):
+        store.commit_planner_decision(
+            "planner-no-phantom",
+            planned=[(spec, "phantom")],
+            planner_dispositions=[],
+            consumed_item_ids=[],
+            selected_item_ids_by_dedupe={"phantom": [item.id]},
+            canonical_signal_by_item=mapping,
+            state="succeeded",
+            result={},
+            diagnostics={},
+            retry_after=None,
+            artifact_sources={},
+        )
+    assert store.list_tasks() == []
+    assert [value.id for value in store.pending_signal_items()] == [item.id]
+
+
+def test_pressure_pause_rechecks_on_regular_provider_deadline(config, monkeypatch):
+    config = replace(
+        config, enabled_signals=("code-scanning",), scheduler_wait_interval_sec=60
+    )
+    store = TaskStore.create(config.db_path)
+    _ingest(store, _item())
+    clock = [utc_now().replace(microsecond=0)]
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="code-scanning",
+            status=SignalFetchStatus.ok,
+            started_at=clock[0],
+            completed_at=clock[0],
+        )
+    )
+    store.control_loop.schedule_retry("planner", now=clock[0] - timedelta(hours=1))
+    daemon = StewardDaemon(config, store)
+    store.record_resource_pressure(
+        state="resource_pressure", home_free_bytes=0, owned_docker_bytes=None
+    )
+    monkeypatch.setattr("coquic_steward.storage._now", lambda: clock[0])
+    monkeypatch.setattr("coquic_steward.orchestration.daemon._now", lambda: clock[0])
+    snapshot = scheduler_state(config, store).state
+    assert snapshot.planner_retry_at is None
+    clock[0] = snapshot.providers[0].next_due_at - timedelta(seconds=10)
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    monkeypatch.setattr("coquic_steward.orchestration.daemon.time.sleep", sleep)
+    trigger = wait_for_scheduler_event(config, store)
+    assert trigger.reason == "provider-due" and sleeps == [10]
+    assert daemon.resource_pressure["admissionAllowed"] is True
+    assert scheduler_state(config, store).state.planner_retry_due is True

@@ -481,74 +481,121 @@ class GitHubFeatureIssuesProvider:
     )
 
     def collect(
-        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+        self,
+        config: StewardConfig,
+        *,
+        max_items: int = DEFAULT_SIGNAL_WORK_ITEMS,
+        cursor: SignalCollectionCursor | None = None,
     ) -> ProviderSignalResult:
-        decoded: list[dict[str, Any]] = []
-        seen_numbers: set[int] = set()
-        has_more = False
-        query_limit = max_items + 1
-        for label in GITHUB_FEATURE_ISSUE_LABELS:
-            command = [
+        size = max(1, min(max_items, 100))
+        index, page, other_page = 0, 1, 1
+        if cursor is not None and cursor.page_size == size:
+            # Two code-owned labels: token = current label index:other label page.
+            # Zero means the other label finished this scan; no remote URL state.
+            parts = (cursor.token or "").split(":")
+            if (
+                len(parts) != 2
+                or parts[0] not in {"0", "1"}
+                or not parts[1].isascii()
+                or not parts[1].isdigit()
+                or len(parts[1]) > 5
+                or int(parts[1]) > 10000
+            ):
+                return ProviderSignalResult(error="Invalid feature issue collection cursor")
+            index, page, other_page = int(parts[0]), cursor.page, int(parts[1])
+        label = GITHUB_FEATURE_ISSUE_LABELS[index]
+        # Repository issues paging avoids Search's 1,000-result ceiling. The REST
+        # endpoint also returns PRs; skip those without changing page progress.
+        issues = run_command(
+            [
                 "gh",
-                "search",
-                "issues",
-                "--repo",
-                config.github_repository,
-                "--state",
-                "open",
-                "--label",
-                label,
-                "--sort",
-                "created",
-                "--order",
-                "asc",
-                "--limit",
-                str(query_limit),
-                "--json",
-                "number,title,url,body,labels,author,createdAt,updatedAt,state",
-            ]
-            issues = run_command(
-                command,
-                cwd=config.repo_root,
-                timeout=SIGNAL_TIMEOUT_SECONDS,
-                env=github_cli_environment(config),
+                "api",
+                "-X",
+                "GET",
+                f"repos/{config.github_repository}/issues?state=open"
+                f"&labels={quote(label, safe='')}&sort=created&direction=asc"
+                f"&per_page={size}&page={page}",
+            ],
+            cwd=config.repo_root,
+            timeout=SIGNAL_TIMEOUT_SECONDS,
+            env=github_cli_environment(config),
+        )
+        if not issues.ok:
+            return ProviderSignalResult(
+                error=issues.stderr or "Feature issue request failed",
+                next_cursor=cursor,
             )
-            if not issues.ok:
-                return ProviderSignalResult(error=issues.stderr, summary=issues.stderr)
-            try:
-                payload = json.loads(issues.stdout)
-            except json.JSONDecodeError:
-                payload = []
-            if not isinstance(payload, list):
-                continue
-            if len(payload) > max_items:
-                has_more = True
+        try:
+            payload = json.loads(issues.stdout)
+            if not isinstance(payload, list) or len(payload) > size:
+                raise ValueError("Feature issue response was not a bounded list")
+            items_by_number: dict[int, SignalItem] = {}
             for issue in payload:
                 if not isinstance(issue, dict):
+                    raise ValueError("Feature issue response has invalid issue")
+                number = issue.get("number")
+                labels = issue.get("labels")
+                if (
+                    type(number) is not int
+                    or number < 1
+                    or issue.get("state") != "open"
+                    or not isinstance(labels, list)
+                    or any(
+                        not isinstance(value, dict)
+                        or not isinstance(value.get("name"), str)
+                        for value in labels
+                    )
+                    or label not in _label_names(labels)
+                    or not isinstance(issue.get("title"), str)
+                    or not issue["title"].strip()
+                    or (
+                        issue.get("body") is not None and not isinstance(issue["body"], str)
+                    )
+                    or not _validate_github_canonical_url(
+                        issue.get("url"),
+                        host="api.github.com",
+                        path=f"/repos/{config.github_repository}/issues/{number}",
+                    )
+                ):
+                    raise ValueError("Feature issue response has invalid scope or identity")
+                if "pull_request" in issue:
                     continue
-                number = _int_or_none(issue.get("number"))
-                if number is not None:
-                    if number in seen_numbers:
-                        continue
-                    seen_numbers.add(number)
-                if len(decoded) >= max_items:
-                    has_more = True
-                    continue
-                decoded.append(issue)
-        items = [
-            _github_feature_issue_item(
-                item,
-                provider=self.name,
-                kind=self.signal_kind,
-                worker_context=self._worker_context(),
+                mapped = {
+                    **issue,
+                    "url": issue.get("html_url"),
+                    "author": issue.get("user"),
+                    "createdAt": issue.get("created_at"),
+                    "updatedAt": issue.get("updated_at"),
+                }
+                _validate_feature_issue_response(mapped, config.github_repository, number)
+                items_by_number[number] = _github_feature_issue_item(
+                    mapped,
+                    provider=self.name,
+                    kind=self.signal_kind,
+                    worker_context=self._worker_context(),
+                )
+        except (ValueError, ProviderRevalidationError) as exc:
+            return ProviderSignalResult(error=str(exc), next_cursor=cursor)
+        current_next = page + 1 if len(payload) == size and page < 10000 else 0
+        next_cursor = None
+        if other_page:
+            next_cursor = SignalCollectionCursor(
+                page=other_page,
+                page_size=size,
+                token=f"{1 - index}:{current_next}",
             )
-            for item in decoded[:max_items]
-            if isinstance(item, dict)
-        ]
+        elif current_next:
+            next_cursor = SignalCollectionCursor(
+                page=current_next,
+                page_size=size,
+                token=f"{index}:0",
+            )
+        items = list(items_by_number.values())
         return ProviderSignalResult(
             items=items,
             summary=_summary_from_feature_issue_items(items),
-            has_more=has_more,
+            has_more=next_cursor is not None,
+            next_cursor=next_cursor,
         )
 
     def _worker_context(self) -> dict[str, Any]:

@@ -10,6 +10,7 @@ import signal
 import sys
 from types import SimpleNamespace
 import threading
+from urllib.parse import parse_qs, urlparse
 from urllib.request import (
     BaseHandler,
     HTTPDefaultErrorHandler,
@@ -3320,9 +3321,9 @@ def test_github_cli_provider_sites_use_per_call_auth_environment(
         ),
     )
 
-    assert len(calls) == 6
-    assert helper_calls == 6
-    assert [env for _args, env in calls] == [{"GH_TOKEN": token}] * 6
+    assert len(calls) == 5
+    assert helper_calls == 5
+    assert [env for _args, env in calls] == [{"GH_TOKEN": token}] * 5
     assert all(token not in " ".join(args) for args, _env in calls)
 
 
@@ -4074,6 +4075,18 @@ def test_github_actions_perf_signal_is_separate_provider(
         == "perf.yml"
     )
 
+def _feature_rest_response(issue):
+    return {
+        **issue,
+        "state": issue.get("state", "open"),
+        "html_url": issue["url"],
+        "url": f"https://api.github.com/repos/minhuw/coquic/issues/{issue['number']}",
+        "user": issue.get("author"),
+        "created_at": issue.get("createdAt"),
+        "updated_at": issue.get("updatedAt"),
+    }
+
+
 def test_github_feature_issue_signal_fetches_open_feature_issues(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4081,7 +4094,7 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
 
     def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
         calls.append(args)
-        label = args[args.index("--label") + 1]
+        label = parse_qs(urlparse(args[-1]).query)["labels"][0]
         payload = []
         if label == "steward:enhancement":
             payload = [
@@ -4115,7 +4128,7 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
             args=args,
             cwd=cwd,
             returncode=0,
-            stdout=json.dumps(payload),
+            stdout=json.dumps([_feature_rest_response(issue) for issue in payload]),
             stderr="",
         )
 
@@ -4128,21 +4141,14 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
         config, providers=[GitHubFeatureIssuesProvider()]
     )[0]
 
-    assert [call[:3] for call in calls] == [
-        ["gh", "search", "issues"],
-        ["gh", "search", "issues"],
-    ]
-    for call in calls:
-        assert call[call.index("--repo") + 1] == "minhuw/coquic"
-        assert call[call.index("--state") + 1] == "open"
-        assert call[call.index("--limit") + 1] == "13"
-        assert call[call.index("--json") + 1] == (
-            "number,title,url,body,labels,author,createdAt,updatedAt,state"
-        )
-    assert [call[call.index("--label") + 1] for call in calls] == [
-        "steward:enhancement",
-        "steward:feature",
-    ]
+    assert len(calls) == 1
+    assert calls[0][:4] == ["gh", "api", "-X", "GET"]
+    endpoint = urlparse(calls[0][-1])
+    assert endpoint.path == "repos/minhuw/coquic/issues"
+    assert parse_qs(endpoint.query) == {
+        "state": ["open"], "labels": ["steward:enhancement"],
+        "sort": ["created"], "direction": ["asc"], "per_page": ["12"], "page": ["1"],
+    }
     assert collection.fetch.provider == "github-issues:features"
     assert collection.fetch.summary == "GitHub issues sampled 1 open feature request(s): #42"
     assert len(collection.items) == 1
@@ -4176,7 +4182,7 @@ def test_github_feature_issue_signal_reports_truncated_samples(
     config: StewardConfig, monkeypatch
 ) -> None:
     def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
-        label = args[args.index("--label") + 1]
+        label = parse_qs(urlparse(args[-1]).query)["labels"][0]
         payload = []
         if label == "steward:enhancement":
             payload = [
@@ -4186,13 +4192,13 @@ def test_github_feature_issue_signal_reports_truncated_samples(
                     "url": f"https://github.com/minhuw/coquic/issues/{number}",
                     "labels": [{"name": "steward:enhancement"}],
                 }
-                for number in range(1, 4)
+                for number in range(1, 3)
             ]
         return CommandResult(
             args=args,
             cwd=cwd,
             returncode=0,
-            stdout=json.dumps(payload),
+            stdout=json.dumps([_feature_rest_response(issue) for issue in payload]),
             stderr="",
         )
 
@@ -4212,7 +4218,7 @@ def test_github_feature_issue_signal_fingerprint_survives_title_edits(
     titles = ["Initial title", "Edited title"]
 
     def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
-        label = args[args.index("--label") + 1]
+        label = parse_qs(urlparse(args[-1]).query)["labels"][0]
         payload = []
         if label == "steward:enhancement":
             payload = [
@@ -4227,7 +4233,7 @@ def test_github_feature_issue_signal_fingerprint_survives_title_edits(
             args=args,
             cwd=cwd,
             returncode=0,
-            stdout=json.dumps(payload),
+            stdout=json.dumps([_feature_rest_response(issue) for issue in payload]),
             stderr="",
         )
 

@@ -4698,13 +4698,29 @@ class SQLiteTaskStore:
             try:
                 task_ids_by_dedupe: dict[str, str] = {}
                 for spec, dedupe_key in planned:
-                    selected_ids = list(
-                        dict.fromkeys(
-                            item_id
-                            for item_id in selected_item_ids_by_dedupe.get(dedupe_key, [])
-                            if isinstance(item_id, str)
+                    selected_ids = selected_item_ids_by_dedupe.get(dedupe_key, [])
+                    if (
+                        not isinstance(selected_ids, list)
+                        or not 1 <= len(selected_ids) <= 8
+                        or any(not isinstance(item_id, str) or not item_id for item_id in selected_ids)
+                        or len(set(selected_ids)) != len(selected_ids)
+                    ):
+                        raise ValueError("planner task requires bounded selected signals")
+                    for item_id in selected_ids:
+                        canonical_id = session.scalar(
+                            text(
+                                "SELECT canonical.signal_id FROM signal_items AS item "
+                                "JOIN control_loop_signals AS canonical "
+                                "ON canonical.provider=item.provider AND canonical.fingerprint=item.fingerprint "
+                                "WHERE item.id=:item_id AND canonical.epoch_id=:epoch_id"
+                            ),
+                            {"item_id": item_id, "epoch_id": self.control_loop.epoch_id},
                         )
-                    )
+                        if (
+                            canonical_id is None
+                            or canonical_signal_by_item.get(item_id) != canonical_id
+                        ):
+                            raise ValueError("planner task has no matching canonical signal")
                     existing_row = session.scalar(
                         select(TaskRow).where(
                             TaskRow.dedupe_key == dedupe_key,
@@ -4845,6 +4861,11 @@ class SQLiteTaskStore:
                             if item_id in canonical_signal_by_item
                         )
                     )
+                    if outcome == "accepted" and dedupe_key in selected_item_ids_by_dedupe:
+                        signal_ids = [
+                            canonical_signal_by_item[item_id]
+                            for item_id in selected_item_ids_by_dedupe[dedupe_key]
+                        ]
                     dispositions.append(
                         ControlProposalDisposition(
                             proposalId=f"{planner_run_id}-proposal-{ordinal}",
@@ -4858,6 +4879,29 @@ class SQLiteTaskStore:
                             proposal=getattr(disposition, "proposal", {}) or {},
                         )
                     )
+
+                covered_dedupes = {
+                    item.dedupe_key for item in dispositions if item.outcome == "accepted"
+                }
+                for spec, dedupe_key in planned:
+                    if dedupe_key not in covered_dedupes:
+                        ordinal = len(dispositions) + 1
+                        dispositions.append(
+                            ControlProposalDisposition(
+                                proposalId=f"{planner_run_id}-proposal-{ordinal}",
+                                plannerRunId=planner_run_id,
+                                ordinal=ordinal,
+                                outcome="accepted",
+                                reasonCode="accepted",
+                                signalIds=[
+                                    canonical_signal_by_item[item_id]
+                                    for item_id in selected_item_ids_by_dedupe[dedupe_key]
+                                ],
+                                dedupeKey=dedupe_key,
+                                taskId=task_ids_by_dedupe[dedupe_key],
+                                proposal={"title": spec.title},
+                            )
+                        )
 
                 session.flush()
                 raw_connection = session.connection().connection.driver_connection
@@ -4877,7 +4921,7 @@ class SQLiteTaskStore:
                         list(
                             dict.fromkeys(
                                 canonical_signal_by_item[item_id]
-                                for item_id in consumed_item_ids
+                                for item_id in [*consumed_item_ids, *sorted(planned_item_ids)]
                                 if item_id in canonical_signal_by_item
                             )
                         )

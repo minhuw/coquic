@@ -1033,8 +1033,8 @@ def test_production_session_factory_binds_task_and_planner_deployment_labels(
     )
     config.ensure_dirs()
     monkeypatch.setattr(
-        "coquic_steward.execution.session._provision_group_tree",
-        lambda _root, _gid: None,
+        "coquic_steward.execution.container.TaskContainerRuntime.provision_task_paths",
+        lambda _self: None,
     )
     store = TaskStore.create(config.db_path)
     supervisor = session_supervisor_for_config(config, store)

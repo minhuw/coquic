@@ -6,13 +6,18 @@ the Docker CLI so tests can substitute a recording fake without a Docker SDK.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
+import secrets
 import signal
+import stat
+import sys
 import subprocess  # nosec B404 - explicit argv, shell=False below
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -159,6 +164,189 @@ class SubprocessDockerClient:
         return process
 
 
+# The same descriptor-anchored operations run locally and in the trusted helper.
+# Keep this small and stdlib-only: the locked task image lacks the publication
+# reader and this release. Nonblocking opens also reject raced-in FIFOs safely.
+@contextmanager
+def _handoff_directory(path: Path, *, create: bool = False):
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("handoff path must be absolute and normalized")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for name in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _read_handoff(path: Path, *, max_bytes: int = 16 * 1024 * 1024) -> bytes | None:
+    if not 0 < max_bytes <= 16 * 1024 * 1024:
+        raise ValueError("invalid handoff read limit")
+    with _handoff_directory(Path(path).parent) as parent:
+        try:
+            fd = os.open(
+                Path(path).name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError("handoff must be a single-link regular file")
+            if before.st_size > max_bytes:
+                raise ValueError("handoff exceeds read limit")
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                data = handle.read(max_bytes + 1)
+            after = os.fstat(fd)
+            current = os.stat(Path(path).name, dir_fd=parent, follow_symlinks=False)
+            if (
+                len(data) > max_bytes or len(data) != after.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                    after.st_ctime_ns)
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise ValueError("handoff changed during capture")
+            return data
+        finally:
+            os.close(fd)
+
+
+def _write_handoff(path: Path, data: bytes, *, uid: int | None = None) -> None:
+    if len(data) > 16 * 1024 * 1024:
+        raise ValueError("handoff exceeds write limit")
+    with _handoff_directory(Path(path).parent) as parent:
+        try:
+            old = os.stat(Path(path).name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            old = None
+        if old is not None and (not stat.S_ISREG(old.st_mode) or old.st_nlink != 1):
+            raise ValueError("handoff destination must be a single-link regular file")
+        temporary = ".handoff-" + secrets.token_hex(16)
+        fd = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=parent,
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                if uid is not None:
+                    os.fchown(handle.fileno(), uid, uid)
+                os.fsync(handle.fileno())
+            os.replace(temporary, Path(path).name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+
+def _provision_tree(fd: int, uid: int, gid: int, *, worktree: bool, write_gid: int | None = None) -> None:
+    """Never follow links; preserve daemon ownership and executable file bits."""
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) and (
+        not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+    ):
+        raise ValueError("unsafe provisioning entry")
+    os.fchown(fd, uid, gid)
+    # Default ACLs preserve daemon access to files atomically created by
+    # workers. Scratch additionally admits the implementation role only.
+    entries = [(1, 7, 0xFFFFFFFF), (2, 7, uid), (4, 7, 0xFFFFFFFF)]
+    if write_gid is not None:
+        entries.append((8, 7, write_gid))
+    entries.extend(((16, 7, 0xFFFFFFFF), (32, 5 if worktree else 0, 0xFFFFFFFF)))
+    acl = (2).to_bytes(4, "little") + b"".join(
+        tag.to_bytes(2, "little") + perms.to_bytes(2, "little") + identity.to_bytes(4, "little")
+        for tag, perms, identity in entries
+    )
+    os.setxattr(fd, "system.posix_acl_access", acl)
+    if stat.S_ISDIR(info.st_mode):
+        os.fchmod(fd, 0o2775 if worktree else 0o2770)
+        os.setxattr(fd, "system.posix_acl_default", acl)
+        for name in os.listdir(fd):
+            entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISLNK(entry.st_mode):
+                continue
+            child = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=fd,
+            )
+            try:
+                _provision_tree(child, uid, gid, worktree=worktree, write_gid=write_gid)
+                if worktree and name == ".git":
+                    os.fchmod(child, 0o755 if stat.S_ISDIR(entry.st_mode) else 0o644)
+            finally:
+                os.close(child)
+    else:
+        executable = bool(info.st_mode & 0o111)
+        os.fchmod(fd, (0o775 if executable else 0o664) if worktree
+                  else (0o770 if executable else 0o660))
+
+
+def _session_helper_main() -> None:
+    operation, root, payload = sys.argv[1:]
+    options = json.loads(payload)
+    root = Path(root)
+    if operation == "tree":
+        with _handoff_directory(root) as fd:
+            _provision_tree(fd, options["uid"], options["gid"], worktree=options["worktree"], write_gid=options.get("write_gid"))
+        return
+    home = root / options["session_id"]
+    uid = options["session_uid"]
+    with _handoff_directory(home) as fd:
+        if operation == "provision":
+            # Only daemon-authored inputs are handed over. Provider stores are
+            # already owned by this session, including on exact-ID resume.
+            os.fchown(fd, uid, uid)
+            os.fchmod(fd, 0o700)
+            try:
+                os.stat("auth.json", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("auth.json is forbidden in private Codex homes")
+            for name in os.listdir(fd):
+                if name == "sessions":
+                    with _handoff_directory(home / name) as store_fd:
+                        os.fchown(store_fd, uid, uid)
+                        os.fchmod(store_fd, 0o700)
+                elif name == "config.toml" or name.startswith("output-schema"):
+                    data = _read_handoff(home / name)
+                    if data is None:
+                        raise ValueError("session input disappeared")
+                    _write_handoff(home / name, data, uid=uid)
+        elif operation == "store":
+            with _handoff_directory(home / "sessions") as store_fd:
+                if not os.listdir(store_fd):
+                    raise ValueError("session store is empty")
+        elif operation == "read":
+            data = _read_handoff(home / options["name"], max_bytes=options["max_bytes"])
+            # Distinguish an absent optional file from an empty regular file.
+            sys.stdout.buffer.write(b"0" if data is None else b"1" + data)
+        elif operation == "write":
+            data = sys.stdin.buffer.read(16 * 1024 * 1024 + 1)
+            _write_handoff(home / options["name"], data, uid=uid)
+        else:
+            raise ValueError("unknown private session operation")
+
+
 class TaskContainerRuntime:
     """Create/adopt one reusable task container and execute role processes."""
 
@@ -171,6 +359,122 @@ class TaskContainerRuntime:
     ):
         self.config = config
         self.client = client or SubprocessDockerClient(docker_bin)
+
+    def _trusted_files(
+        self, root: Path, operation: str, options: dict[str, Any],
+        *, data: bytes | None = None,
+    ) -> bytes:
+        """One-shot root helper; no credentials, network, socket, or worker code.
+
+        Bind only a daemon-controlled mount root, never a worker-selected leaf.
+        The helper traverses all descendants through O_NOFOLLOW descriptors.
+        """
+        if "," in str(root):
+            raise ValueError("invalid helper bind path")
+        with _handoff_directory(root):
+            pass
+        source = "import os, stat, secrets, sys, json\nfrom pathlib import Path\nfrom contextlib import contextmanager\n"
+        source += "\n\n".join(inspect.getsource(function) for function in (
+            _handoff_directory, _read_handoff, _write_handoff,
+            _provision_tree, _session_helper_main,
+        ))
+        source += "\n_session_helper_main()\n"
+        read_only = operation in {"read", "store"}
+        helper_name = "coquic-steward-files-" + secrets.token_hex(16)
+        argv = [
+            "run", "--rm", "--name", helper_name, "--interactive", "--network", "none", "--read-only",
+            "--user", "0:0", "--cap-drop", "ALL",
+            "--cap-add", "DAC_OVERRIDE",
+            *([] if read_only else ["--cap-add", "CHOWN", "--cap-add", "FOWNER"]),
+            "--security-opt", "no-new-privileges:true", "--pids-limit", "32",
+            "--memory", "256m", "--log-driver", "none",
+            "--label", "coquic.steward.owner=steward",
+            "--label", "coquic.steward.runtime=session-files-v1",
+            "--mount", f"type=bind,src={root},dst=/boundary" + (",readonly" if read_only else ""),
+            "--entrypoint", "python", self.config.image_digest, "-B", "-c", source,
+            operation, "/boundary", json.dumps(options, sort_keys=True),
+        ]
+        try:
+            result = self.client.run(
+                argv, input=data, timeout=120, max_output_bytes=16 * 1024 * 1024 + 4096,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Killing a Docker CLI does not stop its server-side process. This
+            # unguessable name belongs only to the helper just launched here.
+            self.client.run(["rm", "--force", helper_name], timeout=10, max_output_bytes=4096)
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.timeout, "private filesystem helper timed out"
+            ) from exc
+        if result.returncode:
+            # Do not copy worker-controlled filenames or content into diagnostics.
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.rejected, "private filesystem boundary rejected handoff"
+            )
+        return result.stdout
+
+    def provision_task_paths(self) -> None:
+        """Provision worktree/scratch as host daemon owner plus exact role GID."""
+        config = self.config
+        if not isinstance(config, TaskContainerConfig):
+            raise ValueError("planner has no task paths")
+        self._trusted_files(config.worktree, "tree", {
+            "uid": os.geteuid(), "gid": config.task_write_gid, "worktree": True,
+        })
+        if config.scratch is not None:
+            self._trusted_files(config.scratch, "tree", {
+                "uid": os.geteuid(), "gid": config.validation_gid, "worktree": False,
+                "write_gid": config.task_write_gid,
+            })
+
+    def _session_files(
+        self, operation: str, *, session_id: str, session_uid: int,
+        name: str | None = None, data: bytes | None = None,
+        max_bytes: int = 16 * 1024 * 1024,
+    ) -> bytes:
+        self.config.environment(
+            TaskRole.planner, session_uid=session_uid, session_id=session_id,
+        )
+        if session_uid == os.geteuid():
+            raise ValueError("private session UID must differ from the daemon UID")
+        if name is not None and (
+            not name or Path(name).is_absolute() or ".." in Path(name).parts
+            or "\x00" in name
+        ):
+            raise ValueError("invalid private session filename")
+        if not 0 < max_bytes <= 16 * 1024 * 1024:
+            raise ValueError("invalid handoff read limit")
+        if data is not None and len(data) > 16 * 1024 * 1024:
+            raise ValueError("handoff exceeds write limit")
+        root = (self.config.private_root if isinstance(self.config, PlannerContainerConfig)
+                else self.config.private_sessions)
+        return self._trusted_files(root, operation, {
+            "session_id": session_id, "session_uid": session_uid,
+            "name": name, "max_bytes": max_bytes,
+        }, data=data)
+
+    def provision_session(self, *, session_id: str, session_uid: int) -> None:
+        self._session_files("provision", session_id=session_id, session_uid=session_uid)
+
+    def validate_session_store(self, *, session_id: str, session_uid: int) -> None:
+        self._session_files("store", session_id=session_id, session_uid=session_uid)
+
+    def read_session_file(
+        self, name: str, *, session_id: str, session_uid: int,
+        max_bytes: int = 16 * 1024 * 1024,
+    ) -> bytes | None:
+        result = self._session_files("read", session_id=session_id,
+                                     session_uid=session_uid, name=name, max_bytes=max_bytes)
+        if result == b"0":
+            return None
+        if not result.startswith(b"1") or len(result) > max_bytes + 1:
+            raise ContainerBoundaryError(ContainerErrorCategory.rejected, "invalid handoff response")
+        return result[1:]
+
+    def write_session_file(
+        self, name: str, data: bytes, *, session_id: str, session_uid: int,
+    ) -> None:
+        self._session_files("write", session_id=session_id, session_uid=session_uid,
+                            name=name, data=data)
 
     def create(self) -> str:
         argv = self.create_argv()

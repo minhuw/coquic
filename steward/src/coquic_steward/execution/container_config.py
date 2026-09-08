@@ -6,6 +6,7 @@ the small value-object boundary shared by the trusted daemon and tests.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -217,8 +218,8 @@ class TaskContainerConfig:
         mounts = [
             ContainerMount(self.worktree, self.container_worktree_ro),
             ContainerMount(self.archive, self.container_archive),
-            # The trusted root wrapper creates per-session homes here, then
-            # applies DAC ownership before dropping to the session UID.
+            # A disposable trusted Docker helper provisions private homes.
+            # The task wrapper itself already runs as the allocated session UID.
             ContainerMount(self.private_sessions, self.container_session, read_only=False),
             ContainerMount(self.git_dir, self.container_git_dir),
             ContainerMount(self.git_common_dir, self.container_git_common_dir),
@@ -270,7 +271,7 @@ class TaskContainerConfig:
         """Translate one task-owned host path to its stable container path."""
 
         selected = TaskRole(role)
-        path = Path(host_path).resolve()
+        path = Path(os.path.abspath(host_path))
         mappings = [
             (
                 self.worktree.resolve(),
@@ -377,7 +378,7 @@ class PlannerContainerConfig:
     def container_path(self, host_path: Path, role: TaskRole | str) -> str:
         if TaskRole(role) is not TaskRole.planner:
             raise ValueError("planner container accepts only planner paths")
-        path = Path(host_path).resolve()
+        path = Path(os.path.abspath(host_path))
         for source, target in (
             (self.history_root.resolve(), self.container_history),
             (self.private_root.resolve(), self.container_session),

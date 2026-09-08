@@ -50,6 +50,9 @@ from .container import (
     TaskContainerRuntime,
     PlannerContainerRuntime,
     deployment_runtime_factory,
+    _handoff_directory,
+    _read_handoff,
+    _write_handoff,
 )
 from .container_config import PlannerContainerConfig, TaskContainerConfig, TaskRole
 from .publication_graph import assemble_publication_graph
@@ -427,26 +430,43 @@ def build_fresh_planner_request(
 ) -> FreshPlannerRequest:
     """Build a planner request with no provider-session or resume argument."""
 
-    safe_run = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id).strip("-") or "planner"
     session_id = f"planner-session-{secrets.token_hex(10)}"
-    home = config.private_sessions_dir / "planner" / safe_run / session_id
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    session_uid = 10000 + int(hashlib.sha256(session_id.encode("ascii")).hexdigest()[:4], 16) % 50001
-    try:
-        os.chown(home, session_uid, session_uid)
-    except PermissionError:
-        if not config.local_codex_test_harness:
-            raise
-    selected_last_message = output_last_message or home / "last-message.md"
-    selected_schema = output_schema
-    if output_schema is not None:
-        selected_schema = home / "output-schema.json"
-        selected_schema.write_bytes(output_schema.read_bytes())
-        try:
-            os.chown(selected_schema, session_uid, session_uid)
-        except PermissionError:
-            if not config.local_codex_test_harness:
-                raise
+    home = config.private_sessions_dir / "planner" / session_id
+    with _handoff_directory(home / "sessions", create=True):
+        pass
+    # Include homes retained by releases predating UID reservations, including
+    # their former run/session nesting. Never traverse a worker-owned home.
+    retained_uids = set()
+    with _handoff_directory(home.parent) as homes:
+        for name in os.listdir(homes):
+            info = os.stat(name, dir_fd=homes, follow_symlinks=False)
+            retained_uids.add(info.st_uid)
+            if info.st_uid == os.geteuid() and name != session_id:
+                try:
+                    with _handoff_directory(home.parent / name) as run_home:
+                        retained_uids.update(
+                            os.stat(child, dir_fd=run_home, follow_symlinks=False).st_uid
+                            for child in os.listdir(run_home)
+                        )
+                except (NotADirectoryError, FileNotFoundError):
+                    pass
+    first_uid = int(hashlib.sha256(session_id.encode("ascii")).hexdigest()[:4], 16) % 50001
+    # A hash alone can collide with retained homes in the shared planner mount.
+    # Atomic, daemon-only reservations never recycle a UID while evidence exists.
+    with _handoff_directory(config.private_dir / "planner-uids", create=True) as reservations:
+        for offset in range(50001):
+            session_uid = 10000 + (first_uid + offset) % 50001
+            if session_uid == os.geteuid() or session_uid in retained_uids:
+                continue
+            try:
+                os.mkdir(str(session_uid), 0o700, dir_fd=reservations)
+            except FileExistsError:
+                continue
+            break
+        else:
+            raise ValueError("private planner session UID range is exhausted")
+    selected_last_message = home / "last-message.md"
+    selected_schema = _copy_optional_file(output_schema, home / "output-schema.json")
     # The Codex process receives a clean private home.  Sealed history is
     # mounted by the planner container runtime; it is intentionally absent
     # from the request's host cwd and environment.
@@ -510,32 +530,66 @@ class FreshPlannerSession:
         api_key: bytes | str | None = None,
         timeout_seconds: float = 1800,
     ) -> FreshPlannerResult:
-        request = self.allocate(
-            run_id,
-            prompt=prompt,
-            output_last_message=output_last_message,
-            output_schema=output_schema,
-            history_root=history_root,
-        )
-        prompt_path = request.home / "prompt.md"
-        transcript_path = request.home / "codex.jsonl"
-        prompt_path.write_text(prompt, encoding="utf-8")
-
-        def append(value: bytes) -> None:
-            with transcript_path.open("ab") as handle:
-                handle.write(value)
-
-        if self._interrupt_requested.is_set():
-            outcome = _interrupted_invocation_outcome()
-        else:
-            outcome = self.invoker.invoke(
-                request.request,
-                api_key=api_key,
-                append=append,
-                timeout_seconds=timeout_seconds,
-                interrupt_grace_seconds=2.0,
-                launch_gate=self._launch_gate,
+        try:
+            request = self.allocate(
+                run_id,
+                prompt=prompt,
+                output_last_message=output_last_message,
+                output_schema=output_schema,
+                history_root=history_root,
             )
+        except (OSError, ValueError, ContainerBoundaryError):
+            evidence = self.config.private_dir / "planner-evidence" / ("failed-" + secrets.token_hex(10))
+            with _handoff_directory(evidence, create=True):
+                pass
+            _write_handoff(evidence / "handoff-error.json", (json.dumps({
+                "runId": run_id, "reason": "private planner allocation rejected handoff",
+            }, sort_keys=True) + "\n").encode("utf-8"))
+            raise
+        runtime = self.invoker.runtime if isinstance(self.invoker, ContainerSessionInvoker) else None
+        evidence = self.config.private_dir / "planner-evidence" / request.session_id
+        with _handoff_directory(evidence, create=True):
+            pass
+        prompt_path = evidence / "prompt.md"
+        transcript_path = evidence / "codex.jsonl"
+        last_message_path = output_last_message or evidence / "last-message.md"
+        _write_handoff(prompt_path, prompt.encode("utf-8"))
+        # Keep a descriptor open before untrusted execution; never reopen a
+        # worker-controlled transcript name for subsequent streamed chunks.
+        _write_handoff(transcript_path, b"")
+        with _handoff_directory(evidence) as parent:
+            transcript_fd = os.open(transcript_path.name,
+                os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        with os.fdopen(transcript_fd, "ab") as transcript:
+            def append(value: bytes) -> None:
+                transcript.write(value)
+                transcript.flush()
+
+            try:
+                if self._interrupt_requested.is_set():
+                    outcome = _interrupted_invocation_outcome()
+                else:
+                    outcome = self.invoker.invoke(
+                        request.request,
+                        api_key=api_key,
+                        append=append,
+                        timeout_seconds=timeout_seconds,
+                        interrupt_grace_seconds=2.0,
+                        launch_gate=self._launch_gate,
+                    )
+                data = (runtime.read_session_file(
+                    request.request.output_last_message.name,
+                    session_id=request.session_id,
+                    session_uid=request.request.session_uid,
+                ) if runtime is not None else _read_handoff(request.request.output_last_message))
+                if data is not None:
+                    _write_handoff(last_message_path, data)
+            except (OSError, ValueError, ContainerBoundaryError):
+                _write_handoff(evidence / "handoff-error.json", b'{"reason":"private filesystem boundary rejected handoff"}\n')
+                outcome = InvocationOutcome(
+                    exit_code=1, stdout=b"", stderr=b"", incomplete_suffix=b"",
+                    events=(), provider_session_id=None,
+                )
         if self._interrupt_requested.is_set() and not outcome.completed:
             outcome = replace(outcome, interrupted=True)
         status = (
@@ -551,7 +605,7 @@ class FreshPlannerSession:
             status=status,
             prompt_path=prompt_path,
             transcript_path=transcript_path,
-            last_message_path=request.request.output_last_message,
+            last_message_path=last_message_path,
         )
 
     def interrupt(self, *, force: bool = False) -> None:
@@ -566,10 +620,9 @@ def planner_session_for_config(config: StewardConfig) -> FreshPlannerSession:
     history = config.control_loop_dir / "planner-runs"
     private = config.private_sessions_dir / "planner"
     output = config.private_dir / "planner-output"
-    for path in (history, private, output):
-        path.mkdir(parents=True, exist_ok=True)
-    private.chmod(0o711)
-    output.chmod(0o711)
+    for path, mode in ((history, 0o755), (private, 0o711), (output, 0o711)):
+        with _handoff_directory(path, create=True) as fd:
+            os.fchmod(fd, mode)
     runtime = PlannerContainerRuntime(
         PlannerContainerConfig(
             image=config.task_image,
@@ -577,7 +630,8 @@ def planner_session_for_config(config: StewardConfig) -> FreshPlannerSession:
             history_root=history,
             private_root=private,
             output_root=output,
-        )
+        ),
+        docker_bin=config.container.docker_bin,
     )
     return FreshPlannerSession(config, invoker=ContainerSessionInvoker(runtime))
 
@@ -743,6 +797,9 @@ class ContainerSessionInvoker:
         path_mapper = lambda path: self.runtime.config.container_path(path, role)
 
         def launch() -> _ContainerProcess:
+            self.runtime.provision_session(
+                session_id=request.session_id, session_uid=request.session_uid,
+            )
             process = self.runtime.exec_stream(
                 role,
                 session_uid=request.session_uid,
@@ -919,11 +976,16 @@ class ContainerSessionInvoker:
     def _identity(
         self, request: InvocationRequest, process: subprocess.Popen[bytes]
     ) -> ExecIdentity:
-        pid_path = request.output_last_message.parent / f"wrapper-{request.run_id}.pid"
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             try:
-                pid = int(pid_path.read_text(encoding="ascii").strip())
+                data = self.runtime.read_session_file(
+                    f"wrapper-{request.run_id}.pid", session_id=request.session_id,
+                    session_uid=request.session_uid, max_bytes=128,
+                )
+                if data is None:
+                    raise FileNotFoundError("wrapper identity not yet published")
+                pid = int(data.decode("ascii").strip())
             except (FileNotFoundError, ValueError, OSError):
                 if process.poll() is not None:
                     break
@@ -1132,13 +1194,18 @@ class SessionSupervisor:
             return ResumeResult(ResumeCategory.rejected, evidence={"reason": "role is not resumable"})
         if not session.provider_session_id:
             return ResumeResult(ResumeCategory.missing_provider_id)
-        if not session.private_home_path or not session.private_home_path.exists():
+        if session.private_home_path is None:
             return ResumeResult(ResumeCategory.unavailable_store, evidence={"reason": "private home missing"})
-        store_path = session.private_home_path / "sessions"
-        if not store_path.exists() or not store_path.is_dir():
-            return ResumeResult(ResumeCategory.corrupt_store, evidence={"reason": "session store missing"})
-        if not any(store_path.iterdir()):
-            return ResumeResult(ResumeCategory.corrupt_store, evidence={"reason": "session store is empty"})
+        try:
+            runtime, _ = self._boundary_for(task)
+            if runtime is not None:
+                runtime.validate_session_store(session_id=session.id, session_uid=session.home_uid)
+            else:
+                with _handoff_directory(session.private_home_path / "sessions") as fd:
+                    if not os.listdir(fd):
+                        raise ValueError("session store is empty")
+        except (OSError, ValueError, ContainerBoundaryError):
+            return ResumeResult(ResumeCategory.corrupt_store, evidence={"reason": "private session store is unavailable or unsafe"})
         expected_image = image_digest or self.image_digest
         if expected_image and session.image_digest and expected_image != session.image_digest:
             return ResumeResult(ResumeCategory.identity_mismatch, evidence={"field": "image_digest"})
@@ -1932,6 +1999,9 @@ class SessionSupervisor:
                 interrupt_grace_seconds=2.0,
             )
         except Exception as exc:
+            if isinstance(exc, ContainerBoundaryError) and exc.category is ContainerErrorCategory.rejected:
+                self.archive.write_run_file(task.id, run.pipeline_id, run.id,
+                    "handoff-error.json", {"reason": "private filesystem boundary rejected handoff"})
             self.store.transition_run(
                 run.id,
                 CodexRunState.failed.value,
@@ -1953,6 +2023,30 @@ class SessionSupervisor:
                 last_message,
                 diagnostics={"error": str(exc)},
             )
+        handoff_failed = False
+        try:
+            if outcome.interrupted or outcome.forced:
+                control_data = (json.dumps({
+                    "runId": run.id, "forced": outcome.forced,
+                    "exitCode": outcome.exit_code,
+                    "incompleteBytes": len(outcome.incomplete_suffix),
+                }, sort_keys=True) + "\n").encode("utf-8")
+                if runtime is not None:
+                    runtime.write_session_file("interruption.json", control_data,
+                        session_id=session.id, session_uid=session.home_uid)
+                elif session.private_home_path is not None:
+                    _write_handoff(session.private_home_path / "interruption.json", control_data)
+            captured = (runtime.read_session_file(private_last_message.name,
+                session_id=session.id, session_uid=session.home_uid)
+                if runtime is not None else _read_handoff(private_last_message))
+            if captured is not None:
+                self.archive.write_run_file(task.id, run.pipeline_id, run.id,
+                                            "last-message.md", captured)
+        except (OSError, ValueError, ContainerBoundaryError):
+            handoff_failed = True
+            self.archive.write_run_file(task.id, run.pipeline_id, run.id,
+                "handoff-error.json", {"reason": "private filesystem boundary rejected handoff"})
+            outcome = replace(outcome, exit_code=1, interrupted=False, forced=False)
         provider_id = outcome.provider_session_id
         state = (
             CodexRunState.interrupted.value
@@ -1977,7 +2071,7 @@ class SessionSupervisor:
                 state,
                 expected_state=CodexRunState.running.value,
                 exit_code=outcome.exit_code,
-                exit_reason=("forced termination" if outcome.forced else "interrupted" if outcome.interrupted else None),
+                exit_reason=("private filesystem boundary rejected handoff" if handoff_failed else "forced termination" if outcome.forced else "interrupted" if outcome.interrupted else None),
                 result_summary=(
                     "completed" if outcome.completed else "forced termination" if outcome.forced else "interrupted" if outcome.interrupted else "Codex invocation failed"
                 ),
@@ -2001,31 +2095,6 @@ class SessionSupervisor:
                     raise
             if current_run.state == CodexRunState.running.value:
                 raise
-        if outcome.interrupted or outcome.forced:
-            if session.private_home_path is not None:
-                control = session.private_home_path / "interruption.json"
-                control.write_text(
-                    json.dumps(
-                        {
-                            "runId": run.id,
-                            "forced": outcome.forced,
-                            "exitCode": outcome.exit_code,
-                            "incompleteBytes": len(outcome.incomplete_suffix),
-                        },
-                        sort_keys=True,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                os.chmod(control, 0o600)
-        if private_last_message.exists():
-            self.archive.write_run_file(
-                task.id,
-                run.pipeline_id,
-                run.id,
-                "last-message.md",
-                private_last_message.read_bytes(),
-            )
         for event in outcome.events:
             observe(event)
         self.archive.write_run_file(
@@ -2060,7 +2129,9 @@ class SessionSupervisor:
             run.pipeline_id,
             session.id,
             run.id,
-            InvocationStatus.forced
+            InvocationStatus.failed
+            if handoff_failed
+            else InvocationStatus.forced
             if outcome.forced or saved_run.exit_reason == "forced termination"
             else InvocationStatus.interrupted
             if outcome.interrupted or externally_interrupted
@@ -2072,29 +2143,23 @@ class SessionSupervisor:
             transcript,
             last_message,
             outcome.incomplete_suffix,
-            {"malformed_lines": outcome.malformed_lines},
+            {"malformed_lines": outcome.malformed_lines, "handoff_failed": handoff_failed},
         )
 
     def _prepare_home(self, session: CodexSession) -> None:
         assert session.private_home_path is not None
         home = session.private_home_path
-        home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(home, 0o700)
-        sessions = home / "sessions"
-        sessions.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(sessions, 0o700)
-        config_path = home / "config.toml"
-        config_path.write_text(
-            'shell_environment_policy = { inherit = "none" }\n',
-            encoding="utf-8",
-        )
-        os.chmod(config_path, 0o600)
-        auth = home / "auth.json"
-        if auth.exists():
-            raise RuntimeError("auth.json is forbidden in private Codex homes")
-        if session.home_uid is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
-            for path in (home, sessions, config_path):
-                os.chown(path, session.home_uid, session.home_uid)
+        with _handoff_directory(home / "sessions", create=True) as fd:
+            os.fchmod(fd, 0o700)
+        with _handoff_directory(home) as fd:
+            os.fchmod(fd, 0o700)
+            try:
+                os.stat("auth.json", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise RuntimeError("auth.json is forbidden in private Codex homes")
+        _write_handoff(home / "config.toml", b'shell_environment_policy = { inherit = "none" }\n')
 
     def _last_message_path(self, task: TaskRecord, pipeline_id: str, run_id: str) -> Path:
         return self.archive.task_path(
@@ -2114,9 +2179,23 @@ class SessionSupervisor:
             return None
         if session.private_home_path is None:
             raise RuntimeError("session private home is unavailable")
-        return _copy_optional_file(
-            source, session.private_home_path / f"output-schema-{run_id}.json"
-        )
+        destination = session.private_home_path / f"output-schema-{run_id}.json"
+        try:
+            runtime, _ = self._boundary_for(self.store.get(session.task_id))
+            if runtime is None:
+                return _copy_optional_file(source, destination)
+            data = _read_handoff(source)
+            if data is None:
+                raise FileNotFoundError("schema source is missing")
+            runtime.write_session_file(
+                destination.name, data, session_id=session.id, session_uid=session.home_uid,
+            )
+            return destination
+        except (OSError, ValueError, ContainerBoundaryError):
+            self.store.mark_run_interrupted(run_id, reason="private schema handoff failed")
+            run = self.store.get_run(run_id)
+            self.archive.materialize_run(session.task_id, run.pipeline_id, run)
+            raise
 
     def _timeout_seconds(self, stage: CodexStage) -> float:
         limits = self.config.limits
@@ -2139,24 +2218,21 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
     def build(task: TaskRecord) -> TaskContainerRuntime:
         if task.worktree_path is None:
             raise ValueError("task worktree must exist before creating its container")
-        worktree = task.worktree_path.resolve()
+        worktree = Path(os.path.abspath(task.worktree_path))
         linked_git = worktree / ".git"
-        if linked_git.is_file():
-            text = linked_git.read_text(encoding="utf-8").strip()
+        if not linked_git.is_dir():
+            text = (_read_handoff(linked_git, max_bytes=4096) or b"").decode("utf-8").strip()
             if text.startswith("gitdir:"):
                 linked_git = Path(text.split(":", 1)[1].strip()).resolve()
         common_git = (config.repo_root / ".git").resolve()
         scratch = config.private_dir / "task-scratch" / task.id
         archive = config.tasks_dir / task.id
         private_sessions = config.private_sessions_dir / task.id
-        archive.mkdir(parents=True, exist_ok=True)
-        private_sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(private_sessions, 0o711)
-        scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for path, mode in ((archive, 0o755), (private_sessions, 0o711), (scratch, 0o700)):
+            with _handoff_directory(path, create=True) as fd:
+                os.fchmod(fd, mode)
         task_write_gid = _task_group(task.id, 100000)
         validation_gid = _task_group(task.id, 200000)
-        _provision_group_tree(worktree, task_write_gid)
-        _provision_group_tree(scratch, validation_gid)
         container_config = TaskContainerConfig(
             task_id=task.id,
             image=config.task_image,
@@ -2173,10 +2249,12 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
             task_write_gid=task_write_gid,
             validation_gid=validation_gid,
         )
-        return TaskContainerRuntime(
+        runtime = TaskContainerRuntime(
             container_config,
             docker_bin=config.container.docker_bin,
         )
+        runtime.provision_task_paths()
+        return runtime
 
     return build
 
@@ -2220,37 +2298,15 @@ def _is_unambiguous_checkpoint(value: str | None) -> bool:
 def _copy_optional_file(source: Path | None, destination: Path) -> Path | None:
     if source is None:
         return None
-    destination.write_bytes(Path(source).read_bytes())
-    os.chmod(destination, 0o600)
+    data = _read_handoff(Path(source))
+    if data is None:
+        raise FileNotFoundError("handoff source is missing")
+    _write_handoff(destination, data)
     return destination
 
 
 def _task_group(task_id: str, base: int) -> int:
     return base + int(hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:4], 16)
-
-
-def _provision_group_tree(root: Path, gid: int) -> None:
-    """Give one daemon-owned tree to a role group without world access."""
-
-    paths = [root, *root.rglob("*")]
-    for path in paths:
-        if path.is_symlink():
-            continue
-        try:
-            os.chown(path, -1, gid)
-            mode = path.stat().st_mode & 0o777
-            owner_bits = (mode & 0o700) >> 3
-            group_bits = owner_bits & 0o070
-            if path == root / ".git":
-                os.chmod(path, mode & ~0o022)
-            elif path.is_dir():
-                os.chmod(path, mode | group_bits | 0o2000)
-            else:
-                os.chmod(path, mode | group_bits)
-        except PermissionError as exc:
-            raise RuntimeError(
-                f"cannot provision task role group {gid} for {root}"
-            ) from exc
 
 
 def _public_event(value: object) -> Any:

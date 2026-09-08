@@ -46,6 +46,17 @@ class FakeDocker(SubprocessDockerClient):
         max_output_bytes: int | None = None,
     ):
         self.calls.append(argv)
+        if argv[0] == "run" and "session-files-v1" in " ".join(argv):
+            if argv[-3] == "read":
+                options = json.loads(argv[-1])
+                mount = argv[argv.index("--mount") + 1]
+                root = Path(mount.split("src=", 1)[1].split(",dst=", 1)[0])
+                data = session_module._read_handoff(
+                    root / options["session_id"] / options["name"],
+                    max_bytes=options["max_bytes"],
+                )
+                return subprocess.CompletedProcess(argv, 0, b"0" if data is None else b"1" + data, b"")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[0] == "create":
             return subprocess.CompletedProcess(argv, 0, b"container-id\n", b"")
         if argv[0] == "inspect":

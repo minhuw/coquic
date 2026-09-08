@@ -299,8 +299,8 @@ def test_task_session_mount_root_is_traversable_by_allocated_uids(
         task_image_digest="sha256:" + "a" * 64,
     )
     monkeypatch.setattr(
-        "coquic_steward.execution.session._provision_group_tree",
-        lambda _root, _gid: None,
+        "coquic_steward.execution.container.TaskContainerRuntime.provision_task_paths",
+        lambda _self: None,
     )
     runtime = runtime_factory_for_config(configured)(store.get(task.id))
     mode = stat.S_IMODE(runtime.config.private_sessions.stat().st_mode)
@@ -975,7 +975,7 @@ def test_signal_planner_uses_fresh_session_run_and_private_lineage(
         for request in invoker.requests
     )
     assert all(
-        request.output_last_message.parent == planner_run.transcript_path.parent
+        request.output_last_message.parent != planner_run.transcript_path.parent
         for request, planner_run in zip(invoker.requests, (first, second), strict=True)
     )
     assert all(

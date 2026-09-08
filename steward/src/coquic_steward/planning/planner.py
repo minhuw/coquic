@@ -7,6 +7,7 @@ from pathlib import Path
 from ..agents import CodexRunner
 from ..agents.catalog import PLANNER_DISPATCH_POLICY
 from ..execution.session import FreshPlannerSession
+from ..execution.container import _read_handoff
 from ..core.config import StewardConfig
 from ..core.output_schema import write_output_schema_file
 from ..core.models import (
@@ -162,8 +163,8 @@ class CodexPlanner:
             )
             outcome = fresh.outcome
             final_message = (
-                fresh.last_message_path.read_text(encoding="utf-8")
-                if fresh.last_message_path.is_file()
+                (_read_handoff(fresh.last_message_path) or b"").decode("utf-8")
+                if fresh.status.value == "succeeded"
                 else ""
             )
             result = type(

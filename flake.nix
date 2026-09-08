@@ -222,6 +222,21 @@
           lintShell
         ] ++ stewardValidationSources;
       };
+      # Official plaintext inputs for the unchanged offline Duvet compliance gate.
+      stewardValidationRfcs = lib.mapAttrs (number: hash: pkgs.fetchurl {
+        url = "https://www.rfc-editor.org/rfc/rfc${number}.txt";
+        inherit hash;
+      }) {
+        "9000" = "sha256-+IquR/ixjhAgJJFul16RkgHY3eaJy6ebAQeert1ALiI=";
+        "9001" = "sha256-O7rs31r9J4BSosSDSM4RjE/40M9rmRVUmFgXGz+YpZE=";
+        "9002" = "sha256-OopU7qGtXRwTSlSL8V7foOIb+0EG29fbPAnKzoQgma8=";
+        "9114" = "sha256-a4RVXIju689dKy4dnXtYYwq8l6uHeyz2Le5M1jXbNOQ=";
+        "9204" = "sha256-kmtNfpdytcMW/oeh4WD1ztEYEBRZ7eWxPRG/mpJzyTE=";
+        "9221" = "sha256-7owExSKP0SADC6eo9nJcLKYJ2hB60rqMRP3UT3Pts7Q=";
+        "9287" = "sha256-dVWvEmYudG6qMGHBdXoCmtQxsuNAeU+Bol8YhRQBFVs=";
+        "9368" = "sha256-sNibGl1MW328NbfmMMV9vjJ/UYNUz2XpnfQ53Vw0Eio=";
+        "9369" = "sha256-PV24FRV8SoN3h3X/PRI9yUVlQpxYWLsopydTcsUxsjk=";
+      };
       stewardValidationFilesystem = pkgs.runCommand "coquic-steward-validation-filesystem" {
         # The closure is relocated below /validation/lower so /nix/store can
         # be a bounded per-run tmpfs. Runtime symlinks retain logical store
@@ -247,6 +262,10 @@
         while IFS= read -r store_path; do
           cp -a "$store_path" $out/validation/lower/nix/store/
         done < ${stewardValidationRegistration}/store-paths
+        mkdir -p $out/validation/duvet-specifications/www.rfc-editor.org/rfc
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (number: source: ''
+          cp ${source} $out/validation/duvet-specifications/www.rfc-editor.org/rfc/rfc${number}.txt
+        '') stewardValidationRfcs)}
         cp ${stewardValidationRegistration}/registration $out/validation/closure-info/registration
         cp ${stewardValidationRegistration}/store-paths $out/validation/closure-info/store-paths
         printf '%s\n' ${lib.escapeShellArgs stewardValidationSources} \

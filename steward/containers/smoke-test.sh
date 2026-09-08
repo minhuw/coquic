@@ -113,6 +113,10 @@ if kind == "task":
         if any(item in path for item in forbidden):
             raise SystemExit(f"task image contains daemon authority material: {path}")
 if kind == "validation":
+    for rfc in (9000, 9001, 9002, 9114, 9204, 9221, 9287, 9368, 9369):
+        path = f"validation/duvet-specifications/www.rfc-editor.org/rfc/rfc{rfc}.txt"
+        if path not in names:
+            raise SystemExit(f"validation image offline RFC input is missing: {path}")
     if labels.get("coquic.steward.runtime") != "validation-container-v1":
         raise SystemExit("validation image runtime label is missing")
     if labels.get("coquic.steward.codex-version") != "none":

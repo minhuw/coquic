@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import shutil
 import signal
 import subprocess
+import tomllib
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +161,38 @@ def test_idle_entrypoint_handles_term_while_sleeping(tmp_path: Path, kind: str) 
             pass
         process.wait(timeout=5)
         process.stdout.close()
+
+
+
+def test_validation_offline_rfc_cache_matches_config_and_reseeds(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    flake = (root / "flake.nix").read_text()
+    pins = flake.split("stewardValidationRfcs =", 1)[1].split("stewardValidationFilesystem =", 1)[0]
+    numbers = set(re.findall(r'"([0-9]+)" = "sha256-[A-Za-z0-9+/]{43}=";', pins))
+    config = tomllib.loads((root / ".duvet/config.toml").read_text())
+    assert {f"https://www.rfc-editor.org/rfc/rfc{number}" for number in numbers} == {
+        item["source"] for item in config["specification"]
+    }
+    entrypoint = (root / "steward/containers/validation-entrypoint.sh").read_text()
+    seed = entrypoint.split("# Duvet uses URL-derived plaintext cache names;", 1)[1]
+    seed = seed.split(": > /tmp/coquic-validation-ready", 1)[0]
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    (pinned / "rfc.txt").write_text("pinned bytes")
+    (pinned / "rfc.txt").chmod(0o444)
+    pinned.chmod(0o555)
+    worktree = tmp_path / "worktree"
+    (worktree / ".duvet/specifications").mkdir(parents=True)
+    (worktree / ".duvet/config.toml").write_text("candidate config")
+    (worktree / ".duvet/specifications/stale.txt").write_text("stale")
+    for _ in range(2):
+        subprocess.run(
+            ["sh", "-ec", "#" + seed.replace("/validation/duvet-specifications", str(pinned))],
+            env={**os.environ, "worktree": str(worktree)}, check=True,
+        )
+        assert (worktree / ".duvet/specifications/rfc.txt").read_text() == "pinned bytes"
+        assert not (worktree / ".duvet/specifications/stale.txt").exists()
+        assert (worktree / ".duvet/config.toml").read_text() == "candidate config"
 
 
 def _validation_inspection(config: ValidationContainerConfig) -> dict[str, object]:

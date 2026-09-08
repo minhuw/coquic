@@ -109,6 +109,11 @@ if [ -n "$source_worktree" ]; then
   cp -R "$source_worktree/.duvet/." "$worktree/.duvet/"
 fi
 
+# Duvet uses URL-derived plaintext cache names; seed only pinned build inputs.
+rm -rf "$worktree/.duvet/specifications"
+cp -R /validation/duvet-specifications "$worktree/.duvet/specifications"
+chmod -R u+rwX "$worktree/.duvet/specifications"
+
 : > /tmp/coquic-validation-ready
 if [ "${1:-}" = --idle ]; then
   trap 'exit 0' TERM INT

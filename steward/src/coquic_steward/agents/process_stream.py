@@ -420,21 +420,30 @@ def _write_input(
             if written is not None and written != expected:
                 raise RuntimeError("process stdin accepted a short write")
         else:
-            offset = 0
-            while offset < len(data):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("process input write exceeded its deadline")
-                try:
-                    _, writable, _ = select.select((), (fileno,), (), remaining)
-                except (OSError, ValueError):
-                    writable = (fileno,)
-                if not writable:
-                    raise TimeoutError("process input write exceeded its deadline")
-                written = os.write(fileno, data[offset:])
-                if written <= 0:
-                    raise RuntimeError("process stdin accepted an empty write")
-                offset += written
+            blocking = os.get_blocking(fileno)
+            os.set_blocking(fileno, False)
+            try:
+                offset = 0
+                while offset < len(data):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("process input write exceeded its deadline")
+                    try:
+                        _, writable, _ = select.select((), (fileno,), (), remaining)
+                    except (OSError, ValueError):
+                        writable = (fileno,)
+                    if not writable:
+                        raise TimeoutError("process input write exceeded its deadline")
+                    try:
+                        # Readiness does not guarantee room for the entire prompt.
+                        written = os.write(fileno, data[offset:])
+                    except BlockingIOError:
+                        continue
+                    if written <= 0:
+                        raise RuntimeError("process stdin accepted an empty write")
+                    offset += written
+            finally:
+                os.set_blocking(fileno, blocking)
         stream.flush()
     except TimeoutError:
         raise

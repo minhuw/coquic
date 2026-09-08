@@ -11,7 +11,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2674,6 +2674,63 @@ class SQLiteTaskStore:
                     raise
         self._notify_change()
         return self.get_daemon_state() or {}
+
+    def update_daemon_health(
+        self,
+        instance_id: str,
+        *,
+        heartbeat_at: datetime,
+        current_cycle_started_at: datetime | None,
+        last_completed_cycle_at: datetime | None,
+    ) -> bool:
+        """Update only health evidence for the still-running exact owner.
+
+        Independent of provider admission locks, with a short SQLite lock wait.
+        No lifecycle, release identity, or publication authority is acquired here.
+        """
+
+        if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 128:
+            raise ValueError("daemon instance identity is invalid")
+        updates: dict[str, str | None] = {}
+        for key, value in (
+            ("heartbeat_at", heartbeat_at),
+            ("current_cycle_started_at", current_cycle_started_at),
+            ("last_completed_cycle_at", last_completed_cycle_at),
+        ):
+            if value is None and key != "heartbeat_at":
+                updates[key] = None
+            elif isinstance(value, datetime) and value.utcoffset() is not None:
+                updates[key] = value.astimezone(timezone.utc).isoformat()
+            else:
+                raise ValueError("daemon health timestamp is invalid")
+        with closing(sqlite3.connect(
+            self.path.resolve().as_uri() + "?mode=rw", uri=True,
+            timeout=0.1, isolation_level=None,
+        )) as connection:
+            _disable_sqlite_close_checkpoint(connection)
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state_json FROM daemon_state "
+                    "WHERE id='daemon' AND instance_id=? AND lifecycle='running'",
+                    (instance_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                payload = json.loads(row[0])
+                if not isinstance(payload, dict):
+                    raise ValueError("daemon health state is invalid")
+                previous = payload.get("heartbeat_at")
+                if previous is not None and datetime.fromisoformat(previous) >= heartbeat_at:
+                    # Concurrent cycle/heartbeat snapshots must not regress progress.
+                    return False
+                payload.update(updates)
+                updated = connection.execute(
+                    "UPDATE daemon_state SET state_json=?, updated_at=? "
+                    "WHERE id='daemon' AND instance_id=? AND lifecycle='running'",
+                    (json.dumps(payload, sort_keys=True), updates["heartbeat_at"], instance_id),
+                )
+                return updated.rowcount == 1
 
     def revoke_daemon_publication_authority(
         self,

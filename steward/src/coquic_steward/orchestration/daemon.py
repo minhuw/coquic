@@ -906,16 +906,29 @@ class StewardDaemon:
                 self.store.claim_daemon_instance(
                     self.runtime.instance_id,
                     lifecycle=DaemonLifecycleState.starting.value,
+                    state={
+                        "release_id": self.config.deployment.release_id,
+                        "runtime_protocol": self.config.runtime_protocol,
+                        "current_cycle_started_at": None,
+                        "last_completed_cycle_at": None,
+                        "heartbeat_at": utc_now().isoformat(),
+                    },
                 )
                 with self._runtime_lock:
                     self.runtime.lifecycle = DaemonLifecycleState.running
                     self.runtime.state = DaemonRuntimeState.idle
                     self.runtime.reconciliation_complete = True
                     self.runtime.heartbeat_at = utc_now()
+                    self.runtime.current_cycle_started_at = None
+                    self.runtime.current_cycle_reason = None
+                    self.runtime.last_completed_cycle = None
                 self.store.set_daemon_lifecycle(
                     DaemonLifecycleState.running.value,
                     instance_id=self.runtime.instance_id,
-                    state={"reconciliation_complete": True},
+                    state={
+                        "reconciliation_complete": True,
+                        "heartbeat_at": self.runtime.heartbeat_at.isoformat(),
+                    },
                 )
                 self._publication_authority = (
                     self.store.get_daemon_publication_authority(
@@ -5523,14 +5536,15 @@ class StewardDaemon:
             self.logger(f"[steward] {message}")
 
     def _begin_cycle(self, reason: str) -> None:
-        started_at = utc_now()
         with self._runtime_lock:
             if self._shutdown_event.is_set():
                 raise RuntimeError("Steward daemon is stopping")
+            started_at = utc_now()
             self.runtime.heartbeat_at = started_at
             self.runtime.state = DaemonRuntimeState.active
             self.runtime.current_cycle_started_at = started_at
             self.runtime.current_cycle_reason = _bounded_cycle_reason(reason)
+        self._persist_runtime_health()
         self._current_control_cycle_id = new_control_loop_id("cycle")
         self._current_control_cycle_started_at = started_at
         try:
@@ -5547,18 +5561,19 @@ class StewardDaemon:
             self._log(f"control-loop cycle start lag error={exc.__class__.__name__}")
 
     def _complete_cycle(self, result: TickResult, reason: str) -> None:
-        completed_at = utc_now()
-        summary = DaemonCycleSummary(
-            completed_at=completed_at,
-            reason=_bounded_cycle_reason(reason),
-            result=DaemonCycleResult.model_validate(vars(result)),
-        )
         with self._runtime_lock:
+            completed_at = utc_now()
+            summary = DaemonCycleSummary(
+                completed_at=completed_at,
+                reason=_bounded_cycle_reason(reason),
+                result=DaemonCycleResult.model_validate(vars(result)),
+            )
             self.runtime.heartbeat_at = completed_at
             self.runtime.state = DaemonRuntimeState.idle
             self.runtime.current_cycle_started_at = None
             self.runtime.current_cycle_reason = None
             self.runtime.last_completed_cycle = summary
+        self._persist_runtime_health()
         cycle_id = getattr(self, "_current_control_cycle_id", None)
         if cycle_id is not None:
             try:
@@ -5582,6 +5597,27 @@ class StewardDaemon:
     def _touch_heartbeat(self) -> None:
         with self._runtime_lock:
             self.runtime.heartbeat_at = utc_now()
+        self._persist_runtime_health()
+
+    def _persist_runtime_health(self) -> None:
+        try:
+            runtime = self._runtime_snapshot()
+            if runtime.lifecycle != DaemonLifecycleState.running:
+                return
+            updated = self.store.update_daemon_health(
+                runtime.instance_id,
+                heartbeat_at=runtime.heartbeat_at,
+                current_cycle_started_at=runtime.current_cycle_started_at,
+                last_completed_cycle_at=(
+                    runtime.last_completed_cycle.completed_at
+                    if runtime.last_completed_cycle is not None else None
+                ),
+            )
+            if not updated:
+                self._log("daemon health update rejected: owner, lifecycle, or newer evidence")
+        except Exception as exc:
+            # Health fails stale; a failed write must not kill the heartbeat thread.
+            self._log(f"daemon health persistence failed error={exc.__class__.__name__}")
 
     def _runtime_snapshot(self) -> DaemonRuntime:
         with self._runtime_lock:

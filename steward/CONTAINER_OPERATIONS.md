@@ -543,11 +543,12 @@ For focused Planner boundary verification, the standalone mode is optional:
 nix develop -c bash steward/containers/smoke-test.sh --planner
 ```
 
-Image and Docker isolation checks are separate operator actions. They require
-the pinned Nix outputs, and isolation requires a local Docker daemon:
+Image, offline baseline, and Docker isolation checks require the pinned Nix
+outputs and a local Docker daemon. CI runs the full baseline with networking
+disabled, including flake evaluation, to catch missing locked source closures:
 
 ```sh
-nix develop -c bash steward/containers/smoke-test.sh --images
+nix develop -c bash steward/containers/smoke-test.sh --images --full-validation
 nix develop -c bash steward/containers/smoke-test.sh --isolation
 nix develop -c bash steward/containers/smoke-test.sh --shutdown
 ```

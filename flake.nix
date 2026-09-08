@@ -198,18 +198,25 @@
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
+      # Locked sources must both be registered and materialized as directories:
+      # fetchTree cannot reuse the relocated store symlinks for offline evaluation.
+      stewardValidationSources = [
+        projectSrc
+        nixpkgs
+        git-hooks
+        git-hooks.inputs.flake-compat
+        git-hooks.inputs.gitignore
+        git-hooks.inputs.nixpkgs
+        pyproject-nix
+        uv2nix
+        pyproject-build-systems
+      ];
       stewardValidationRegistration = pkgs.closureInfo {
         rootPaths = [
           stewardValidationToolClosure
           stewardSource
           lintShell
-          projectSrc
-          nixpkgs
-          git-hooks
-          git-hooks.inputs.flake-compat
-          git-hooks.inputs.gitignore
-          git-hooks.inputs.nixpkgs
-        ];
+        ] ++ stewardValidationSources;
       };
       stewardValidationFilesystem = pkgs.runCommand "coquic-steward-validation-filesystem" {
         # The closure is relocated below /validation/lower so /nix/store can
@@ -238,13 +245,7 @@
         done < ${stewardValidationRegistration}/store-paths
         cp ${stewardValidationRegistration}/registration $out/validation/closure-info/registration
         cp ${stewardValidationRegistration}/store-paths $out/validation/closure-info/store-paths
-        printf '%s\n' \
-          ${projectSrc} \
-          ${nixpkgs} \
-          ${git-hooks} \
-          ${git-hooks.inputs.flake-compat} \
-          ${git-hooks.inputs.gitignore} \
-          ${git-hooks.inputs.nixpkgs} \
+        printf '%s\n' ${lib.escapeShellArgs stewardValidationSources} \
           > $out/validation/closure-info/materialized-store-paths
 
         install -m 0755 ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bootstrap/sh

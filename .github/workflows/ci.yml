@@ -44,8 +44,8 @@ jobs:
         with:
           summarize: false
 
-      - name: Build and inspect all three pinned images
-        run: nix develop -c bash steward/containers/smoke-test.sh --images
+      - name: Build pinned images and run the full offline validation baseline
+        run: nix develop -c bash steward/containers/smoke-test.sh --images --full-validation
 
       - name: Exercise real task isolation and cancellation
         run: nix develop -c bash steward/containers/smoke-test.sh --isolation --shutdown

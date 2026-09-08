@@ -206,16 +206,17 @@ expected = [
     ("nix-flake-check.txt", ["nix", "flake", "check", "--no-build", "--no-update-lock-file", "."]),
     ("zig-build-test.txt", ["zig", "build", "test"]),
     ("pre-commit.txt", ["env", "COQUIC_CLANG_TIDY_IN_NIX=1", "pre-commit", "run", "--all-files"]),
+    ("steward-pytest.txt", ["steward-task-validate", "/validation/worktree"]),
 ]
 if not isinstance(gates, list) or len(gates) != len(expected):
-    raise SystemExit("validation image did not execute all four canonical gates")
+    raise SystemExit("validation image did not execute all five canonical gates")
 for gate, (filename, suffix) in zip(gates, expected, strict=True):
     command = gate.get("command")
     if gate.get("filename") != filename or gate.get("exitCode") != 0:
         raise SystemExit(f"validation gate failed or changed identity: {filename}")
     if not isinstance(command, list) or command[-len(suffix):] != suffix:
         raise SystemExit(f"validation command changed identity: {filename}")
-    if "git+file:///validation/worktree#lint" not in command:
+    if filename != "steward-pytest.txt" and "git+file:///validation/worktree#lint" not in command:
         raise SystemExit(f"validation gate is not pinned to the mounted worktree: {filename}")
 PY
   fi

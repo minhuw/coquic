@@ -30,6 +30,29 @@ jobs:
       - name: Smoke Steward CLI load
         run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'from coquic_steward.cli import app; assert app is not None'
 
+  steward-container-smoke:
+    name: Steward Production Container Boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Build and inspect all three pinned images
+        run: nix develop -c bash steward/containers/smoke-test.sh --images
+
+      - name: Exercise real task isolation and cancellation
+        run: nix develop -c bash steward/containers/smoke-test.sh --isolation --shutdown
+
+      - name: Exercise production-identity provisioning and candidate rejection
+        run: nix develop -c bash steward/containers/production-canary.sh
+
   format:
     name: Format
     runs-on: ubuntu-latest

@@ -105,10 +105,7 @@
         exec ${stewardPython}/bin/python -m coquic_steward.cli "$@"
       '';
       stewardTaskValidation = pkgs.writeShellScriptBin "steward-task-validate" ''
-        export PYTHONPATH="${stewardSource}/opt/coquic/steward/src''${PYTHONPATH:+:$PYTHONPATH}"
-        exec ${stewardPython}/bin/python -m pytest \
-          -p no:cacheprovider \
-          ${stewardSource}/opt/coquic/steward/tests/test_container_runtime.py -q
+        exec ${stewardPython}/bin/python -B -s ${./steward/containers/validate-candidate.py} "$@"
       '';
       codexCli = pkgs.stdenvNoCC.mkDerivation {
         pname = "codex-cli";
@@ -177,9 +174,9 @@
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
-      # Validation is deliberately a separate closure: it contains the four
-      # repository gates and their build tools, but never Codex, Docker, SSH,
-      # GitHub credentials, or the daemon launcher.
+      # Validation is deliberately a separate closure: it contains the baseline
+      # repository gates plus candidate Steward pytest and their build tools,
+      # but never Codex, Docker, SSH, GitHub credentials, or the daemon launcher.
       stewardValidationToolClosure = pkgs.buildEnv {
         name = "coquic-steward-validation-tools";
         paths = [
@@ -197,6 +194,7 @@
           stewardPython
           stewardSource
           stewardValidationEntrypoint
+          stewardTaskValidation
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
@@ -2197,6 +2195,7 @@ EOF
         extraShellHook = "unset PYTHONPATH\n";
         extraPackages = [
           stewardPython
+          stewardTaskValidation
           llvmPkgs.clang-tools
           pkgs.pre-commit
           pkgs.trufflehog

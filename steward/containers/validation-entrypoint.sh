@@ -138,7 +138,8 @@ from coquic_steward.execution.validation import default_gates
 worktree = Path(os.environ["VALIDATION_WORKTREE"])
 output = Path(os.environ["VALIDATION_OUTPUT"])
 results = []
-for filename, command in default_gates(worktree):
+gates = default_gates(worktree)
+for filename, command in gates:
     target = output / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -181,5 +182,5 @@ for filename, command in default_gates(worktree):
     json.dumps({"gates": results}, sort_keys=True, separators=(",", ":")) + "\n",
     encoding="utf-8",
 )
-raise SystemExit(0 if results and all(item["exitCode"] == 0 for item in results) and len(results) == 4 else 1)
+raise SystemExit(0 if results and all(item["exitCode"] == 0 for item in results) and len(results) == len(gates) else 1)
 PY

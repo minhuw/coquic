@@ -1492,7 +1492,9 @@ def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
     ]
     commands = [command for _, command in default_gates(worktree)]
 
-    assert all(command[: len(prefix)] == prefix for command in commands)
+    assert len(commands) == 5
+    assert commands[-1] == ["steward-task-validate", str(worktree)]
+    assert all(command[: len(prefix)] == prefix for command in commands[:4])
     assert commands[0][len(prefix) :] == [
         "git",
         "diff",

@@ -81,6 +81,9 @@ def default_gates(worktree: Path) -> tuple[tuple[str, list[str]], ...]:
                 "--all-files",
             ],
         ),
+        # The pinned image owns this launcher; do not resolve it through a
+        # candidate-defined Nix shell or import the image's packaged Steward.
+        ("steward-pytest.txt", ["steward-task-validate", str(worktree.resolve())]),
     )
 
 

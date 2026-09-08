@@ -249,7 +249,11 @@ def test_planner_container_mounts_only_sealed_history_and_private_io(
     assert any(value.endswith("dst=/planner/history,readonly") for value in mounts)
     assert any(value.endswith("dst=/planner/session") for value in mounts)
     assert any(value.endswith("dst=/planner/output") for value in mounts)
-    assert all("worktree" not in value and "/.git" not in value for value in mounts)
+    assert set(mounts) == {
+        f"type=bind,src={history},dst=/planner/history,readonly",
+        f"type=bind,src={private},dst=/planner/session",
+        f"type=bind,src={output},dst=/planner/output",
+    }
     assert all("steward.sqlite" not in value and "docker.sock" not in value for value in argv)
 
     for forbidden_network in ("none", "host"):

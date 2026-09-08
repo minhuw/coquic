@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from queue import Empty, SimpleQueue
-from threading import Event
+from threading import Event, Thread
 from typing import TYPE_CHECKING, Final
 
 from ..core.models import EffectActionKind, EffectDecision, EffectDecisionKind
@@ -617,13 +617,16 @@ def _call_composer(
 class _LeaseWork:
     """Keep renewal on the admission-owning thread, not behind its task lock.
 
-    One joined worker performs composition/provider work. It never renews or
+    One scoped daemon worker performs composition/provider work. It never renews or
     writes receipts. Request/run checkpoints rendezvous with this owner before
     continuing; timer ticks also renew during a single long blocking call.
     There is no independent heartbeat thread and no build deadline. Shutdown
     stops renewal immediately, cancels owned subprocesses, and drains the same
     admitted work before releasing the Store/provider lifecycle to the daemon.
     In-flight network calls remain the daemon transport cancellation's concern.
+    A stalled OS resolver cannot be interrupted: the owner stays unresolved at
+    the daemon's shutdown deadline, but no executor exit hook prevents process
+    exit. In an embedding, admission and cleanup stay owned until work settles.
     """
 
     def __init__(self, publisher: CloudPublisher) -> None:
@@ -633,15 +636,26 @@ class _LeaseWork:
         self.expires_at: datetime | None = None
         self.requests: SimpleQueue[Event] = SimpleQueue()
         self.processes = ProcessGroupCancellationOwner("publication")
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="publication-work")
+        self.operations: SimpleQueue[tuple[Callable[[], object], Future[object]] | None] = SimpleQueue()
+        self.worker = Thread(target=self._work, name="publication-work", daemon=True)
 
     def __enter__(self) -> _LeaseWork:
+        self.worker.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.stopped.set()
         self.processes.force_cancel()
-        self.executor.shutdown(wait=True, cancel_futures=True)
+        self.operations.put(None)
+        self.worker.join()
+
+    def _work(self) -> None:
+        while (item := self.operations.get()) is not None:
+            operation, future = item
+            try:
+                future.set_result(operation())
+            except BaseException as error:
+                future.set_exception(error)
 
     def _checkpoint(self) -> None:
         request = Event()
@@ -656,6 +670,8 @@ class _LeaseWork:
         token = publication_checkpoint.set(self._checkpoint)
         try:
             with use_subprocess_owner(self.processes):
+                if self.stopped.is_set() or self.publisher.cancel_event.is_set():
+                    raise PublicationStopped()
                 return operation()
         finally:
             publication_checkpoint.reset(token)
@@ -693,7 +709,8 @@ class _LeaseWork:
         if self.failure is not None:
             raise PublicationStopped()
         context = copy_context()
-        future = self.executor.submit(context.run, self._run, operation)
+        future: Future[object] = Future()
+        self.operations.put((lambda: context.run(self._run, operation), future))
         interval = self.publisher.lease_seconds / 3
         while not future.done():
             try:

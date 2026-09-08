@@ -249,7 +249,8 @@ def _validation_inspection(config: ValidationContainerConfig) -> dict[str, objec
     }
 
 
-def test_validation_policy_is_shared(tmp_path: Path) -> None:
+@pytest.mark.parametrize("foreign", ["extra", "changed", "missing", "duplicate"])
+def test_validation_policy_is_shared(tmp_path: Path, foreign: str) -> None:
     worktree, output, store, git_common = (
         tmp_path / name for name in ("worktree", "output", "store", "git-common")
     )
@@ -276,6 +277,23 @@ def test_validation_policy_is_shared(tmp_path: Path) -> None:
     runtime = ValidationContainerRuntime(config)
     create_argv = runtime.create_argv()
     run_argv = runtime.run_argv(["git", "status"])
+    assert dict(config.environment) == {
+        "HOME": "/tmp/validation-home",
+        "COQUIC_HOME": "/tmp/validation-home",
+        "NIX_PATH": "",
+        "NIX_STATE_DIR": "/nix/var/nix",
+        "NIX_LOG_DIR": "/nix/var/nix/log",
+        "TMPDIR": "/tmp",
+        "XDG_CACHE_HOME": "/tmp/cache",
+        "XDG_CONFIG_HOME": "/tmp/config",
+        "VALIDATION_SOURCE_WORKTREE": str(worktree),
+        "VALIDATION_GIT_OBJECTS_DIR": str(git_common / "objects"),
+        "VALIDATION_GIT_ALTERNATE_OBJECTS": "/validation/git-common-ro/objects",
+    }
+    assert runtime.exec_argv(["nix", "config", "show"]) == [
+        "exec", "--user", "12000:12001", "--workdir", "/validation/worktree",
+        config.container_name, "nix", "config", "show",
+    ]
 
     for option in ("--mount", "--env", "--tmpfs"):
         create_values = {
@@ -311,7 +329,15 @@ def test_validation_policy_is_shared(tmp_path: Path) -> None:
             raw=payload,
         )
     )
-    payload["Config"]["Env"].append("UNEXPECTED=1")
+    environment = payload["Config"]["Env"]
+    if foreign == "extra":
+        environment.append("NIX_CONFIG=sandbox = false")
+    elif foreign == "changed":
+        environment[environment.index("HOME=/tmp/validation-home")] = "HOME=/elsewhere"
+    elif foreign == "missing":
+        environment.remove("HOME=/tmp/validation-home")
+    else:
+        environment.append("HOME=/tmp/validation-home")
     with pytest.raises(ContainerBoundaryError) as error:
         runtime._validate_inspection(
             ContainerInspection(

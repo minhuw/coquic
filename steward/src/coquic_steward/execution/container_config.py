@@ -451,7 +451,18 @@ class ValidationContainerConfig:
 
     @property
     def environment(self) -> tuple[tuple[str, str], ...]:
-        values = [("VALIDATION_SOURCE_WORKTREE", self.worktree.as_posix())]
+        # Docker exec inherits Config.Env, not the idle entrypoint's exports.
+        values = [
+            ("HOME", "/tmp/validation-home"),
+            ("COQUIC_HOME", "/tmp/validation-home"),
+            ("NIX_PATH", ""),
+            ("NIX_STATE_DIR", "/nix/var/nix"),
+            ("NIX_LOG_DIR", "/nix/var/nix/log"),
+            ("TMPDIR", "/tmp"),
+            ("XDG_CACHE_HOME", "/tmp/cache"),
+            ("XDG_CONFIG_HOME", "/tmp/config"),
+            ("VALIDATION_SOURCE_WORKTREE", self.worktree.as_posix()),
+        ]
         if self.git_common_dir is not None:
             values.extend(
                 (

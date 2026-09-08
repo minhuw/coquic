@@ -40,8 +40,10 @@ export XDG_CACHE_HOME=/tmp/cache
 export XDG_CONFIG_HOME=/tmp/config
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-/tmp/zig-global-cache}"
 export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-/tmp/zig-local-cache}"
-mkdir -p "$HOME/.config/nix" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
+mkdir -p "$HOME/.config/nix" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME/nix"
 printf '%s' "$NIX_CONFIG" >"$HOME/.config/nix/nix.conf"
+# Exec uses XDG_CONFIG_HOME; clean Nix shells keep only HOME. Share one policy.
+cp "$HOME/.config/nix/nix.conf" "$XDG_CONFIG_HOME/nix/nix.conf"
 [ -f "${NIX_REGISTRATION:-}" ] || fail 'validation closure registration is missing'
 [ -f "${NIX_MATERIALIZED_STORE_PATHS:-}" ] || fail 'validation materialized path list is missing'
 [ -f "${NIX_STORE_PATHS:-}" ] || fail 'validation closure path list is missing'

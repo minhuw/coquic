@@ -366,7 +366,7 @@
             "coquic.steward.runtime" = "validation-container-v1";
             "coquic.steward.release" = stewardSourceIdentity;
             "coquic.steward.codex-version" = "none";
-            "coquic.steward.task-runtime" = "four-canonical-gates";
+            "coquic.steward.task-runtime" = "five-canonical-gates";
             "coquic.steward.closure" = builtins.substring 0 32 (
               builtins.hashString "sha256" (toString stewardValidationToolClosure)
             );

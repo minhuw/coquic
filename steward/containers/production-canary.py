@@ -8,8 +8,8 @@ from pathlib import Path
 from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.models import CodexRunState, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.core.subprocesses import run_command
-from coquic_steward.execution.container import ContainerBoundaryError
-from coquic_steward.execution.container_config import TaskRole
+from coquic_steward.execution.container import ContainerBoundaryError, ValidationContainerRuntime
+from coquic_steward.execution.container_config import TaskRole, ValidationContainerConfig
 from coquic_steward.execution.session import InvocationStatus, session_supervisor_for_config, worktree_checkpoint
 from coquic_steward.execution.validation import _docker_validation_runner, default_gates, run_validation
 from coquic_steward.storage import TaskStore
@@ -98,6 +98,39 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input
     assert "deliberate candidate-only failure" in validation_log, validation_log
     assert (worktree / "README.md").read_bytes() == before
     print("candidate validation container rejected deliberate failure; source remained read-only", flush=True)
+    validation_root = home / "durable-validation"
+    for child in ("output", "store"):
+        (validation_root / child).mkdir(parents=True)
+    validation_runtime = ValidationContainerRuntime(ValidationContainerConfig(
+        run_id=os.environ["CANARY_NAME"] + "-env",
+        image=config.validation_image, image_digest=config.validation_image_digest,
+        worktree=worktree, output=validation_root / "output", store=validation_root / "store",
+        git_common_dir=repo / ".git", uid=os.getuid(), gid=os.getgid(),
+        labels={"coquic.steward.deployment": os.environ["CANARY_NAME"]},
+    ))
+    try:
+        validation_runtime.ensure_started()
+        # No exec environment injection or bootstrap wrapper: test persisted Config.Env.
+        probe = validation_runtime.exec(["python", "-c", """
+import json, os, subprocess, sys
+from pathlib import Path
+for key, value in json.loads(sys.argv[1]).items():
+    assert os.environ[key] == value, key
+assert 'NIX_CONFIG' not in os.environ
+home_config = Path(os.environ['HOME']) / '.config/nix/nix.conf'
+xdg_config = Path(os.environ['XDG_CONFIG_HOME']) / 'nix/nix.conf'
+assert home_config.read_bytes() == xdg_config.read_bytes()
+settings = json.loads(subprocess.check_output(['nix', 'config', 'show', '--json']))
+assert settings['sandbox']['value'] is True
+assert settings['substituters']['value'] == []
+assert settings['trusted-public-keys']['value'] == []
+assert {'nix-command', 'flakes'} <= set(settings['experimental-features']['value'])
+print('durable Nix exec inherited fixed paths and offline sandbox policy')
+""", json.dumps(dict(validation_runtime.config.environment))], timeout=30)
+        assert probe.exit_code == 0, (probe.stdout, probe.stderr)
+        print(probe.stdout.decode(), end="", flush=True)
+    finally:
+        validation_runtime.cleanup_owned(timeout=1)
     supervisor = session_supervisor_for_config(config, store)
     assert supervisor is not None and supervisor.runtime_factory is not None
     factory = supervisor.runtime_factory

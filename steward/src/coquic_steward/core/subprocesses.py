@@ -5,6 +5,7 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,19 @@ class ProcessGroupCancellationOwner:
             if pid > 0:
                 self._processes.pop(pid, None)
             self._condition.notify_all()
+
+    @contextmanager
+    def launch_guard(self):
+        """Linearize process launch against cancellation, without holding during wait."""
+        with self._condition:
+            if self._cancel_requested:
+                raise InterruptedError("subprocess owner is cancelled")
+            yield
+
+    @property
+    def cancelled(self) -> bool:
+        with self._condition:
+            return self._cancel_requested
 
     @property
     def active_count(self) -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -212,34 +213,71 @@ def test_planner_uid_hash_collision_does_not_share_private_identity(config, monk
     assert first.home.parent == second.home.parent
 
 
-def test_helper_timeout_removes_only_its_exact_generated_container(config):
-    class TimedOutDocker(SubprocessDockerClient):
-        def __init__(self):
-            self.calls = []
+class HelperDocker(SubprocessDockerClient):
+    identity = "d" * 64
 
-        def run(self, argv, **kwargs):
-            self.calls.append(argv)
-            if argv[0] == "run":
-                raise subprocess.TimeoutExpired(argv, 120)
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
+    def __init__(self):
+        self.calls = []
+        self.objects = {}
+        self.name = None
+        self.labels = {}
 
-    client = TimedOutDocker()
-    runtime = PlannerContainerRuntime(PlannerContainerConfig(
+    def run(self, argv, **kwargs):
+        self.calls.append(argv)
+        if argv[0] == "create":
+            self.name = argv[argv.index("--name") + 1]
+            self.labels = dict(argv[index + 1].split("=", 1)
+                               for index, arg in enumerate(argv) if arg == "--label")
+            self.materialize()
+            return subprocess.CompletedProcess(argv, 0, (self.identity + "\n").encode(), b"")
+        if argv[0] == "start":
+            return subprocess.CompletedProcess(argv, 0, b"synthetic result", b"")
+        from coquic_steward.core.subprocesses import current_subprocess_owner
+        assert current_subprocess_owner() is None
+        assert kwargs["timeout"] == 10
+        if argv[:2] == ["container", "inspect"]:
+            objects = [item for item in self.objects.values() if argv[2] in {item["Id"], item["Name"][1:]}]
+            return subprocess.CompletedProcess(argv, 0 if objects else 1, json.dumps(objects).encode(),
+                b"" if objects else f"Error response from daemon: No such container: {argv[2]}\n".encode())
+        assert argv == ["rm", "--force", self.identity]
+        self.objects.pop(self.identity, None)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def materialize(self):
+        self.objects[self.identity] = {"Id": self.identity, "Name": "/" + self.name,
+            "Image": "sha256:" + "a" * 64, "Config": {"Labels": self.labels}}
+
+
+def helper_runtime(config, client):
+    return PlannerContainerRuntime(PlannerContainerConfig(
         image="synthetic", image_digest="sha256:" + "a" * 64,
         history_root=config.repo_root, private_root=config.private_sessions_dir,
         output_root=config.private_dir,
     ), client=client)
+
+
+def test_helper_timeout_removes_only_its_exact_generated_container(config):
+    class TimedOutDocker(HelperDocker):
+        def run(self, argv, **kwargs):
+            result = super().run(argv, **kwargs)
+            if argv[0] == "start":
+                raise subprocess.TimeoutExpired(argv, 120)
+            return result
+
+    client = TimedOutDocker()
+    runtime = helper_runtime(config, client)
     with pytest.raises(ContainerBoundaryError, match="timed out"):
         runtime.provision_session(session_id="session-one", session_uid=12345)
-    name = client.calls[0][client.calls[0].index("--name") + 1]
-    assert name.startswith("coquic-steward-files-")
-    assert client.calls[1] == ["rm", "--force", name]
     argv = client.calls[0]
+    assert argv[0] == "create" and "--rm" in argv
+    assert client.calls[1] == ["start", "--attach", "--interactive", client.identity]
+    assert client.calls[-1] == ["rm", "--force", client.identity]
     assert argv[argv.index("--network") + 1] == "none"
     assert argv[argv.index("--entrypoint") + 1] == "python"
     assert "sha256:" + "a" * 64 in argv
     assert argv.count("--mount") == 1
     assert "/var/run/docker.sock" not in " ".join(argv)
+    assert not list((config.private_dir / ".file-helper-cleanup").glob("*.json"))
 
 
 def test_planner_schema_rejection_has_daemon_owned_evidence(config):
@@ -384,53 +422,107 @@ def test_abnormal_helper_exit_cleans_exact_name_outside_cancelled_owner(config, 
     from coquic_steward.execution.container import ContainerErrorCategory
 
     owner = ProcessGroupCancellationOwner("cancelled-helper")
-    containers = {"foreign-container"}
-    calls = []
 
-    class Docker(SubprocessDockerClient):
+    class Docker(HelperDocker):
         def run(self, argv, **kwargs):
-            calls.append(argv)
-            if argv[0] == "run":
+            if argv[0] == "start":
                 assert current_subprocess_owner() is owner
-                containers.add(argv[argv.index("--name") + 1])
+                super().run(argv, **kwargs)
                 owner.force_cancel()
                 if failure == "exception":
                     raise OSError("CLI failure")
                 if failure == "interrupt":
                     raise KeyboardInterrupt()
                 return subprocess.CompletedProcess(argv, -9 if failure == "cancelled" else 1, b"", b"private content")
-            assert current_subprocess_owner() is None
-            assert kwargs == {"timeout": 10, "max_output_bytes": 4096}
-            name = calls[0][calls[0].index("--name") + 1]
-            assert argv == ["rm", "--force", name]
-            assert name.startswith("coquic-steward-files-")
-            assert len(name.removeprefix("coquic-steward-files-")) == 32
-            if cleanup == "timeout":
-                raise subprocess.TimeoutExpired(argv, 10)
-            if cleanup == "exception":
-                raise OSError("cleanup connection lost")
-            if cleanup == "nonzero":
-                return subprocess.CompletedProcess(argv, 1, b"", b"daemon plugin not found")
-            containers.remove(name)
-            return subprocess.CompletedProcess(argv, 1 if cleanup == "absent" else 0, b"", f"Error response from daemon: No such container: {name}\n".encode() if cleanup == "absent" else b"")
+            if argv[0] == "rm":
+                assert current_subprocess_owner() is None
+                assert kwargs == {"timeout": 10, "max_output_bytes": 4096}
+                if cleanup == "timeout":
+                    raise subprocess.TimeoutExpired(argv, 10)
+                if cleanup == "exception":
+                    raise OSError("cleanup connection lost")
+                if cleanup == "nonzero":
+                    return subprocess.CompletedProcess(argv, 1, b"", b"daemon plugin not found")
+                result = super().run(argv, **kwargs)
+                if cleanup == "absent":
+                    return subprocess.CompletedProcess(argv, 1, b"", f"Error response from daemon: No such container: {self.identity}\n".encode())
+                return result
+            return super().run(argv, **kwargs)
 
-    runtime = PlannerContainerRuntime(PlannerContainerConfig(
-        image="synthetic", image_digest="sha256:" + "a" * 64,
-        history_root=config.repo_root, private_root=config.private_sessions_dir,
-        output_root=config.private_dir,
-    ), client=Docker())
+    client = Docker()
+    client.objects["foreign"] = {"Id": "foreign", "Name": "/foreign-container"}
+    runtime = helper_runtime(config, client)
     cleanup_failed = cleanup in {"nonzero", "timeout", "exception"}
     expected = ContainerBoundaryError if cleanup_failed or failure in {"nonzero", "cancelled"} else OSError if failure == "exception" else KeyboardInterrupt
     with use_subprocess_owner(owner):
         with pytest.raises(expected) as caught:
             runtime.provision_session(session_id="session-one", session_uid=12345)
         assert current_subprocess_owner() is owner
-    assert len(calls) == 2
+    pending = list((config.private_dir / ".file-helper-cleanup").glob("*.json"))
     if cleanup_failed:
         assert caught.value.category is ContainerErrorCategory.ambiguous
         assert "cleanup is unverified" in str(caught.value)
-        assert len(containers) == 2
+        assert len(client.objects) == 2
+        assert json.loads(pending[0].read_text())["id"] == client.identity
     else:
-        assert containers == {"foreign-container"}
-    assert "foreign-container" in containers
-    assert "private content" not in str(caught.value)
+        assert set(client.objects) == {"foreign"}
+        assert not pending
+    assert "foreign" in client.objects
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_cancelled_create_never_starts_late_helper_and_reconciles_exact_intent(config, acknowledged):
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner, use_subprocess_owner
+    from coquic_steward.execution.container import ContainerErrorCategory
+
+    owner = ProcessGroupCancellationOwner("delayed-create")
+
+    class DelayedDocker(HelperDocker):
+        def run(self, argv, **kwargs):
+            result = super().run(argv, **kwargs)
+            if argv[0] == "create":
+                owner.force_cancel()
+                if not acknowledged:
+                    # The server request remains in flight after CLI cancellation.
+                    self.objects.pop(self.identity)
+                    return subprocess.CompletedProcess(argv, -9, b"", b"")
+            assert argv[0] != "start", "cancelled create launched filesystem mutations"
+            return result
+
+    client = DelayedDocker()
+    runtime = helper_runtime(config, client)
+    with use_subprocess_owner(owner):
+        with pytest.raises(InterruptedError if acknowledged else ContainerBoundaryError) as caught:
+            runtime.provision_session(session_id="session-one", session_uid=12345)
+    ledger = config.private_dir / ".file-helper-cleanup"
+    pending = list(ledger.glob("*.json"))
+    if acknowledged:
+        assert not pending and not client.objects
+    else:
+        assert caught.value.category is ContainerErrorCategory.ambiguous
+        record = json.loads(pending[0].read_text())
+        assert record["id"] is None and record["name"] == client.name
+        assert record["labels"] == client.labels
+        assert stat.S_IMODE(pending[0].stat().st_mode) == 0o600
+        # Repeated premature absence is still unresolved, never quiescence.
+        with pytest.raises(ContainerBoundaryError, match="unacknowledged"):
+            runtime.reconcile_file_helpers()
+        client.materialize()  # Late acknowledgement on server: inert, never started.
+        client.objects[client.identity]["Config"]["Labels"] = {"coquic.steward.owner": "foreign"}
+        with pytest.raises(ValueError, match="ownership mismatch"):
+            runtime.reconcile_file_helpers()
+        assert pending[0].exists() and client.objects
+        client.objects[client.identity]["Config"]["Labels"] = client.labels
+        runtime.reconcile_file_helpers()
+        assert not pending[0].exists() and not client.objects
+    assert all(argv[0] != "start" for argv in client.calls)
+
+
+def test_cancelled_docker_owner_fences_popen_before_start(monkeypatch):
+    from coquic_steward.core.subprocesses import ProcessGroupCancellationOwner, use_subprocess_owner
+
+    owner = ProcessGroupCancellationOwner("cancel-before-popen")
+    owner.request_cancel()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("cancelled owner launched Docker"))
+    with use_subprocess_owner(owner), pytest.raises(InterruptedError):
+        SubprocessDockerClient().run(["start", "--attach", "--interactive", "d" * 64])

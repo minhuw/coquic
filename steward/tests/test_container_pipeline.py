@@ -3617,3 +3617,84 @@ def test_validation_retains_complete_gate_log_in_task_archive(config, monkeypatc
     assert len(json.dumps(event.data)) < 16_384
     full = json.loads(archive.task_path(task.id, event.data["validation_artifact"]).read_text())
     assert full["validations"][0]["output_artifact"] == summary["output_artifact"]
+
+
+def test_validation_replay_retains_both_logs_and_content_addressed_manifests(config, monkeypatch):
+    from hashlib import sha256
+
+    log = config.logs_dir / "replayed-gate.log"
+    original = b"first attempt full log\n" * 2000
+    changed = b"second attempt changed log\n" * 2000
+    log.write_bytes(original)
+
+    def gates(config, task_id, cwd, **kwargs):
+        result = ValidationResult(command=["gate"], cwd=cwd, passed=True, exit_code=0, output_path=log)
+        kwargs["on_gate_result"](0, result)
+        return [result]
+
+    monkeypatch.setattr(executor_module, "run_gates", gates)
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="replayed evidence", prompt="change README"))
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+    pipeline = store.list_pipelines(task.id)[0]
+    add_event = store.add_event
+
+    def crash_before_receipt(task_id, kind, *args, **kwargs):
+        if kind == "pipeline.validation.result":
+            raise KeyboardInterrupt("crash after required evidence was archived")
+        return add_event(task_id, kind, *args, **kwargs)
+
+    monkeypatch.setattr(store, "add_event", crash_before_receipt)
+    with pytest.raises(KeyboardInterrupt):
+        executor.advance_once(task.id)
+    archive = TaskArchiveWriter(config)
+    root = archive.task_path(task.id, f"pipelines/{pipeline.id}/validations")
+    first_manifest = next(root.glob("gates-*.json"))
+    first_bytes = first_manifest.read_bytes()
+    monkeypatch.setattr(store, "add_event", add_event)
+    started = store.events(task.id, kinds=("pipeline.phase.started",), phase="validation")[-1]
+    store.add_event(task.id, "pipeline.phase.interrupted", "test recovery released deterministic gate", {
+        "pipeline_id": pipeline.id, "phase": "validation", "action_id": started.data["action_id"],
+    })
+    log.write_bytes(changed)
+    assert executor.advance_once(task.id).next_phase == PipelineCursorPhase.review
+    event = store.events(task.id, kinds=("pipeline.validation.result",))[-1]
+    latest = archive.task_path(task.id, event.data["validation_artifact"])
+    assert latest != first_manifest and first_manifest.read_bytes() == first_bytes
+    assert len(list(root.glob("gates-*.json"))) == 2
+    for manifest, content in ((first_manifest, original), (latest, changed)):
+        value = json.loads(manifest.read_text())["validations"][0]
+        path = archive.task_path(task.id, value["output_artifact"])
+        assert path.read_bytes() == content and path.stem == sha256(content).hexdigest()
+        assert manifest.stem == "gates-" + sha256(manifest.read_bytes()).hexdigest()
+    assert event.data["validations"][0]["output_artifact"] == json.loads(latest.read_text())["validations"][0]["output_artifact"]
+
+
+@pytest.mark.parametrize("failure", ["log", "manifest"])
+def test_required_validation_archive_failure_never_publishes_references(config, monkeypatch, failure):
+    log = config.logs_dir / "gate.log"
+    log.write_bytes(b"full evidence")
+
+    def gates(config, task_id, cwd, **kwargs):
+        result = ValidationResult(command=["gate"], cwd=cwd, passed=True, exit_code=0, output_path=log)
+        kwargs["on_gate_result"](0, result)
+        return [result]
+
+    monkeypatch.setattr(executor_module, "run_gates", gates)
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="required archive", prompt="change README"))
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+    write = TaskArchiveWriter.write_bytes
+
+    def reject(self, task_id, relative, data):
+        if "/validations/" in relative and relative.endswith(".log" if failure == "log" else ".json"):
+            raise OSError("synthetic archive failure")
+        return write(self, task_id, relative, data)
+
+    monkeypatch.setattr(TaskArchiveWriter, "write_bytes", reject)
+    assert executor.advance_once(task.id).status == "blocked"
+    assert not store.events(task.id, kinds=("pipeline.validation.result",))

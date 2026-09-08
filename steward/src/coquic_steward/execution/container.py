@@ -6,6 +6,7 @@ the Docker CLI so tests can substitute a recording fake without a Docker SDK.
 
 from __future__ import annotations
 
+import fcntl
 import inspect
 import json
 import os
@@ -17,7 +18,7 @@ import sys
 import subprocess  # nosec B404 - explicit argv, shell=False below
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -101,17 +102,18 @@ class SubprocessDockerClient:
         max_output_bytes: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         _validate_capture_limit(max_output_bytes)
-        process = subprocess.Popen(  # nosec B603 - argv is validated by caller
-            [self.docker_bin, *argv],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE if input is not None else None,
-            shell=False,
-            start_new_session=True,
-        )
         owner = current_subprocess_owner()
-        if owner is not None:
-            owner.register(process)
+        with owner.launch_guard() if owner is not None else nullcontext():
+            process = subprocess.Popen(  # nosec B603 - argv is validated by caller
+                [self.docker_bin, *argv],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE if input is not None else None,
+                shell=False,
+                start_new_session=True,
+            )
+            if owner is not None:
+                owner.register(process)
         try:
             stdout, stderr, timed_out = _communicate_bounded(
                 process,
@@ -361,14 +363,105 @@ class TaskContainerRuntime:
         self.config = config
         self.client = client or SubprocessDockerClient(docker_bin)
 
+    @contextmanager
+    def _file_helper_ledger(self):
+        private = (self.config.private_root if isinstance(self.config, PlannerContainerConfig)
+                   else self.config.private_sessions)
+        ledger = private.parent / ".file-helper-cleanup"
+        with _handoff_directory(ledger, create=True) as fd:
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise ValueError("helper cleanup ledger is not daemon-private")
+            # ponytail: serialize short-lived filesystem helpers; shard by mount
+            # root if contention becomes measurable. Cancellation never waits.
+            deadline = None
+            while True:
+                owner = current_subprocess_owner()
+                if owner is not None and owner.cancelled:
+                    raise InterruptedError("private filesystem helper cancelled")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if deadline is None:
+                        deadline = time.monotonic() + 120
+                    if time.monotonic() >= deadline:
+                        raise ContainerBoundaryError(ContainerErrorCategory.timeout, "private filesystem helper ledger is busy")
+                    time.sleep(0.05)
+            yield ledger, fd
+
+    def _remove_file_helper(self, path: Path) -> bool:
+        record = json.loads(_read_handoff(path, max_bytes=16384) or b"null")
+        name = path.stem
+        if (not re.fullmatch(r"coquic-steward-files-[0-9a-f]{32}", name)
+                or not isinstance(record, dict) or record.get("name") != name):
+            raise ValueError("invalid helper cleanup identity")
+        identity = record.get("id")
+        if identity is not None and not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise ValueError("invalid helper cleanup container ID")
+        labels = {"coquic.steward.owner": "steward",
+                  "coquic.steward.runtime": "session-files-v1",
+                  "coquic.steward.helper": name}
+        if record.get("labels") != labels:
+            raise ValueError("invalid helper cleanup labels")
+        target = identity or name
+        with use_subprocess_owner(None):
+            inspected = self.client.run(["container", "inspect", target],
+                                        timeout=10, max_output_bytes=16384)
+            if inspected.returncode:
+                absent = inspected.stderr.strip() == (
+                    f"Error response from daemon: No such container: {target}".encode()
+                )
+                if not absent:
+                    raise RuntimeError("helper inspection failed")
+                # A create request whose acknowledgement was lost may still
+                # arrive. It cannot execute, but its cleanup intent must survive.
+                return identity is not None
+            objects = json.loads(inspected.stdout)
+            if not isinstance(objects, list) or len(objects) != 1:
+                raise ValueError("ambiguous helper inspection")
+            found = objects[0]
+            actual_id = found.get("Id", "")
+            if (not re.fullmatch(r"[0-9a-f]{64}", actual_id)
+                    or (identity is not None and actual_id != identity)
+                    or found.get("Name") != "/" + name
+                    or found.get("Image") != record.get("image_digest")
+                    or any(found.get("Config", {}).get("Labels", {}).get(k) != v
+                           for k, v in labels.items())):
+                raise ValueError("helper cleanup ownership mismatch")
+            removed = self.client.run(["rm", "--force", actual_id],
+                                      timeout=10, max_output_bytes=4096)
+            absent = removed.stderr.strip() == (
+                f"Error response from daemon: No such container: {actual_id}".encode()
+            )
+            if removed.returncode and not absent:
+                raise RuntimeError("helper removal failed")
+            return True
+
+    def _reconcile_file_helpers(self, ledger: Path, fd: int) -> None:
+        for name in os.listdir(fd):
+            if not re.fullmatch(r"coquic-steward-files-[0-9a-f]{32}\.json", name):
+                continue
+            if not self._remove_file_helper(ledger / name):
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.ambiguous, "private filesystem helper creation remains unacknowledged"
+                )
+            os.unlink(name, dir_fd=fd)
+            os.fsync(fd)
+
+    def reconcile_file_helpers(self) -> None:
+        """Retry only daemon-journaled helper identities; never enumerate Docker."""
+        with self._file_helper_ledger() as (ledger, fd):
+            self._reconcile_file_helpers(ledger, fd)
+
     def _trusted_files(
         self, root: Path, operation: str, options: dict[str, Any],
         *, data: bytes | None = None,
     ) -> bytes:
-        """One-shot root helper; no credentials, network, socket, or worker code.
+        """Journal/create inert helper, acknowledge its ID, then attach/start.
 
-        Bind only a daemon-controlled mount root, never a worker-selected leaf.
-        The helper traverses all descendants through O_NOFOLLOW descriptors.
+        No credentials, network, socket, or worker code. Bind a daemon-controlled
+        mount root; all descendant accesses use O_NOFOLLOW descriptors.
         """
         if "," in str(root):
             raise ValueError("invalid helper bind path")
@@ -382,52 +475,63 @@ class TaskContainerRuntime:
         source += "\n_session_helper_main()\n"
         read_only = operation in {"read", "store"}
         helper_name = "coquic-steward-files-" + secrets.token_hex(16)
+        labels = {"coquic.steward.owner": "steward",
+                  "coquic.steward.runtime": "session-files-v1",
+                  "coquic.steward.helper": helper_name}
         argv = [
-            "run", "--rm", "--name", helper_name, "--interactive", "--network", "none", "--read-only",
+            "create", "--rm", "--name", helper_name, "--interactive", "--network", "none", "--read-only",
             "--user", "0:0", "--cap-drop", "ALL",
             "--cap-add", "DAC_OVERRIDE",
             *([] if read_only else ["--cap-add", "CHOWN", "--cap-add", "FOWNER"]),
             "--security-opt", "no-new-privileges:true", "--pids-limit", "32",
             "--memory", "256m", "--log-driver", "none",
-            "--label", "coquic.steward.owner=steward",
-            "--label", "coquic.steward.runtime=session-files-v1",
+            *[arg for key, value in labels.items() for arg in ("--label", f"{key}={value}")],
             "--mount", f"type=bind,src={root},dst=/boundary" + (",readonly" if read_only else ""),
             "--entrypoint", "python", self.config.image_digest, "-B", "-c", source,
             operation, "/boundary", json.dumps(options, sort_keys=True),
         ]
-        try:
-            result = self.client.run(
-                argv, input=data, timeout=120, max_output_bytes=16 * 1024 * 1024 + 4096,
-            )
-            if result.returncode:
-                # Never copy worker-controlled content into diagnostics.
-                raise ContainerBoundaryError(
-                    ContainerErrorCategory.rejected, "private filesystem boundary rejected handoff"
-                )
-            return result.stdout
-        except BaseException as exc:
-            # A cancelled/failed CLI can leave its server-side helper alive.
-            # Only this invocation knows the unguessable name; cleanup must not
-            # inherit the already-cancelled owner which killed the first CLI.
+        with self._file_helper_ledger() as (ledger, fd):
+            self._reconcile_file_helpers(ledger, fd)
+            path = ledger / (helper_name + ".json")
+            record = {"name": helper_name, "id": None, "labels": labels,
+                      "image_digest": self.config.image_digest, "root": str(root)}
+            _write_handoff(path, json.dumps(record, sort_keys=True).encode())
             try:
-                with use_subprocess_owner(None):
-                    removed = self.client.run(
-                        ["rm", "--force", helper_name], timeout=10, max_output_bytes=4096,
-                    )
-                absent = removed.stderr.strip() == (
-                    f"Error response from daemon: No such container: {helper_name}".encode()
+                created = self.client.run(argv, timeout=120, max_output_bytes=4096)
+                identity = created.stdout.decode("ascii").strip()
+                if created.returncode or not re.fullmatch(r"[0-9a-f]{64}", identity):
+                    raise ContainerBoundaryError(ContainerErrorCategory.rejected, "private filesystem helper creation rejected")
+                record["id"] = identity
+                _write_handoff(path, json.dumps(record, sort_keys=True).encode())
+                owner = current_subprocess_owner()
+                if owner is not None and owner.cancelled:
+                    raise InterruptedError("private filesystem helper start cancelled")
+                # The client linearizes Popen against owner cancellation too.
+                result = self.client.run(
+                    ["start", "--attach", "--interactive", identity], input=data,
+                    timeout=120, max_output_bytes=16 * 1024 * 1024 + 4096,
                 )
-                if removed.returncode and not absent:
-                    raise RuntimeError("helper removal failed")
-            except Exception as cleanup_error:
-                raise ContainerBoundaryError(
-                    ContainerErrorCategory.ambiguous, "private filesystem helper cleanup is unverified"
-                ) from cleanup_error
-            if isinstance(exc, subprocess.TimeoutExpired):
+                if result.returncode:
+                    raise ContainerBoundaryError(
+                        ContainerErrorCategory.rejected, "private filesystem boundary rejected handoff"
+                    )
+                return result.stdout
+            except subprocess.TimeoutExpired as exc:
                 raise ContainerBoundaryError(
                     ContainerErrorCategory.timeout, "private filesystem helper timed out"
                 ) from exc
-            raise
+            finally:
+                # Includes BaseException cancellation. Never inherit the cancelled
+                # owner and never discard an ambiguous create/removal receipt.
+                try:
+                    if not self._remove_file_helper(path):
+                        raise RuntimeError("helper creation remains unacknowledged")
+                    os.unlink(path.name, dir_fd=fd)
+                    os.fsync(fd)
+                except Exception as cleanup_error:
+                    raise ContainerBoundaryError(
+                        ContainerErrorCategory.ambiguous, "private filesystem helper cleanup is unverified"
+                    ) from cleanup_error
 
     def provision_task_paths(self) -> None:
         """Provision worktree/scratch as host daemon owner plus exact role GID."""

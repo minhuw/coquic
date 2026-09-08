@@ -46,10 +46,16 @@ class FakeDocker(SubprocessDockerClient):
         max_output_bytes: int | None = None,
     ):
         self.calls.append(argv)
-        if argv[0] == "run" and "session-files-v1" in " ".join(argv):
-            if argv[-3] == "read":
-                options = json.loads(argv[-1])
-                mount = argv[argv.index("--mount") + 1]
+        if argv[0] == "create" and "session-files-v1" in " ".join(argv):
+            self.helper_argv = argv
+            return subprocess.CompletedProcess(argv, 0, ("d" * 64).encode(), b"")
+        if argv == ["container", "inspect", "d" * 64]:
+            return subprocess.CompletedProcess(argv, 1, b"[]", ("Error response from daemon: No such container: " + "d" * 64).encode())
+        if argv == ["start", "--attach", "--interactive", "d" * 64]:
+            helper = self.helper_argv
+            if helper[-3] == "read":
+                options = json.loads(helper[-1])
+                mount = helper[helper.index("--mount") + 1]
                 root = Path(mount.split("src=", 1)[1].split(",dst=", 1)[0])
                 data = session_module._read_handoff(
                     root / options["session_id"] / options["name"],

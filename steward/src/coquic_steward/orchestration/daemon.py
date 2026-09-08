@@ -5119,7 +5119,11 @@ class StewardDaemon:
         return idle_fetch_provider_names(scheduler_state(self.config, self.store))
 
     def _fetch_signals(self, result: TickResult, providers: list[str]) -> None:
-        collections = collect_signal_items(self.config, provider_names=providers)
+        collections = collect_signal_items(
+            self.config,
+            provider_names=providers,
+            cursors=self.store.signal_collection_cursors(providers),
+        )
         for collection in collections:
             result.signal_fetches += 1
             fetch_run = collection.fetch.model_copy(
@@ -5139,6 +5143,7 @@ class StewardDaemon:
             saved_items, _signals, created_items = self.store.ingest_signal_collection(
                 fetch_run,
                 collection.items,
+                next_cursor=collection.next_cursor,
                 suppression_hours=(
                     provider_config.suppression_hours if provider_config else 24
                 ),
@@ -5205,7 +5210,14 @@ class StewardDaemon:
                 current_signal_ids = set(self._canonical_signal_ids(pending))
                 runs = self._control_loop_ledger.list_planner_runs()
                 previous_signal_ids = set(runs[-1].input_signal_ids) if runs else set()
-                if current_signal_ids != previous_signal_ids:
+                active_ids = {
+                    task.id for task in self.store.iter_tasks(statuses=ACTIVE_STATUSES)
+                }
+                previous_active_ids = set(runs[-1].active_task_ids) if runs else set()
+                if (
+                    current_signal_ids != previous_signal_ids
+                    or active_ids != previous_active_ids
+                ):
                     self._control_loop_ledger.reset_retry("planner")
                 else:
                     self._log(
@@ -5332,7 +5344,7 @@ class StewardDaemon:
             }
             selected_item_ids_by_dedupe = {
                 dedupe_key: selected_signal_item_ids(
-                    spec.metadata or {}, planner_run.consumed_item_ids
+                    spec.metadata or {}, [item.id for item in inbox_items]
                 )
                 for spec, dedupe_key in planner_run.planned
             }
@@ -5640,6 +5652,8 @@ def wait_for_scheduler_event(
         state = poll_result.state
         if state.pending_wakeups:
             return SchedulerTrigger(reason="wakeup", providers=[])
+        if state.planner_retry_due:
+            return SchedulerTrigger(reason="planner-retry", providers=[])
         due_providers = due_provider_names(poll_result)
         if due_providers:
             return SchedulerTrigger(reason="provider-due", providers=due_providers)
@@ -5660,6 +5674,10 @@ def wait_for_scheduler_event(
                 next_due = min(
                     [due for due in (next_due, min(idle_due_at)) if due is not None]
                 )
+        if state.planner_retry_at is not None:
+            next_due = min(
+                due for due in (next_due, state.planner_retry_at) if due is not None
+            )
         sleep_for = config.scheduler_wait_interval_sec
         if next_due is not None:
             sleep_for = min(

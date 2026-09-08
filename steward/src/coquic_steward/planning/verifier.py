@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..agents.catalog import (
     AGENTS,
@@ -42,6 +42,9 @@ class ActiveTaskSummary(BaseModel):
 
 
 class ProposedTask(BaseModel):
+    # Retain maintained defaults; unknown executable proposal fields fail closed.
+    model_config = ConfigDict(extra="forbid")
+
     dedupe_key: str
     kind: TaskKind
     worker: WorkerKind
@@ -58,6 +61,7 @@ _RESERVED_ALLOCATION_METADATA_KEYS = frozenset(
         EXECUTION_MODE_METADATA_KEY,
         EFFECT_RESULT_METADATA_KEY,
         LEGACY_EFFECT_RESULT_METADATA_KEY,
+        "source_context",
     }
 )
 
@@ -125,7 +129,24 @@ class PlanVerifier:
                 invalid_output=True,
                 diagnostics={"reason_code": "invalid_output", "message": "planner output is not JSON"},
             )
-        consumed = _consumed_item_ids(decoded, signals)
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) - {"tasks", "consumed_item_ids"}
+            or not _valid_signal_ids(
+                decoded.get("consumed_item_ids", []),
+                _evidence_ids(signals),
+                max_items=len(signals.items),
+                allow_empty=True,
+            )
+        ):
+            return VerifiedPlan(
+                invalid_output=True,
+                diagnostics={
+                    "reason_code": "invalid_output",
+                    "message": "invalid planner envelope or consumed IDs",
+                },
+            )
+        consumed = decoded.get("consumed_item_ids", [])
         proposals = decoded.get("tasks") if isinstance(decoded, dict) else None
         if not isinstance(proposals, list):
             return VerifiedPlan(
@@ -248,29 +269,22 @@ def summarize_active_tasks(tasks) -> list[ActiveTaskSummary]:
 
 
 def _evidence_ids(signals: ProjectSignals) -> set[str]:
-    ids = {"project"}
-    for item in signals.items:
-        ids.add(item.id)
-    return ids
+    return {item.id for item in signals.items}
 
 
-def _consumed_item_ids(
-    decoded: object, signals: ProjectSignals
-) -> list[str]:
-    if not isinstance(decoded, dict):
-        return []
-    values = decoded.get("consumed_item_ids")
-    if not isinstance(values, list):
-        return []
-    allowed = {item.id for item in signals.items}
-    consumed: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, str) or value not in allowed or value in seen:
-            continue
-        consumed.append(value)
-        seen.add(value)
-    return consumed
+def _valid_signal_ids(
+    values: object, allowed: set[str], *, max_items: int = 8, allow_empty: bool = False
+) -> bool:
+    return (
+        isinstance(values, list)
+        and (allow_empty or bool(values))
+        and len(values) <= max_items
+        and all(
+            isinstance(value, str) and bool(value.strip()) and value in allowed
+            for value in values
+        )
+        and len(set(values)) == len(values)
+    )
 
 
 def _proposal_dedupe(item: object) -> str | None:
@@ -381,12 +395,24 @@ def _verified_proposal_with_reason(
         return None, "invalid_prompt"
     if not proposed.evidence:
         return None, "invalid_missing_evidence"
-    if any(evidence not in evidence_ids for evidence in proposed.evidence):
+    if not _valid_signal_ids(proposed.evidence, evidence_ids):
         return None, "invalid_evidence_id"
     if not _metadata_is_bounded(proposed.metadata):
         return None, "policy_metadata_too_large"
     if any(key in proposed.metadata for key in _RESERVED_ALLOCATION_METADATA_KEYS):
         return None, "policy_reserved_metadata"
+    selected = proposed.metadata.get("selected_signal_item_ids", proposed.evidence)
+    if (
+        not _valid_signal_ids(selected, evidence_ids)
+        or set(selected) != set(proposed.evidence)
+        or (
+            "evidence" in proposed.metadata
+            and proposed.metadata["evidence"] != proposed.evidence
+        )
+    ):
+        return None, "invalid_selected_evidence"
+    if any(sum(item.id == value for item in signals.items) != 1 for value in selected):
+        return None, "invalid_ambiguous_evidence"
     policy_kind = proposed.kind in PLANNER_DISPATCH_POLICY.kinds
     policy_worker = proposed.worker in PLANNER_DISPATCH_POLICY.workers
     policy_priority = proposed.priority in PLANNER_DISPATCH_POLICY.priorities
@@ -458,8 +484,8 @@ def _task_spec_from_proposal(
     metadata["dedupe_key"] = proposed.dedupe_key
     metadata["evidence"] = list(proposed.evidence)
     source_context = _source_context(signals.items, proposed)
-    if source_context:
-        metadata["source_context"] = source_context
+    metadata["source_context"] = source_context
+    metadata["selected_signal_item_ids"] = source_context["selected_signal_item_ids"]
     title = proposed.title.strip()
     prompt = proposed.prompt.strip()
     if canonical_remote_write is not None:
@@ -505,7 +531,7 @@ def _task_spec_from_proposal(
 
 def _metadata_is_bounded(metadata: dict[str, Any]) -> bool:
     try:
-        encoded = json.dumps(metadata)
+        encoded = json.dumps(metadata, allow_nan=False)
     except (TypeError, ValueError):
         return False
     return len(encoded) <= 4096
@@ -596,7 +622,7 @@ def _selected_signal_items(
         for item in items
         if item.id in selected_ids
     ]
-    return matched[:8]
+    return matched
 
 
 def _signal_items_by_id(ids: list[str], items: list[SignalItem]) -> list[dict[str, Any]]:

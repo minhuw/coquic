@@ -66,7 +66,20 @@ def scheduler_state(config: StewardConfig, store: TaskStore) -> SchedulerPollRes
     snapshot = store.scheduler_snapshot(config.enabled_signals)
     now = _now()
     source_active = snapshot.source_active
+    planner_retry_at = (
+        snapshot.planner_retry_at
+        if snapshot.pending_signal
+        and not snapshot.planning_paused
+        # The verifier counts every active/queued task against this ceiling.
+        and (
+            snapshot.source_active + snapshot.source_queued
+            + snapshot.integration_active + snapshot.integration_queued
+        ) < min(config.limits.max_active_tasks, 16)
+        else None
+    )
     state = SchedulerState(
+        planner_retry_at=planner_retry_at,
+        planner_retry_due=planner_retry_at is not None and planner_retry_at <= now,
         source_active=source_active,
         source_capacity=max(0, config.limits.max_active_tasks - source_active),
         source_queued=snapshot.source_queued,

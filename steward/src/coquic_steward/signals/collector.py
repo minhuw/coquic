@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from ..core.config import StewardConfig
-from ..core.models import ProjectSignals, SignalFetchRun, SignalFetchStatus, SignalItem, utc_now
+from ..core.models import ProjectSignals, SignalCollectionCursor, SignalFetchRun, SignalFetchStatus, SignalItem, utc_now
 from .providers import (
     CodacyProvider,
     CodeScanningProvider,
@@ -45,6 +45,7 @@ PROVIDER_TYPES: dict[str, type[_SignalProvider]] = {
 class SignalCollection:
     fetch: SignalFetchRun
     items: list[SignalItem]
+    next_cursor: SignalCollectionCursor | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,7 @@ def collect_signal_items(
     config: StewardConfig,
     providers: list[_SignalProvider] | None = None,
     provider_names: list[str] | None = None,
+    cursors: dict[str, SignalCollectionCursor | None] | None = None,
 ) -> list[SignalCollection]:
     names = tuple(provider_names) if provider_names is not None else config.enabled_signals
     selected = (
@@ -173,11 +175,18 @@ def collect_signal_items(
     collections: list[SignalCollection] = []
     for provider in selected:
         started_at = utc_now()
+        cursor = (cursors or {}).get(provider.name)
+        next_cursor = cursor
         try:
             provider_config = config.signal_providers.get(provider.name)
             max_items = provider_config.max_items if provider_config else 12
-            result = provider.collect(config, max_items=max_items)
-            items = result.items
+            result = (
+                provider.collect(config, max_items=max_items, cursor=cursor)
+                if cursor is not None
+                else provider.collect(config, max_items=max_items)
+            )
+            next_cursor = result.next_cursor
+            items = [] if result.error else result.items
             error = result.error
             summary = result.summary
             has_more = result.has_more
@@ -204,7 +213,7 @@ def collect_signal_items(
             for item in items
         ]
         collections.append(
-            SignalCollection(fetch=fetch, items=items)
+            SignalCollection(fetch=fetch, items=items, next_cursor=next_cursor)
         )
     return collections
 

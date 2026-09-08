@@ -18,7 +18,7 @@ from urllib.request import (
 
 from ..core.config import StewardConfig
 from ..core.github_auth import github_cli_environment
-from ..core.models import SignalItem
+from ..core.models import SignalCollectionCursor, SignalItem
 from ..core.subprocesses import run_command
 
 SIGNAL_TIMEOUT_SECONDS = 15.0
@@ -33,6 +33,7 @@ class ProviderSignalResult:
     summary: str = ""
     error: str | None = None
     has_more: bool = False
+    next_cursor: SignalCollectionCursor | None = None
 
 
 class ProviderRevalidationError(RuntimeError):
@@ -701,31 +702,45 @@ class CodeScanningProvider:
     name = "code-scanning"
 
     def collect(
-        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS,
+        cursor: SignalCollectionCursor | None = None,
     ) -> ProviderSignalResult:
+        size = max(1, min(max_items, 100))
+        page = cursor.page if cursor is not None and cursor.page_size == size else 1
         codeql = run_command(
             [
-                "gh",
-                "api",
-                "-X",
-                "GET",
-                f"repos/{config.github_repository}/code-scanning/alerts?state=open&per_page={max_items}",
+                "gh", "api", "-X", "GET",
+                f"repos/{config.github_repository}/code-scanning/alerts?state=open&per_page={size}&page={page}&sort=created&direction=asc",
             ],
             cwd=config.repo_root,
             timeout=SIGNAL_TIMEOUT_SECONDS,
             env=github_cli_environment(config),
         )
         if not codeql.ok:
-            return ProviderSignalResult(error=codeql.stderr)
+            return ProviderSignalResult(error=codeql.stderr or "Code scanning request failed", next_cursor=cursor)
         try:
-            payload = json.loads(codeql.stdout or "[]")
+            payload = json.loads(codeql.stdout)
         except json.JSONDecodeError:
-            payload = []
-        items = [_code_scanning_item(item) for item in payload[:max_items]]
+            return ProviderSignalResult(error="Code scanning response was not valid JSON")
+        if (
+            not isinstance(payload, list) or len(payload) > size
+            or any(
+                not isinstance(item, dict)
+                or type(item.get("number")) is not int or item["number"] < 1
+                for item in payload
+            )
+        ):
+            return ProviderSignalResult(error="Code scanning response was not a bounded alert list")
+        items = [_code_scanning_item(item) for item in payload]
+        has_more = len(payload) == size
         return ProviderSignalResult(
             items=items,
             summary=_summary_from_items("CodeQL", items),
-            has_more=len(payload) > len(items),
+            has_more=has_more,
+            next_cursor=(
+                SignalCollectionCursor(page=page + 1, page_size=size)
+                if has_more and page < 10000 else None
+            ),
         )
 
     def _revalidate_signal(
@@ -815,62 +830,85 @@ class CodacyProvider:
     name = "codacy"
 
     def collect(
-        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS,
+        cursor: SignalCollectionCursor | None = None,
     ) -> ProviderSignalResult:
         owner, repository = config.github_repository.split("/", 1)
         issue_result = self._collect_issue_search(
-            owner,
-            repository,
-            os.getenv("CODACY_API_TOKEN"),
-            max_items=max_items,
+            owner, repository, os.getenv("CODACY_API_TOKEN"),
+            max_items=max_items, cursor=cursor,
         )
         if issue_result.error is None:
             return issue_result
-        return self._collect_public_analysis(owner, repository, config, issue_result.error)
+        fallback = self._collect_public_analysis(owner, repository, config, issue_result.error)
+        return ProviderSignalResult(
+            summary=fallback.summary, has_more=fallback.has_more,
+            error=fallback.error or issue_result.error,
+            next_cursor=issue_result.next_cursor,
+        )
 
     def _collect_issue_search(
-        self,
-        owner: str,
-        repository: str,
-        token: str | None,
-        *,
-        max_items: int,
+        self, owner: str, repository: str, token: str | None, *, max_items: int,
+        cursor: SignalCollectionCursor | None = None,
     ) -> ProviderSignalResult:
+        size = max(1, min(max_items, 100))
+        if cursor is not None and cursor.page_size != size:
+            cursor = None
         url = (
             f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
             f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}"
-            f"/issues/search?limit={max_items}"
+            f"/issues/search?limit={size}"
         )
+        if cursor is not None and cursor.token is not None:
+            url += f"&cursor={quote(cursor.token, safe='')}"
         headers = {"content-type": "application/json"}
         if token:
             headers["api-token"] = token
         request = Request(
-            url,
-            data=json.dumps({"levels": ["Error", "Warning"]}).encode("utf-8"),
-            headers=headers,
-            method="POST",
+            url, data=json.dumps({"levels": ["Error", "Warning"]}).encode("utf-8"),
+            headers=headers, method="POST",
         )
         try:
-            with _open_codacy_request(
-                request, timeout=SIGNAL_TIMEOUT_SECONDS
-            ) as response:
-                payload = json.loads(
-                    response.read().decode("utf-8", errors="replace") or "{}"
-                )
-        except (
-            HTTPError,
-            URLError,
-            TimeoutError,
-            OSError,
-            json.JSONDecodeError,
-        ) as exc:
+            with _open_codacy_request(request, timeout=SIGNAL_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
             return ProviderSignalResult(error=str(exc))
-        data = payload.get("data", []) if isinstance(payload, dict) else []
-        items = [_codacy_item(item) for item in data[:max_items]]
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            # An expired/invalid token restarts safely; transient errors replay.
+            restart = isinstance(exc, HTTPError) and exc.code in {400, 422}
+            return ProviderSignalResult(error=str(exc), next_cursor=None if restart else cursor)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if (
+            not isinstance(data, list) or len(data) > size
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("filePath") or item.get("filename"), str)
+                or not (item.get("filePath") or item.get("filename"))
+                for item in data
+            )
+        ):
+            return ProviderSignalResult(error="Codacy response was not a bounded issue list")
+        # Repository contract: pagination.cursor is the next issues/search cursor.
+        pagination = payload.get("pagination", {})
+        if not isinstance(pagination, dict) or set(pagination) - {"cursor", "limit", "total"}:
+            return ProviderSignalResult(error="Codacy response has unknown pagination")
+        token = pagination.get("cursor")
+        if token is not None and (
+            not isinstance(token, str) or not token or len(token) > 2048
+            or (cursor is not None and token == cursor.token) or not data
+        ):
+            return ProviderSignalResult(error="Codacy response has invalid pagination cursor")
+        if "cursor" not in pagination and len(data) == size:
+            return ProviderSignalResult(error="Codacy full page is missing pagination")
+        items = [_codacy_item(item) for item in data]
+        page = cursor.page if cursor is not None else 1
         return ProviderSignalResult(
-            items=items,
-            summary=_summary_from_items("Codacy", items),
-            has_more=len(data) > len(items),
+            items=items, summary=_summary_from_items("Codacy", items),
+            has_more=token is not None,
+            next_cursor=(
+                SignalCollectionCursor(page=page + 1, page_size=size, token=token)
+                if token is not None and page < 10000 else None
+            ),
         )
 
     def _collect_public_analysis(

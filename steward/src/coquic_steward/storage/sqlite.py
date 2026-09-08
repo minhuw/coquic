@@ -71,7 +71,9 @@ from ..core.models import (
     EXECUTION_MODE_METADATA_KEY,
     SchedulerWakeup,
     SchedulerWakeupStatus,
+    SignalCollectionCursor,
     SignalFetchRun,
+    SignalFetchStatus,
     SignalItem,
     SignalItemStatus,
     TaskIteration,
@@ -4502,6 +4504,26 @@ class SQLiteTaskStore:
             connection=raw_connection,
         )
 
+    def signal_collection_cursors(
+        self, providers: Iterable[str]
+    ) -> dict[str, SignalCollectionCursor | None]:
+        cursors: dict[str, SignalCollectionCursor | None] = {}
+        with Session(self.engine) as session:
+            for provider in dict.fromkeys(providers):
+                value = session.scalar(
+                    text("SELECT value FROM control_loop_meta WHERE key=:key"),
+                    {"key": f"signal_collection_cursor:{provider}"},
+                )
+                try:
+                    cursors[provider] = (
+                        SignalCollectionCursor.model_validate_json(value)
+                        if value is not None else None
+                    )
+                except ValueError:
+                    # Corrupt/outdated local state restarts at the first page, never skips.
+                    cursors[provider] = None
+        return cursors
+
     def ingest_signal_collection(
         self,
         fetch: SignalFetchRun,
@@ -4509,6 +4531,7 @@ class SQLiteTaskStore:
         *,
         wakeup: object | None = None,
         suppression_hours: int = 24,
+        next_cursor: SignalCollectionCursor | None = None,
     ):
         """Persist one normalized provider collection atomically.
 
@@ -4553,9 +4576,18 @@ class SQLiteTaskStore:
 
                 raw_connection = session.connection().connection.driver_connection
                 raw_connection.row_factory = sqlite3.Row
+                # A stable signal may be observed in many fetches. Observations
+                # are fetch-scoped, while scheduler dedupe keeps the fingerprint.
                 result = self.control_loop.ingest_fetch(
                     fetch_run,
-                    items,
+                    [
+                        item.model_copy(update={
+                            "id": "observation-" + hashlib.sha256(
+                                f"{fetch.id}:{item.id}".encode("utf-8")
+                            ).hexdigest(),
+                        })
+                        for item in items
+                    ],
                     wakeup=wakeup,
                     connection=raw_connection,
                 )
@@ -4563,6 +4595,21 @@ class SQLiteTaskStore:
                     self._record_wakeup_in_session(session, new_wakeup)
                 if existing_fetch is None:
                     self.add_signal_fetch_run(fetch_run, _session=session)
+                    # Error collections may retain or reset a cursor, never advance it.
+                    if next_cursor is None or (
+                        fetch_run.status == SignalFetchStatus.ok and not fetch_run.error
+                    ):
+                        key = f"signal_collection_cursor:{fetch.provider}"
+                        if next_cursor is None:
+                            session.execute(
+                                text("DELETE FROM control_loop_meta WHERE key=:key"),
+                                {"key": key},
+                            )
+                        else:
+                            session.execute(
+                                text("INSERT INTO control_loop_meta(key,value) VALUES(:key,:value) ON CONFLICT(key) DO UPDATE SET value=excluded.value"),
+                                {"key": key, "value": next_cursor.model_dump_json()},
+                            )
                 session.commit()
             except Exception:
                 session.rollback()
@@ -4815,6 +4862,10 @@ class SQLiteTaskStore:
                 session.flush()
                 raw_connection = session.connection().connection.driver_connection
                 raw_connection.row_factory = sqlite3.Row
+                no_progress = not planned_item_ids and not superseded_rows
+                retry_key = schedule_retry_key or ("planner" if no_progress else None)
+                if no_progress and state == "succeeded":
+                    diagnostics = {**diagnostics, "reason_code": "planner_no_progress"}
                 completed = self.control_loop.complete_planner_run(
                     planner_run_id,
                     dispositions,
@@ -4834,8 +4885,10 @@ class SQLiteTaskStore:
                         else ()
                     ),
                     artifact_sources=artifact_sources,
-                    reset_retry_key="planner" if state == "succeeded" else None,
-                    schedule_retry_key=schedule_retry_key,
+                    reset_retry_key=(
+                        "planner" if state == "succeeded" and retry_key is None else None
+                    ),
+                    schedule_retry_key=retry_key,
                     connection=raw_connection,
                 )
                 session.commit()
@@ -7572,6 +7625,13 @@ class SQLiteTaskStore:
                         for row in latest_rows
                     }
                 )
+            retry_at = session.scalar(text(
+                "SELECT eligible_at FROM control_loop_retry WHERE key='planner'"
+            ))
+            planning_paused = bool(session.scalar(text(
+                "SELECT EXISTS(SELECT 1 FROM steward_resource_pressure WHERE id=1 AND state='resource_pressure') "
+                "OR EXISTS(SELECT 1 FROM control_loop_meta WHERE key='planning_blocked' AND value='1')"
+            )))
             pending_wakeups = tuple(
                 row_to_scheduler_wakeup(row, path_codec=self.path_codec)
                 for row in pending_wakeup_rows
@@ -7589,6 +7649,11 @@ class SQLiteTaskStore:
             pending_wakeups=pending_wakeups,
             recent_wakeups=recent_wakeups,
             pending_signal=pending_signal,
+            planner_retry_at=(
+                datetime.fromisoformat(retry_at.replace("Z", "+00:00"))
+                if retry_at else None
+            ),
+            planning_paused=planning_paused,
             latest_fetches=latest_fetches,
         )
 

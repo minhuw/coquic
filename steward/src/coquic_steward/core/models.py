@@ -1173,6 +1173,15 @@ class SignalItem(BaseModel):
     source_fetch_id: str | None = None
 
 
+class SignalCollectionCursor(BaseModel):
+    """Bounded local continuation state; never an archive or provider payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    page: int = Field(default=1, ge=1, le=10000)
+    page_size: int = Field(ge=1, le=100)
+    token: str | None = Field(default=None, min_length=1, max_length=2048)
+
+
 class SignalFetchRun(BaseModel):
     id: str = Field(default_factory=new_signal_fetch_id)
     provider: str
@@ -1221,6 +1230,8 @@ class SchedulerStoreSnapshot:
     pending_wakeups: tuple[SchedulerWakeup, ...] = ()
     recent_wakeups: tuple[SchedulerWakeup, ...] = ()
     pending_signal: bool = False
+    planner_retry_at: datetime | None = None
+    planning_paused: bool = False
     latest_fetches: dict[str, SignalFetchRun | None] = field(default_factory=dict)
 
     @property
@@ -1249,6 +1260,8 @@ class SchedulerProviderState(BaseModel):
 
 
 class SchedulerState(BaseModel):
+    planner_retry_at: datetime | None = None
+    planner_retry_due: bool = False
     source_active: int = 0
     source_capacity: int = 0
     source_queued: int = 0

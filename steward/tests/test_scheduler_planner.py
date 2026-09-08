@@ -1928,7 +1928,7 @@ def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
     store.request_wakeup("task.status", {"task_id": "task-1"})
     fetched: list[list[str]] = []
 
-    def fake_collect(_config, *, provider_names=None):
+    def fake_collect(_config, *, provider_names=None, cursors=None):
         fetched.append(list(provider_names or []))
         return []
 
@@ -1965,7 +1965,7 @@ def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
     )
     fetched: list[list[str]] = []
 
-    def fake_collect(_config, *, provider_names=None):
+    def fake_collect(_config, *, provider_names=None, cursors=None):
         fetched.append(list(provider_names or []))
         return []
 
@@ -2001,7 +2001,7 @@ def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
     )
     fetched: list[list[str]] = []
 
-    def fake_collect(_config, *, provider_names=None):
+    def fake_collect(_config, *, provider_names=None, cursors=None):
         fetched.append(list(provider_names or []))
         return []
 
@@ -2038,7 +2038,7 @@ def test_daemon_fetches_selected_providers_from_force_wakeup(
     store.request_wakeup("signal.fetch", {"providers": ["codacy"]})
     fetched: list[list[str]] = []
 
-    def fake_collect(_config, *, provider_names=None):
+    def fake_collect(_config, *, provider_names=None, cursors=None):
         fetched.append(list(provider_names or []))
         return []
 
@@ -2211,6 +2211,8 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
     assert due_provider_names(initial) == list(config.enabled_signals)
     assert initial.idle is True
     assert set(initial.state.model_dump()) == {
+        "planner_retry_at",
+        "planner_retry_due",
         "source_active",
         "source_capacity",
         "source_queued",
@@ -3073,7 +3075,7 @@ def test_plan_verifier_rejects_mismatched_feature_issue_evidence() -> None:
     assert verified.planned == []
     assert verified.consumed_item_ids == []
 
-def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
+def test_plan_verifier_rejects_unknown_proposed_main_write_flags() -> None:
     signals = ProjectSignals(
         repository="minhuw/coquic",
         items=[
@@ -3110,8 +3112,9 @@ def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
         [],
     )
 
-    assert len(verified.planned) == 1
-    assert verified.planned[0][0].allow_main_write is False
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+    assert verified.dispositions[0].reason_code == "invalid_shape"
 
 def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
     class FakeProvider(GitHubActionsCiProvider):

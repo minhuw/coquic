@@ -255,7 +255,9 @@ def render_planner_prompt(
     payload = {
         "repository": config.github_repository,
         "enabled_signals": list(config.enabled_signals),
-        "signals": signals.model_dump(mode="json"),
+        "signals": signals.model_dump(
+            mode="json", exclude={"items", "fetches", "summary"}
+        ),
         "signal_items": [item.model_dump(mode="json") for item in signals.items],
         "signal_fetches": [fetch.model_dump(mode="json") for fetch in signals.fetches],
         "active_tasks": [task.model_dump(mode="json") for task in active_tasks],

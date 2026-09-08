@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -120,8 +121,15 @@ def test_git_environment_quotes_paths_and_sets_strict_ssh_options(
         "-o",
         "GlobalKnownHostsFile=/dev/null",
     ]
+    assert "first-token" not in git_environment(config)["GIT_SSH_COMMAND"]
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH is not installed")
+def test_git_environment_openssh_config_parser_integration(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    command = shlex.split(git_environment(config)["GIT_SSH_COMMAND"])
     effective = subprocess.run(
-        [*command, "-G", "github.com"],
+        [*command, "-F", "/dev/null", "-G", "github.com"],
         check=True,
         capture_output=True,
         text=True,
@@ -129,7 +137,9 @@ def test_git_environment_quotes_paths_and_sets_strict_ssh_options(
     options = dict(line.split(maxsplit=1) for line in effective)
     assert options["userknownhostsfile"] == str(config.git_known_hosts_path)
     assert options["globalknownhostsfile"] == "/dev/null"
-    assert "first-token" not in git_environment(config)["GIT_SSH_COMMAND"]
+    assert options["stricthostkeychecking"] == "true"
+    assert options["identitiesonly"] == "yes"
+    assert options["batchmode"] == "yes"
 
 
 @pytest.mark.parametrize(

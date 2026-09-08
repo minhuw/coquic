@@ -438,7 +438,10 @@ def _write_input(
         stream.flush()
     except TimeoutError:
         raise
-    except (BrokenPipeError, OSError):
+    except (BrokenPipeError, ConnectionResetError):
+        # The child stopped accepting input; still drain its output and exit status.
+        pass
+    except OSError:
         if not suppress_errors:
             raise
     finally:

@@ -77,9 +77,9 @@ def default_gates(worktree: Path) -> tuple[tuple[str, list[str]], ...]:
                 "env",
                 "COQUIC_CLANG_TIDY_IN_NIX=1",
                 "COQUIC_CLANG_TIDY_JOBS=2",
-                "pre-commit",
-                "run",
-                "--all-files",
+                "bash",
+                "-euc",
+                'exec pre-commit run --all-files --config "$COQUIC_PRE_COMMIT_CONFIG"',
             ],
         ),
         # The pinned image owns this launcher; do not resolve it through a

@@ -39,6 +39,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Reclaim unused hosted-runner SDK space
+        run: |
+          df -h /
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
         with:

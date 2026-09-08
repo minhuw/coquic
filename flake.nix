@@ -2258,6 +2258,7 @@ EOF
         banner = "coquic lint shell ready. Run: pre-commit run coquic-clang-tidy";
         extraShellHook = ''
           export COQUIC_CLANG_TIDY_IN_NIX=1
+          export COQUIC_PRE_COMMIT_CONFIG=${pre-commit-shell.config.configFile}
         '';
         extraPackages =
           [

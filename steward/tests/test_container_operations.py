@@ -1643,10 +1643,33 @@ def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
         "env",
         "COQUIC_CLANG_TIDY_IN_NIX=1",
         "COQUIC_CLANG_TIDY_JOBS=2",
-        "pre-commit",
-        "run",
-        "--all-files",
+        "bash",
+        "-euc",
+        'exec pre-commit run --all-files --config "$COQUIC_PRE_COMMIT_CONFIG"',
     ]
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_pre_commit_gate_uses_candidate_config_or_fails_closed(tmp_path, monkeypatch, configured):
+    pre_commit = tmp_path / "pre-commit"
+    pre_commit.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    pre_commit.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.delenv("COQUIC_PRE_COMMIT_CONFIG", raising=False)
+    config = str(tmp_path / "candidate config.json")
+    if configured:
+        monkeypatch.setenv("COQUIC_PRE_COMMIT_CONFIG", config)
+    command = default_gates(tmp_path)[3][1][-3:]
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    if configured:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["run", "--all-files", "--config", config]
+    else:
+        assert result.returncode != 0
+        assert "COQUIC_PRE_COMMIT_CONFIG: unbound variable" in result.stderr
+        assert result.stdout == ""
+    assert not (tmp_path / ".pre-commit-config.yaml").exists()
+
 
 def test_validation_index_includes_untracked_files_without_mutating_worker_index(
     repo: Path,

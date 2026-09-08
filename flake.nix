@@ -189,6 +189,7 @@
           pkgs.gzip
           pkgs.nix
           pkgs.pre-commit
+          pkgs.util-linux
           pkgs.uv
           zig
           stewardPython

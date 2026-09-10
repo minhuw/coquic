@@ -2261,6 +2261,21 @@ class TaskArchive:
             value["completedAt"] = value["updatedAt"]
         else:
             value.setdefault("completedAt", None)
+        relative = f"pipelines/{identifier}/pipeline.json"
+        existing_path = self.task_path(task_id, relative)
+        self._assert_safe_archive_path(existing_path, target="file")
+        if existing_path.exists():
+            try:
+                existing = json.loads(existing_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ArchiveValidationError("pipeline.json is not valid JSON") from exc
+            _validate_pipeline_document(existing)
+            if existing["taskId"] != task_id or existing["pipelineId"] != identifier:
+                raise ArchiveConflictError("pipeline identity does not match directory")
+            # Ledger pipelines omit archive-owned graph fields. Refresh only the
+            # supplied fields; never reconstruct references from orphan files.
+            for key in ("inputs", "patches", "validations", "reviews", "runs", "integration"):
+                value.setdefault(key, existing[key])
         for key in ("inputs", "patches", "validations", "reviews", "runs"):
             value.setdefault(key, [])
         if runs is not None:
@@ -2289,7 +2304,6 @@ class TaskArchive:
             raise ArchiveConflictError("pipeline task id does not match directory")
         value = {key: item for key, item in value.items() if key in PIPELINE_KEYS}
         _validate_pipeline_document(value)
-        relative = f"pipelines/{identifier}/pipeline.json"
         path = self.write_json(task_id, relative, value)
         self._add_task_pipeline_reference(task_id, identifier, int(value["ordinal"]))
         return path

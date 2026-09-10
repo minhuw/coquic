@@ -1342,3 +1342,149 @@ def test_seal_crash_before_completion_event_keeps_retry_consistent(
     assert manifest["completionIdentity"] == "completion-second"
     assert task["terminalStatusObservedAt"] == manifest["completedAt"]
     assert archive.verify("task-safe")
+
+
+@pytest.mark.parametrize("cleared_field", [None, "reviews", "validations", "runs"])
+def test_pipeline_ledger_refresh_preserves_archive_graph_through_seal(
+    config: StewardConfig, cleared_field: str | None
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="archive graph refresh",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(task.id, pipeline.id, session.id, role="implementation")
+    archive = TaskArchive(config.tasks_dir)
+    archive.materialize_ledger(task, pipeline, [run])
+    archive.materialize_review(
+        task.id, pipeline.id,
+        {"reviewId": "review-safe", "state": "available", "verdict": "approve"},
+    )
+    validation_path = archive.materialize_validation(
+        task.id, pipeline.id,
+        {
+            "validationId": "validation-safe",
+            "command": "pytest",
+            "state": "completed",
+            "result": "pass",
+            "completedAt": COMPLETED_AT,
+        },
+        output="passed\n",
+    )
+    descriptor = json.loads(validation_path.read_text())["output"]
+    relative = f"pipelines/{pipeline.id}/pipeline.json"
+    path = archive.task_path(task.id, relative)
+    document = json.loads(path.read_text())
+    document.update(
+        inputs=[descriptor], patches=[descriptor],
+        integration={
+            "state": "succeeded", "resultPath": None, "commit": "a" * 40,
+            "startedAt": document["startedAt"], "completedAt": COMPLETED_AT,
+        },
+    )
+    archive.materialize_pipeline(task.id, document)
+    graph_fields = ("inputs", "patches", "validations", "reviews", "runs", "integration")
+    expected = {key: document[key] for key in graph_fields}
+
+    # Both ledger refresh APIs must retain references created by archive writers.
+    for _ in range(2):
+        archive.materialize_ledger(task, pipeline, [run])
+        archive.materialize_pipeline(task.id, pipeline)
+        assert {key: json.loads(path.read_text())[key] for key in graph_fields} == expected
+
+    completed_run = store.transition_run(run.id, "succeeded", exit_code=0)
+    archive.materialize_run(task.id, pipeline.id, completed_run)
+    completed_pipeline = store.transition_pipeline(pipeline.id, "succeeded", phase="complete")
+    # A supplied ledger wins over both an incoming runs field and retained runs.
+    incoming = pipeline.model_dump(mode="json")
+    incoming["runs"] = []
+    archive.materialize_pipeline(task.id, incoming, runs=[completed_run])
+    assert json.loads(path.read_text())["runs"][0]["state"] == "succeeded"
+
+    terminal = completed_pipeline.model_dump(mode="json")
+    if cleared_field == "runs":
+        archive.materialize_pipeline(task.id, terminal, runs=[])
+    else:
+        if cleared_field is not None:
+            terminal[cleared_field] = []
+        archive.materialize_pipeline(task.id, terminal, runs=[completed_run])
+    for _ in range(2):
+        archive.materialize_pipeline(task.id, completed_pipeline)
+        if cleared_field is None:
+            archive.materialize_pipeline(task.id, completed_pipeline, runs=[completed_run])
+    terminal = json.loads(path.read_text())
+    if cleared_field is not None:
+        assert terminal[cleared_field] == []
+    for key in graph_fields:
+        if key != "runs" and key != cleared_field:
+            assert terminal[key] == expected[key]
+
+    task_document = json.loads(archive.task_path(task.id, "task.json").read_text())
+    task_document["status"] = "succeeded"
+    archive.write_json(task.id, "task.json", task_document)
+    seal_kwargs = dict(
+        completion_identity="completion-safe", completed_at=COMPLETED_AT,
+        external_actions_complete=True, writer_final=True,
+    )
+    if cleared_field is None:
+        archive.seal(task.id, "succeeded", **seal_kwargs)
+        assert archive.verify(task.id)
+    else:
+        label = {"reviews": "review", "validations": "validation", "runs": "run"}[cleared_field]
+        with pytest.raises(ArchiveSealError, match=f"{label} graph coverage is not exact"):
+            archive.seal(task.id, "succeeded", **seal_kwargs)
+        assert not archive.task_path(task.id, "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    "corruption", ["json", "utf8", "shape", "references", "taskId", "pipelineId", "symlink", "dangling", "parent", "directory"]
+)
+def test_pipeline_refresh_rejects_invalid_existing_metadata_without_mutation(
+    tmp_path: Path, corruption: str
+) -> None:
+    archive = _invocation_archive(tmp_path)
+    path = archive.task_path("task-safe", "pipelines/pipeline-initial/pipeline.json")
+    incoming = json.loads(path.read_text())
+    if corruption == "json":
+        path.write_text("{")
+    elif corruption == "utf8":
+        path.write_bytes(b"\xff")
+    elif corruption == "shape":
+        path.write_text("[]")
+    elif corruption == "references":
+        path.write_text(json.dumps(dict(incoming, reviews=[{"path": "../outside"}])))
+    elif corruption in {"taskId", "pipelineId"}:
+        path.write_text(json.dumps(dict(incoming, **{corruption: "wrong-identity"})))
+    elif corruption == "parent":
+        outside = tmp_path / "outside"
+        path.parent.rename(outside)
+        path.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        original = path.read_bytes()
+        path.unlink()
+        if corruption == "directory":
+            path.mkdir()
+        else:
+            outside = tmp_path / "outside.json"
+            if corruption == "symlink":
+                outside.write_bytes(original)
+            path.symlink_to(outside)
+    task_path = archive.task_path("task-safe", "task.json")
+    task_before = task_path.read_bytes()
+    before = path.read_bytes() if path.is_file() else None
+    error = ArchiveConflictError if corruption in {"taskId", "pipelineId"} else ArchiveValidationError
+    # Even a complete incoming document must not silently repair corrupt metadata.
+    with pytest.raises(error):
+        archive.materialize_pipeline("task-safe", incoming)
+    assert task_path.read_bytes() == task_before
+    assert (path.read_bytes() if path.is_file() else None) == before
+    if corruption in {"symlink", "dangling"}:
+        assert path.is_symlink()
+    if corruption == "parent":
+        assert path.parent.is_symlink()

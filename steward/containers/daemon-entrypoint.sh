@@ -35,20 +35,23 @@ check_secret() {
   [[ -f "$path" && ! -L "$path" ]] || fail 'Compose secret is not a regular file'
   local mode owner expected_uid="${STEWARD_UID:-}"
   mode="$(stat -c '%a' -- "$path")"
+  if [[ "${2:-}" == config ]]; then
+    [[ "$mode" == 600 || "$mode" == 400 ]] || fail 'Steward configuration must have mode 0600 or 0400'
+    expected_uid="$uid"
+  fi
   (( (8#$mode & 077) == 0 )) || fail 'Compose secret permissions are unsafe'
   if [[ -n "$expected_uid" ]]; then
     owner="$(stat -c '%u' -- "$path")"
     [[ "$owner" == "$expected_uid" ]] || fail 'Compose secret owner is mismatched'
   fi
 }
-check_secret /run/secrets/codex-api-key
+check_secret /etc/coquic-steward/steward.toml config
 check_secret /run/secrets/github-token
 check_secret /run/secrets/git-ssh-key
 check_secret /run/secrets/d1-read-token
 check_secret /run/secrets/r2-access-key-id
 check_secret /run/secrets/r2-secret-access-key
 check_secret /etc/coquic-steward/known_hosts
-[[ -f /etc/coquic-steward/steward.toml ]] || fail 'read-only runtime configuration is missing'
 stop_grace="${STEWARD_STOP_GRACE:-0}"
 [[ "$stop_grace" =~ ^[0-9]+$ ]] || fail 'stop grace is not numeric'
 (( stop_grace > 30 )) || fail 'stop grace is shorter than daemon shutdown grace'

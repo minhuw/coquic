@@ -26,7 +26,7 @@ from coquic_steward.agents.invocation import (
 )
 from coquic_steward.agents.runner import _is_transient_codex_message
 from coquic_steward.agents.tool_changes import ToolChangeCapture
-from coquic_steward.core.config import StewardConfig, StewardLimits
+from coquic_steward.core.config import StewardAuthenticationConfig, StewardConfig, StewardLimits
 from coquic_steward.core.models import (
     CodexStage,
     ProjectSignals,
@@ -899,11 +899,10 @@ def test_signal_planner_uses_fresh_session_run_and_private_lineage(
     config: StewardConfig,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        StewardConfig,
-        "read_codex_api_key_bytes",
-        lambda _config: "fake-key",
-    )
+    config = replace(config, authentication=StewardAuthenticationConfig(
+        proxy_url="http://127.0.0.1:12345/v1", api_key="fake-key",
+    ))
+    monkeypatch.setenv("CODEX_API_KEY", "ambient-must-not-win")
 
     class PlannerInvoker(LocalSessionInvoker):
         def __init__(self) -> None:
@@ -920,7 +919,9 @@ def test_signal_planner_uses_fresh_session_run_and_private_lineage(
             interrupt_grace_seconds,
             launch_gate=None,
         ):
-            assert api_key == "fake-key"
+            assert api_key == b"fake-key"
+            assert request.proxy_url == config.authentication.proxy_url
+            assert 'model_provider="steward"' in request.argv()
             self.requests.append(request)
             line = b'{"thread_id":"provider-session"}\n'
             append(line)

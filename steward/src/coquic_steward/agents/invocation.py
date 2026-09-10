@@ -66,6 +66,7 @@ class InvocationRequest:
     session_uid: int | None = None
     session_id: str | None = None
     run_id: str | None = None
+    proxy_url: str | None = None
 
     @property
     def resume(self) -> bool:
@@ -82,7 +83,11 @@ class InvocationRequest:
         if self.provider_session_id is not None:
             args.extend(["resume"])
         args.append("--json")
+        if self.stage == CodexStage.signal_planner:
+            # The global planner intentionally has only sealed history, not a repository.
+            args.append("--skip-git-repo-check")
         args.extend(["--config", shell_environment_policy_config()])
+        args.extend(codex_provider_args(self.proxy_url))
         if self.model:
             args.extend(["--model", self.model])
         if self.reasoning_effort:
@@ -184,13 +189,36 @@ class InvocationOutcome:
         return self.exit_code == 0 and not self.interrupted and not self.forced
 
 
-def launch_local(request: InvocationRequest, *, api_key: str | None = None) -> subprocess.Popen[bytes]:
+def prepare_local_codex_home(home: Path) -> Path:
+    """Allocate a private home without following links or accepting saved logins."""
+
+    # execution imports invocation during initialization; defer this shared helper.
+    from ..execution.container import _handoff_directory
+
+    with _handoff_directory(home, create=True) as fd:
+        os.fchmod(fd, 0o700)
+        try:
+            os.stat("auth.json", dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("auth.json is forbidden in private Codex homes")
+    return home
+
+
+def launch_local(
+    request: InvocationRequest, *, api_key: bytes | str | None = None
+) -> subprocess.Popen[bytes]:
     """Test harness launcher; production uses the task-container runtime."""
 
     environment = dict(os.environ)
+    environment.pop("CODEX_API_KEY", None)
+    environment.pop("OPENAI_API_KEY", None)
     if api_key is not None:
-        environment["CODEX_API_KEY"] = api_key
-    environment["CODEX_HOME"] = str(request.output_last_message.parent / "codex-home")
+        environment["CODEX_API_KEY"] = (
+            api_key.decode("utf-8") if isinstance(api_key, bytes) else api_key
+        )
+    environment["CODEX_HOME"] = str(prepare_local_codex_home(request.output_last_message.parent))
     return subprocess.Popen(  # nosec B603 - argv is explicit and shell=False
         request.argv(),
         cwd=request.cwd,
@@ -267,6 +295,22 @@ class _BoundedBytes:
 
     def __bytes__(self) -> bytes:
         return bytes(self.data)
+
+
+def codex_provider_args(proxy_url: str | None) -> list[str]:
+    """Select the daemon-owned endpoint without persisting provider credentials."""
+
+    if proxy_url is None:
+        return []
+    overrides = (
+        'model_provider="steward"',
+        'model_providers.steward.name="Steward proxy"',
+        f"model_providers.steward.base_url={json.dumps(proxy_url)}",
+        'model_providers.steward.wire_api="responses"',
+        'model_providers.steward.env_key="CODEX_API_KEY"',
+        "model_providers.steward.requires_openai_auth=false",
+    )
+    return [arg for override in overrides for arg in ("--config", override)]
 
 
 def shell_environment_policy_config() -> str:

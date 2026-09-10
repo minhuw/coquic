@@ -12,8 +12,10 @@ describes the lifecycle and recovery boundary without repeating those tables.
 Dry-run is a local evaluation mode, not a publication state. It may execute
 local work and seal a verified private archive, but it never creates an outbox
 row, waits for receipts, calls D1/R2, or exposes a task to Site V2. Its
-`effects.jsonl` evidence remains private, bounded, and locally verifiable. Only an explicit live startup may
-enter the publication lifecycle below.
+`effects.jsonl` evidence remains private, bounded, and locally verifiable.
+Dry-run still makes model API calls and consumes usage through the configured
+CLIProxyAPI endpoint. Only an explicit live startup may enter the publication
+lifecycle below.
 
 The session writes its transcript, activity, telemetry, result metadata, and
 the publication snapshot locally. After a run leaves `running` and its archive
@@ -201,7 +203,13 @@ Publication is disabled by default in local fixtures. Dry-run is the safe
 startup default; changing mode requires a restart, and local commits remain
 local until live mode is explicitly selected. The trusted daemon alone
 receives the D1 and R2 credential files; task, planner, and validation
-containers receive none. Credential creation, Cloudflare bootstrap, Site
+containers receive none of those files or the daemon's private TOML. Model
+authentication is separate: `[steward.authentication]` holds a proxy URL and
+inline CLIProxyAPI client key in that private, daemon-owned `0600`/`0400` TOML
+(and equally protected backups). The existing stdin wrapper supplies the key
+for planner, task, and resume invocations without Codex auth files. Restart the
+daemon after authentication changes; GitHub/SSH/cloud keys remain separate
+files. Credential creation, Cloudflare bootstrap, Site
 configuration, bootstrap, start, upgrades, and rollback belong to the
 [container operations runbook](CONTAINER_OPERATIONS.md) and the infrastructure
 runbooks. This document intentionally contains no credentials, host paths, or

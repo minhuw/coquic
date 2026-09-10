@@ -7,10 +7,13 @@ import re
 import shutil
 import stat
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from pydantic import SecretStr
 
 from .models import CodexStage
 DEFAULT_ENABLED_SIGNALS = (
@@ -65,6 +68,7 @@ _MAX_PUBLICATION_TIMEOUT_SECONDS = 86400.0
 _MAX_PUBLICATION_RETRIES = 20
 _KNOWN_STEWARD_SECTIONS = frozenset(
     {
+        "authentication",
         "limits",
         "signals",
         "telemetry",
@@ -95,6 +99,7 @@ _ROOT_ALLOWED_KEYS = frozenset(
         "github_repository",
         "scheduler_wait_interval_sec",
         "shutdown_grace_seconds",
+        "authentication",
         "limits",
         "signals",
         "telemetry",
@@ -112,7 +117,6 @@ _CONTAINER_ALLOWED_KEYS = frozenset(
         "image_digest",
         "repository_host_path",
         "state_host_path",
-        "codex_api_key_path",
         "docker_bin",
         "network",
         "runtime_protocol",
@@ -130,7 +134,6 @@ _DEPLOYMENT_ALLOWED_KEYS = frozenset(
         "expected_remote",
         "expected_branch",
         "compose_project",
-        "codex_credential_path",
         "github_token_path",
         "git_ssh_key_path",
         "git_known_hosts_path",
@@ -176,6 +179,15 @@ def _require_allowed_keys(
 ) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{section} must be a table")
+    if (
+        section == "steward.container" and "codex_api_key_path" in data
+    ) or (
+        section == "steward.deployment" and "codex_credential_path" in data
+    ):
+        raise ValueError(
+            "Codex credential paths are no longer supported; configure "
+            "[steward.authentication] with proxy_url and api_key"
+        )
     unknown = sorted(str(key) for key in data if key not in allowed)
     if unknown:
         raise ValueError(f"{section} has unsupported keys: {', '.join(unknown)}")
@@ -208,6 +220,81 @@ def _absolute_path(value: object, label: str) -> Path:
     return path
 
 
+def _authentication_text(value: object, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(
+            character.isspace() or unicodedata.category(character).startswith("C")
+            for character in value
+        )
+    ):
+        raise ValueError("invalid steward.authentication settings")
+    return value
+
+
+@dataclass(frozen=True)
+class StewardAuthenticationConfig:
+    """Inline proxy authentication; secret access must always be deliberate."""
+
+    proxy_url: str | None = None
+    api_key: SecretStr | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.proxy_url is None and self.api_key is None:
+            return
+        proxy_url = _authentication_text(self.proxy_url, maximum=2048)
+        key = self.api_key
+        if isinstance(key, SecretStr):
+            key = key.get_secret_value()
+        key = _authentication_text(key, maximum=4096)
+        try:
+            parsed = urlsplit(proxy_url)
+            hostname = parsed.hostname
+            port = parsed.port
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or any(character in proxy_url for character in "\\?#")
+                or parsed.netloc.endswith(":")
+                or (port is not None and not 1 <= port <= 65535)
+                or len(key.encode("utf-8")) > 4096
+            ):
+                raise ValueError
+            if parsed.netloc.startswith("["):
+                # urlsplit validates the IP literal; reject trailing authority junk.
+                suffix = parsed.netloc.split("]", 1)[1]
+                if suffix and not suffix.startswith(":"):
+                    raise ValueError
+            else:
+                host = hostname.encode("idna").decode("ascii").removesuffix(".")
+                if len(host) > 253 or any(
+                    re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                    is None
+                    for label in host.split(".")
+                ):
+                    raise ValueError
+        except (ValueError, UnicodeError):
+            raise ValueError("invalid steward.authentication settings") from None
+        object.__setattr__(self, "api_key", SecretStr(key))
+
+
+def _authentication_config(raw: object) -> StewardAuthenticationConfig:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"proxy_url", "api_key"}
+        or raw["proxy_url"] is None
+        or raw["api_key"] is None
+    ):
+        raise ValueError(
+            "steward.authentication requires exactly proxy_url and api_key"
+        )
+    return StewardAuthenticationConfig(**raw)
+
+
 @dataclass(frozen=True)
 class StewardContainerConfig:
     """Daemon-owned settings used to construct task-scoped containers.
@@ -222,7 +309,6 @@ class StewardContainerConfig:
     image_digest: str | None = None
     repository_host_path: Path | None = None
     state_host_path: Path | None = None
-    codex_api_key_path: Path | None = None
     docker_bin: str = "docker"
     network: str = "bridge"
     runtime_protocol: str = "task-container-v1"
@@ -245,10 +331,6 @@ class StewardContainerConfig:
             object.__setattr__(
                 self, "state_host_path", _absolute_path(self.state_host_path, "container.state_host_path")
             )
-            if self.codex_api_key_path is None:
-                raise ValueError("enabled container configuration requires codex_api_key_path")
-            key = _absolute_path(self.codex_api_key_path, "container.codex_api_key_path")
-            object.__setattr__(self, "codex_api_key_path", key)
         else:
             if self.repository_host_path is not None:
                 object.__setattr__(self, "repository_host_path", Path(self.repository_host_path).expanduser())
@@ -530,7 +612,6 @@ class StewardDeploymentConfig:
     expected_remote: str = "origin"
     expected_branch: str = "main"
     compose_project: str = "coquic-steward"
-    codex_credential_path: Path | None = None
     github_token_path: Path | None = None
     git_ssh_key_path: Path | None = None
     git_known_hosts_path: Path | None = None
@@ -558,7 +639,6 @@ class StewardDeploymentConfig:
         for name in (
             "home",
             "repository",
-            "codex_credential_path",
             "github_token_path",
             "git_ssh_key_path",
             "git_known_hosts_path",
@@ -760,12 +840,22 @@ class StewardConfig:
     limits: StewardLimits = field(default_factory=StewardLimits)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
+    authentication: StewardAuthenticationConfig = field(default_factory=StewardAuthenticationConfig)
     container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
     publication: StewardPublicationConfig = field(default_factory=StewardPublicationConfig)
     deployment: StewardDeploymentConfig = field(default_factory=StewardDeploymentConfig)
     shutdown_grace_seconds: float = 30.0
 
     def __post_init__(self) -> None:
+        if self.codex_profile not in (None, ""):
+            raise ValueError(
+                "codex_profile is no longer supported; remove it and "
+                "COQUIC_STEWARD_CODEX_PROFILE. Use steward.codex_model, "
+                "steward.codex_reasoning_effort or [steward.codex.<stage>], "
+                "plus [steward.authentication] proxy_url/api_key."
+            )
+        if not isinstance(self.authentication, StewardAuthenticationConfig):
+            raise ValueError("invalid steward.authentication settings")
         if not isinstance(self.dry_run, bool):
             raise ValueError("dry_run must be a boolean")
         if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
@@ -827,30 +917,11 @@ class StewardConfig:
             providers.setdefault(name, default_signal_provider_config(name))
         object.__setattr__(self, "signal_providers", providers)
 
-    @property
-    def codex_api_key_path(self) -> Path | None:
-        """Daemon-only path for the configured Codex credential."""
-
-        return self.container.codex_api_key_path
-
     def read_codex_api_key_bytes(self) -> bytes | None:
-        """Read the configured key without consulting the daemon environment.
+        """Return the inline key as UTF-8, without file or environment fallback."""
 
-        The byte sequence is intentionally returned unchanged.  The session
-        boundary decides how those bytes are delivered to a task wrapper; no
-        caller should place them in prompts, normalized metadata, or logs.
-        """
-
-        path = self.codex_api_key_path
-        if not self.container.enabled or path is None:
-            return None
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise ValueError("configured Codex API key file is not private")
-        value = path.read_bytes()
-        if not value:
-            raise ValueError("configured Codex API key file is empty")
-        return value
+        key = self.authentication.api_key
+        return key.get_secret_value().encode("utf-8") if key is not None else None
 
     @property
     def coquic_home(self) -> Path:
@@ -872,10 +943,6 @@ class StewardConfig:
     @property
     def repository_host_path(self) -> Path:
         return self.repository_path
-
-    @property
-    def codex_credential_path(self) -> Path | None:
-        return self.deployment.codex_credential_path
 
     @property
     def github_token_path(self) -> Path | None:
@@ -1027,6 +1094,11 @@ def load_config(
     steward = data.get("steward", data)
     if not isinstance(steward, dict):
         raise ValueError("steward configuration must be a table")
+    authentication = (
+        _authentication_config(steward["authentication"])
+        if "authentication" in steward
+        else StewardAuthenticationConfig()
+    )
     if "cloud_publication" in steward:
         raise ValueError("unknown configuration section: steward.cloud_publication")
     for section_name, section_value in steward.items():
@@ -1129,6 +1201,7 @@ def load_config(
         ),
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
+        authentication=authentication,
         container=container_config,
         publication=_publication_config(publication_data),
         deployment=deployment_config,
@@ -1167,21 +1240,27 @@ _SECRET_KEY_PARTS = (
 )
 
 
-def _reject_embedded_secrets(value: object, path: str = "steward") -> None:
-    """Reject credentials in TOML while allowing paths to secret files."""
+def _reject_embedded_secrets(
+    value: object, path: tuple[str, ...] = ("steward",)
+) -> None:
+    """Allow only the exact inline authentication key and existing secret paths."""
 
     if isinstance(value, dict):
         for key, child in value.items():
+            child_path = (*path, str(key))
             normalized = str(key).lower().replace("-", "_")
-            if any(part in normalized for part in _SECRET_KEY_PARTS):
-                if not normalized.endswith(("_path", "_file", "_identity")):
-                    raise ValueError(
-                        f"{path}.{key} must reference a secret file, not a secret value"
-                    )
-            _reject_embedded_secrets(child, f"{path}.{key}")
+            if (
+                child_path != ("steward", "authentication", "api_key")
+                and any(part in normalized for part in _SECRET_KEY_PARTS)
+                and not normalized.endswith(("_path", "_file", "_identity"))
+            ):
+                raise ValueError(
+                    f"{'.'.join(child_path)} must reference a secret file, not a secret value"
+                )
+            _reject_embedded_secrets(child, child_path)
     elif isinstance(value, list | tuple):
         for index, child in enumerate(value):
-            _reject_embedded_secrets(child, f"{path}[{index}]")
+            _reject_embedded_secrets(child, (*path, f"[{index}]"))
 
 
 def _container_config(raw: object, root: Path) -> StewardContainerConfig:
@@ -1193,7 +1272,6 @@ def _container_config(raw: object, root: Path) -> StewardContainerConfig:
         repository = str(root)
     if state is None and enabled:
         state = str(Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser())
-    key = data.get("codex_api_key_path")
     image_digest = data.get("image_digest")
     return StewardContainerConfig(
         enabled=enabled,
@@ -1201,7 +1279,6 @@ def _container_config(raw: object, root: Path) -> StewardContainerConfig:
         image_digest=str(image_digest) if image_digest is not None else None,
         repository_host_path=Path(repository).expanduser() if repository is not None else None,
         state_host_path=Path(state).expanduser() if state is not None else None,
-        codex_api_key_path=Path(key).expanduser() if key is not None else None,
         docker_bin=_resolve_executable(str(data.get("docker_bin", "docker"))),
         network=str(data.get("network", "bridge")),
         runtime_protocol=str(data.get("runtime_protocol", "task-container-v1")),
@@ -1240,11 +1317,6 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
         expected_remote=str(data.get("expected_remote", "origin")),
         expected_branch=str(data.get("expected_branch", "main")),
         compose_project=str(data.get("compose_project", "coquic-steward")),
-        codex_credential_path=(
-            Path(data["codex_credential_path"]).expanduser()
-            if data.get("codex_credential_path") is not None
-            else None
-        ),
         github_token_path=(
             Path(data["github_token_path"]).expanduser()
             if data.get("github_token_path") is not None
@@ -1407,12 +1479,36 @@ def _global_config_path() -> Path:
 
 
 def _read_toml(path: Path, *, required: bool) -> dict[str, Any]:
-    if not path.exists():
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         if required:
-            raise FileNotFoundError(path)
+            raise FileNotFoundError("Steward configuration file is unavailable") from None
         return {}
-    with path.open("rb") as handle:
-        return tomllib.load(handle)
+    except OSError:
+        raise ValueError("Steward configuration must be a readable non-symlink regular file") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("Steward configuration must be a non-symlink regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            try:
+                data = tomllib.load(handle)
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+                raise ValueError("invalid Steward TOML configuration") from None
+        steward = data.get("steward", data)
+        if isinstance(steward, dict) and "authentication" in steward:
+            metadata = os.fstat(descriptor)
+            if (
+                metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o400}
+            ):
+                raise ValueError(
+                    "steward.authentication requires a configuration file owned by "
+                    "the current user with mode 0600 or 0400"
+                )
+        return data
+    finally:
+        os.close(descriptor)
 
 
 def _resolve_executable(value: str) -> str:

@@ -64,11 +64,6 @@ services:
         target: /etc/coquic-steward/known_hosts
         read_only: true
     secrets:
-      - source: codex_api_key
-        target: /run/secrets/codex-api-key
-        uid: "${STEWARD_UID:?}"
-        gid: "${STEWARD_GID:?}"
-        mode: 0400
       - source: github_token
         target: /run/secrets/github-token
         uid: "${STEWARD_UID:?}"
@@ -102,8 +97,6 @@ services:
       start_period: 10s
 
 secrets:
-  codex_api_key:
-    file: ${CODEX_API_KEY_PATH:?}
   github_token:
     file: ${GITHUB_TOKEN_PATH:?}
   git_ssh_key:

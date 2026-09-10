@@ -64,7 +64,6 @@ def _deployment(tmp_path: Path, **overrides) -> StewardDeploymentConfig:
         "host_uid": 1000,
         "host_gid": 1000,
         "docker_gid": 999,
-        "codex_credential_path": tmp_path / "codex",
         "github_token_path": tmp_path / "github-token",
         "git_ssh_key_path": tmp_path / "git-ssh-key",
         "git_known_hosts_path": tmp_path / "known_hosts",

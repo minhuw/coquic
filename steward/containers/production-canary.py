@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
+from coquic_steward.core.config import StewardAuthenticationConfig, StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.models import CodexRunState, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.core.subprocesses import run_command
 from coquic_steward.execution.container import ContainerBoundaryError, ValidationContainerRuntime
@@ -27,6 +27,10 @@ def main() -> None:
     repo.mkdir()
     config = StewardConfig(
         repo_root=repo, dry_run=True, codex_identity="deterministic-canary",
+        authentication=StewardAuthenticationConfig(
+            proxy_url="https://proxy.example.test/v1",
+            api_key="fake-production-canary-client-key",
+        ),
         task_image_digest=os.environ["STEWARD_TASK_IMAGE"],
         validation_image_digest=os.environ["STEWARD_VALIDATION_IMAGE"],
         deployment=StewardDeploymentConfig(
@@ -39,6 +43,12 @@ def main() -> None:
         ),
     )
     config.ensure_dirs()
+    daemon_config = home / "private/runtime/steward.toml"
+    daemon_config.write_text(
+        '[steward.authentication]\nproxy_url = "https://proxy.example.test/v1"\n'
+        'api_key = "fake-production-canary-client-key"\n'
+    )
+    daemon_config.chmod(0o600)
     for command in (["init", "-b", "main"], ["config", "user.email", "canary@example.test"],
                     ["config", "user.name", "Canary"]):
         run_command(["git", *command], cwd=repo, check=True)
@@ -59,6 +69,7 @@ def test_candidate_boundary():
     assert CANDIDATE
     assert not Path('/var/run/docker.sock').exists()
     assert not Path('/run/secrets').exists()
+    assert not Path('/etc/coquic-steward/steward.toml').exists()
     with pytest.raises(OSError):
         Path('README.md').write_text('must remain read-only')
     assert False, 'deliberate candidate-only failure'
@@ -67,12 +78,24 @@ def test_candidate_boundary():
     fake.write_text('''#!/bin/bash
 set -eu
 last=""
+proxy=0
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = --output-last-message ]; then last="$2"; shift 2; else shift; fi
+  case "$1" in
+    --output-last-message) last="$2"; shift 2 ;;
+    --config)
+      if [ "$2" = 'model_providers.steward.base_url="https://proxy.example.test/v1"' ]; then proxy=1; fi
+      shift 2 ;;
+    *) shift ;;
+  esac
 done
+test "$proxy" = 1
+test "${CODEX_API_KEY:-}" = fake-production-canary-client-key
 cat >/dev/null
 test ! -S /var/run/docker.sock
 test ! -e /run/secrets
+test ! -e /etc/coquic-steward/steward.toml
+test ! -e "$CODEX_HOME/auth.json"
+[[ "$(<"$CODEX_HOME/config.toml")" != *"$CODEX_API_KEY"* ]]
 if [ "$COQUIC_STEWARD_ROLE" = implementation ]; then
   printf 'model implementation\\n' >>/task/worktree/README.md
 fi
@@ -175,6 +198,12 @@ print('durable Nix exec inherited fixed paths and offline sandbox policy')
         inspection = runtime.adopt()
         assert inspection.raw["HostConfig"]["CapDrop"] == ["ALL"]
         assert all("docker.sock" not in mount["Source"] for mount in inspection.raw["Mounts"])
+        assert all(
+            not daemon_config.is_relative_to(Path(mount["Source"]))
+            and not mount["Destination"].startswith("/etc/coquic-steward")
+            for mount in inspection.raw["Mounts"]
+        )
+        assert "fake-production-canary-client-key" not in json.dumps(inspection.raw)
         implementation, reviewer = sessions
 
         def execute(session, command):
@@ -196,7 +225,7 @@ print('durable Nix exec inherited fixed paths and offline sandbox policy')
         reopened = TaskStore.open(config.db_path)
         assert reopened.get_session(reviewer.id).id == reviewer.id
         assert not run_command(["git", "remote"], cwd=repo, check=True).stdout.strip()
-        print("production canary passed: real provisioning, sessions, role isolation, candidate failure")
+        print("production canary passed: real provisioning, inline auth, sessions, role isolation, candidate failure")
     finally:
         for runtime in runtimes:
             runtime.stop(timeout=1)

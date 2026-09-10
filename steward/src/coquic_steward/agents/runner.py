@@ -28,6 +28,11 @@ from .activity import (
     activity_sidecar_path,
 )
 from .diagnostics import diagnostics_for_result
+from .invocation import (
+    codex_provider_args,
+    prepare_local_codex_home,
+    shell_environment_policy_config,
+)
 from .process_stream import (
     GroupTerminationStrategy,
     PostEofWait,
@@ -397,6 +402,8 @@ class CodexRunner:
         if resume_session:
             args.append("resume")
         args.extend(["--json"])
+        args.extend(["--config", shell_environment_policy_config()])
+        args.extend(codex_provider_args(self.config.authentication.proxy_url))
         if stage == CodexStage.code:
             args.append("--dangerously-bypass-hook-trust")
             for event in _TOOL_CHANGE_HOOK_EVENTS:
@@ -411,8 +418,6 @@ class CodexRunner:
                     + json.dumps(settings.reasoning_effort),
                 ]
             )
-        if self.config.codex_profile:
-            args.extend(["--profile", self.config.codex_profile])
         if not resume_session:
             args.extend(
                 ["--sandbox", sandbox or self.config.codex_sandbox, "--cd", str(cwd)]
@@ -470,14 +475,22 @@ class CodexRunner:
                 )
             if capture_degraded:
                 capture._record_reason("context_unavailable")
-        child_env = None
+        child_env = os.environ.copy()
+        child_env.pop("CODEX_API_KEY", None)
+        child_env.pop("OPENAI_API_KEY", None)
+        api_key = self.config.read_codex_api_key_bytes()
+        if api_key is not None:
+            child_env["CODEX_API_KEY"] = api_key.decode("utf-8")
+        # Never inherit global provider configuration or a user's saved login,
+        # including when a keyless fixture invokes this legacy boundary.
+        child_env["CODEX_HOME"] = str(
+            prepare_local_codex_home(last_message_path.parent / "codex-home")
+        )
         if capture is not None:
-            child_env = os.environ.copy()
             child_env["COQUIC_STEWARD_HOOK_CONTEXT"] = str(capture.context_path)
-        elif "COQUIC_STEWARD_HOOK_CONTEXT" in os.environ:
+        else:
             # A caller's ambient value must not accidentally enable capture for
             # non-code stages or a retry whose prior context could not be moved.
-            child_env = os.environ.copy()
             child_env.pop("COQUIC_STEWARD_HOOK_CONTEXT", None)
         # CodexRunner builds args as an argv list and never enables a shell.
         telemetry = _new_telemetry_recorder(

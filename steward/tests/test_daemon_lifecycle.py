@@ -47,6 +47,7 @@ from coquic_steward.planning import (
     run_planner as execute_scheduler_planner,
 )
 from coquic_steward.core.config import (
+    StewardAuthenticationConfig,
     StewardConfig,
     StewardContainerConfig,
 )
@@ -4672,9 +4673,6 @@ def _task_image_labels(*, runtime_protocol="task-container-v1"):
 
 
 def test_preflight_rejects_unrelated_task_image_metadata(config, monkeypatch):
-    key = config.coquic_home / "codex-key"
-    key.write_text("fake\n", encoding="utf-8")
-    key.chmod(0o600)
     docker = config.coquic_home / "bin" / "docker"
     docker.parent.mkdir()
     docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -4684,12 +4682,12 @@ def test_preflight_rejects_unrelated_task_image_metadata(config, monkeypatch):
         image_digest=IMAGE,
         repository_host_path=config.repo_root,
         state_host_path=config.coquic_home,
-        codex_api_key_path=key,
         docker_bin=str(docker),
     )
     nested = StewardConfig(
         repo_root=config.repo_root,
         container=container,
+        authentication=StewardAuthenticationConfig("http://proxy.test:8080/v1", "fake"),
         local_codex_test_harness=True,
     )
 
@@ -4710,20 +4708,17 @@ def test_preflight_rejects_unrelated_task_image_metadata(config, monkeypatch):
 
 
 def test_preflight_rejects_unlocked_docker(config, monkeypatch):
-    key = config.coquic_home / "codex-key"
-    key.write_text("fake\n", encoding="utf-8")
-    key.chmod(0o600)
     container = StewardContainerConfig(
         enabled=True,
         image_digest=IMAGE,
         repository_host_path=config.repo_root,
         state_host_path=config.coquic_home,
-        codex_api_key_path=key,
         docker_bin="/bin/true",
     )
     nested = StewardConfig(
         repo_root=config.repo_root,
         container=container,
+        authentication=StewardAuthenticationConfig("http://proxy.test:8080/v1", "fake"),
         local_codex_test_harness=True,
     )
     monkeypatch.setattr(
@@ -5794,19 +5789,19 @@ def test_session_runner_preserves_interrupted_run_identity(config):
 def test_enabled_nested_container_config_drives_runtime_fields(config):
     state = config.repo_root.parent / "container-state"
     state.mkdir()
-    key = config.repo_root.parent / "codex-api-key"
-    key.write_text("fake\n", encoding="utf-8")
-    key.chmod(0o600)
     container = StewardContainerConfig(
         enabled=True,
         image="nested-task-image",
         image_digest=IMAGE,
         repository_host_path=config.repo_root,
         state_host_path=state,
-        codex_api_key_path=key,
         docker_bin="/bin/true",
     )
-    nested = StewardConfig(repo_root=config.repo_root, container=container)
+    nested = StewardConfig(
+        repo_root=config.repo_root,
+        container=container,
+        authentication=StewardAuthenticationConfig("http://proxy.test:8080/v1", "fake"),
+    )
     nested.ensure_dirs()
 
     executor = StewardExecutor(nested, TaskStore.create(nested.db_path))
@@ -5846,21 +5841,18 @@ def test_executor_task_session_eligibility(
 ):
     state = config.repo_root.parent / "container-state"
     state.mkdir()
-    key = config.repo_root.parent / "codex-api-key"
-    key.write_text("fake\n", encoding="utf-8")
-    key.chmod(0o600)
     container = StewardContainerConfig(
         enabled=container_enabled,
         image="nested-task-image",
         image_digest=digest,
         repository_host_path=config.repo_root if container_enabled else None,
         state_host_path=state if container_enabled else None,
-        codex_api_key_path=key if container_enabled else None,
         docker_bin="/bin/true",
     )
     configured = replace(
         config,
         container=container,
+        authentication=StewardAuthenticationConfig("http://proxy.test:8080/v1", "fake"),
         task_image_digest=digest if not container_enabled else None,
         local_codex_test_harness=harness,
     )

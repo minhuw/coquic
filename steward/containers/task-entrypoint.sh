@@ -13,7 +13,8 @@ read_api_key() {
     exit 64
   fi
   if (( length > 0 )); then
-    IFS= read -r -N "$length" CODEX_API_KEY
+    # The control length counts bytes, not characters in the worker's locale.
+    IFS= LC_ALL=C read -r -N "$length" CODEX_API_KEY
   else
     CODEX_API_KEY=""
   fi

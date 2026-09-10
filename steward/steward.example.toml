@@ -22,6 +22,14 @@ git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
 
+# Optional for credential-free inspection/idle fixtures; required for production.
+# Use a CLIProxyAPI client key, not its management key or an upstream login.
+# Keep this file and backups private, owned by the daemon, mode 0600 (0400 allowed).
+# Restart the daemon after changes. Dry-run still makes model API calls.
+# [steward.authentication]
+# proxy_url = "https://proxy.example.test/v1"
+# api_key = "fake-cliproxyapi-client-key-replace-me"
+
 # Task containers are disabled by default for local planning fixtures. When
 # enabled, every path is host-local and the image must be locked by digest.
 [steward.container]
@@ -30,7 +38,6 @@ image = "coquic-steward-task"
 # image_digest = "sha256:<64 lowercase hex characters>"
 # repository_host_path = "/srv/coquic"
 # state_host_path = "/srv/coquic-steward"
-# codex_api_key_path = "/run/secrets/codex-api-key"
 docker_bin = "docker"
 network = "bridge"
 
@@ -68,7 +75,6 @@ docker_socket = "/var/run/docker.sock"
 expected_remote = "origin"
 expected_branch = "main"
 compose_project = "coquic-steward"
-# codex_credential_path = "/run/secrets/codex-api-key"
 # github_token_path = "/run/secrets/github-token"
 # git_ssh_key_path = "/run/secrets/git-ssh-key"
 # git_known_hosts_path = "/etc/coquic-steward/known_hosts"

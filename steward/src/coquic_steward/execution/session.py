@@ -472,6 +472,7 @@ def build_fresh_planner_request(
     # from the request's host cwd and environment.
     request = InvocationRequest(
         codex_bin=config.codex_bin,
+        proxy_url=config.authentication.proxy_url,
         cwd=history_root or config.private_sessions_dir,
         prompt=prompt,
         output_last_message=selected_last_message,
@@ -571,7 +572,10 @@ class FreshPlannerSession:
                 else:
                     outcome = self.invoker.invoke(
                         request.request,
-                        api_key=api_key,
+                        api_key=(
+                            api_key if api_key is not None
+                            else self.config.read_codex_api_key_bytes()
+                        ),
                         append=append,
                         timeout_seconds=timeout_seconds,
                         interrupt_grace_seconds=2.0,
@@ -1141,6 +1145,7 @@ class SessionSupervisor:
         )
         request = InvocationRequest(
             codex_bin=self.config.codex_bin,
+            proxy_url=self.config.authentication.proxy_url,
             cwd=cwd,
             prompt=prompt,
             output_last_message=self._private_last_message_path(session, run.id),
@@ -1333,6 +1338,7 @@ class SessionSupervisor:
             return ResumeResult(ResumeCategory.rejected, evidence={"error": str(exc)})
         request = InvocationRequest(
             codex_bin=self.config.codex_bin,
+            proxy_url=self.config.authentication.proxy_url,
             cwd=Path(expected_cwd),
             prompt=prompt,
             output_last_message=self._private_last_message_path(session, run.id),
@@ -1600,19 +1606,11 @@ class SessionSupervisor:
         )
 
     def _configured_api_key(self, supplied: bytes | str | None) -> bytes | str | None:
-        """Use the daemon-owned key file and never inherit a credential env var."""
+        """Use inline configuration unless the library caller supplied a key."""
 
         if supplied is not None:
             return supplied
-        configured = self.config.read_codex_api_key_bytes()
-        if configured is not None:
-            return configured
-        # The local invoker is an explicit test-only boundary.  Preserve its
-        # historical fixture contract without allowing production sessions to
-        # consult the daemon environment for credentials.
-        if self.config.local_codex_test_harness:
-            return os.environ.get("CODEX_API_KEY")
-        return None
+        return self.config.read_codex_api_key_bytes()
 
     def interrupt(
         self,

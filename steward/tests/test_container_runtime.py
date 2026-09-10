@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import io
+import os
 import subprocess
 import sys
 import time
@@ -26,7 +28,7 @@ from coquic_steward.core.subprocesses import run_command
 from coquic_steward.execution.container import PlannerContainerRuntime, SubprocessDockerClient
 from coquic_steward.execution.container_config import PlannerContainerConfig
 from coquic_steward.agents.invocation import InvocationRequest
-from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.config import StewardAuthenticationConfig, StewardConfig
 from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.execution.session import ContainerSessionInvoker
 from coquic_steward.execution.executor import _SessionRunnerAdapter
@@ -920,3 +922,107 @@ def test_container_invocation_translates_all_runtime_paths(
     assert identities == [
         ExecIdentity(container_config.container_name, "run-one", 4321, 10000)
     ]
+
+
+@pytest.mark.parametrize("role,stage", [
+    (TaskRole.planner, CodexStage.signal_planner),
+    (TaskRole.implementation, CodexStage.code),
+    (TaskRole.reviewer, CodexStage.review),
+])
+@pytest.mark.parametrize("resume", [None, "exact-provider-session"])
+@pytest.mark.parametrize("key", [b"synthetic-wrapper-key", "synthetic-wrapper-é".encode()])
+def test_real_wrapper_receives_inline_key_only_through_stdin(
+    config, container_config, tmp_path, role, stage, resume, key,
+):
+    """Run the production shell wrapper with fake Codex, never Docker/provider I/O."""
+    proxy = "http://127.0.0.1:12345/v1"
+    config = replace(config, authentication=StewardAuthenticationConfig(
+        proxy_url=proxy, api_key=key.decode(),
+    ))
+    request = replace(
+        _invocation_request(container_config), role=role.value, stage=stage,
+        proxy_url=config.authentication.proxy_url, provider_session_id=resume,
+    )
+    home = request.output_last_message.parent
+    (home / "wrapper-run-one.pid").unlink()
+    fake = tmp_path / "codex"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib, os, pathlib, sys\n"
+        f"assert hashlib.sha256(os.environ['CODEX_API_KEY'].encode()).hexdigest() == {hashlib.sha256(key).hexdigest()!r}\n"
+        "assert 'OPENAI_API_KEY' not in os.environ\n"
+        "assert not (pathlib.Path(os.environ['CODEX_HOME']) / 'auth.json').exists()\n"
+        "assert sys.stdin.buffer.read() == b'prompt\\n'\n"
+        "print('{\"type\":\"completed\"}')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    wrapper = Path(__file__).resolve().parents[1] / "containers" / "task-entrypoint.sh"
+
+    class FramedInput:
+        def __init__(self, pipe):
+            self.pipe = pipe
+            self.prefix = b""
+
+        def write(self, value):
+            # Identity must have been accepted before credential delivery.
+            assert invoker.identity is not None
+            assert invoker.identity.pid > 1
+            self.prefix += value
+            return self.pipe.write(value)
+
+        def __getattr__(self, name):
+            return getattr(self.pipe, name)
+
+    class WrapperRuntime(TaskContainerRuntime):
+        def ensure_started(self):
+            return None
+
+        def exec_stream(self, selected_role, **kwargs):
+            self.argv = self.exec_argv(selected_role, interactive=True, **kwargs)
+            self.launch_env = {
+                "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                "HOME": str(home), "CODEX_HOME": str(home), "LANG": "C.UTF-8",
+                **kwargs["env"],
+            }
+            process = subprocess.Popen(
+                ["bash", str(wrapper), *kwargs["command"][1:]],
+                env=self.launch_env, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.framed_input = FramedInput(process.stdin)
+            process.stdin = self.framed_input
+            return process
+
+    runtime = WrapperRuntime(container_config, client=FakeDocker())
+    invoker = ContainerSessionInvoker(runtime)
+    records = []
+    outcome = invoker.invoke(
+        request, api_key=config.read_codex_api_key_bytes(), append=records.append,
+        timeout_seconds=5, interrupt_grace_seconds=0.1,
+    )
+    assert outcome.completed, outcome.stderr
+    assert records == [b'{"type":"completed"}\n']
+    assert runtime.framed_input.prefix == len(key).to_bytes(4, "big") + key
+    assert key.decode() not in repr(runtime.argv)
+    assert key.decode() not in repr(runtime.launch_env)
+    assert "CODEX_API_KEY" not in runtime.launch_env
+    docker_env = [runtime.argv[i + 1] for i, arg in enumerate(runtime.argv[:-1]) if arg == "--env"]
+    assert not any(value.startswith(("CODEX_API_KEY=", "OPENAI_API_KEY=")) for value in docker_env)
+    mapped = request.argv(
+        codex_bin="codex", path_mapper=lambda path: container_config.container_path(path, role),
+    )
+    wrapper_index = runtime.argv.index("/bin/task-entrypoint.sh")
+    assert runtime.argv[wrapper_index:] == ["/bin/task-entrypoint.sh", "run", *mapped]
+    assert [value for value in mapped if value.startswith("model_provider")] == [
+        'model_provider="steward"',
+        'model_providers.steward.name="Steward proxy"',
+        f'model_providers.steward.base_url="{proxy}"',
+        'model_providers.steward.wire_api="responses"',
+        'model_providers.steward.env_key="CODEX_API_KEY"',
+        'model_providers.steward.requires_openai_auth=false',
+    ]
+    assert key not in outcome.stderr + b"".join(records)
+    assert not list(home.rglob("auth.json"))
+    assert not list(home.rglob("config.toml"))
+    assert all(key not in path.read_bytes() for path in home.rglob("*") if path.is_file())

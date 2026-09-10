@@ -73,8 +73,16 @@ check_host_credential() {
   check_private_file "$path" "$label"
 }
 
+validate_config_file() {
+  local path="${STEWARD_CONFIG_PATH:-}" mode
+  [[ "${STEWARD_UID:-}" =~ ^[0-9]+$ ]] || die 'STEWARD_UID must be numeric'
+  check_private_file "$path" 'Steward configuration'
+  mode="$(stat -c '%a' -- "$path")"
+  [[ "$mode" == 600 || "$mode" == 400 ]] || die 'Steward configuration must have mode 0600 or 0400'
+}
+
 validate_credentials() {
-  check_private_file "${CODEX_API_KEY_PATH:-$home/private/credentials/codex-api}" 'Codex API credential'
+  validate_config_file
   check_host_credential "${GITHUB_TOKEN_PATH:-$home/private/credentials/github-token}" github-token 'GitHub API token'
   check_host_credential "${GIT_SSH_KEY_PATH:-$home/private/credentials/git-ssh-key}" git-ssh-key 'Git SSH key'
   check_private_file "${D1_TOKEN_PATH:-$home/private/credentials/d1-read-token}" 'D1 publication token'
@@ -674,7 +682,7 @@ bootstrap() {
 }
 
 config_check() {
-  require_paths; require_numeric_config; validate_compose_static
+  require_paths; require_numeric_config; validate_config_file; validate_compose_static
   printf 'compose valid service=steward socket=local-unix secrets=individual\n'
 }
 

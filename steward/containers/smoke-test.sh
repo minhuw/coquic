@@ -243,6 +243,10 @@ from coquic_steward.execution.container_config import (
 )
 
 FORBIDDEN = (
+    "steward.toml",
+    "steward_config_path",
+    "codex_api_key",
+    "auth.json",
     "run/secrets",
     "d1-read-token",
     "d1_token",

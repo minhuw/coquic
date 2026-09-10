@@ -34,6 +34,8 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
     assert config.telemetry.billing_mode == "unknown"
+    assert config.authentication.proxy_url is None
+    assert config.read_codex_api_key_bytes() is None
 
 
 def test_telemetry_billing_mode_is_normalized(repo: Path, tmp_path: Path) -> None:
@@ -479,11 +481,14 @@ def _write_compose_config(
 [steward]
 local_codex_test_harness = {str(local_codex_test_harness).lower()}
 
+[steward.authentication]
+proxy_url = "http://proxy.test:8080/v1"
+api_key = "compose-test-key"
+
 [steward.container]
 enabled = {str(container_enabled).lower()}
 repository_host_path = {str(canonical)!r}
 state_host_path = {str(home)!r}
-codex_api_key_path = "/run/secrets/codex-api"
 
 [steward.deployment]
 enabled = {str(deployment_enabled).lower()}
@@ -499,6 +504,7 @@ recovery_owned_docker_bytes = 500
 """,
         encoding="utf-8",
     )
+    config_path.chmod(0o600)
 
 
 def _set_compose_image_environment(monkeypatch) -> None:
@@ -527,6 +533,8 @@ def test_compose_release_environment_selects_exact_runtime_pair(
     assert config.validation_image_digest == "sha256:" + "c" * 64
     assert config.container.image_digest == config.task_image_digest
     assert config.deployment.release_id == "release-compose"
+    assert config.authentication.proxy_url == "http://proxy.test:8080/v1"
+    assert config.read_codex_api_key_bytes() == b"compose-test-key"
 
 
 @pytest.mark.parametrize(

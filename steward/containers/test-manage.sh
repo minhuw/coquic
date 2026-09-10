@@ -9,6 +9,7 @@ mode="${1:-}"
   exit 64
 }
 
+umask 077
 tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
@@ -27,12 +28,17 @@ git -C "$seed" commit -qm seed
 git -C "$seed" remote add origin "$remote"
 git -C "$seed" push -q origin main
 
-for file in codex-api github-token git-ssh-key d1-read-token r2-access-key-id r2-secret-access-key known_hosts; do
+for file in github-token git-ssh-key d1-read-token r2-access-key-id r2-secret-access-key known_hosts; do
   printf 'synthetic-%s-credential-value\n' "$file" >"$home/private/credentials/$file"
   chmod 600 "$home/private/credentials/$file"
 done
 touch "$tmp/docker.sock"
-touch "$tmp/steward.toml"
+cat >"$tmp/steward.toml" <<'TOML'
+[steward.authentication]
+proxy_url = "https://localhost.invalid/v1"
+api_key = "synthetic-inline-credential-value"
+TOML
+chmod 600 "$tmp/steward.toml"
 
 export COQUIC_HOME="$home"
 export COQUIC_REPOSITORY="$home/repository"
@@ -40,7 +46,6 @@ export COQUIC_REMOTE_URL="$remote"
 export STEWARD_EXPECTED_REMOTE=origin
 export STEWARD_EXPECTED_BRANCH=main
 export DOCKER_SOCKET="$tmp/docker.sock"
-export CODEX_API_KEY_PATH="$home/private/credentials/codex-api"
 export GITHUB_TOKEN_PATH="$home/private/credentials/github-token"
 export GIT_SSH_KEY_PATH="$home/private/credentials/git-ssh-key"
 export D1_TOKEN_PATH="$home/private/credentials/d1-read-token"
@@ -104,12 +109,80 @@ expected = {
     "STEWARD_EXPECTED_BRANCH": "main",
 }
 assert all(assignments.get(name) == value for name, value in expected.items())
+assert "CODEX_API_KEY_PATH" not in assignments
+assert not any("api_key" in name.lower() for name in assignments)
 remote = assignments["COQUIC_REMOTE_URL"]
 assert re.fullmatch(r"git@[A-Za-z0-9.-]+:[^?#\s]+", remote)
 assert not re.search(r"://[^/?#]*:[^/?#@]+@", remote)
 assert not any(marker in remote for marker in ("?", "#"))
 PY
 }
+
+expect_config_refusal() {
+  local expected="$1" command output
+  for command in config bootstrap init start upgrade rollback; do
+    if output="$("$manage" "$command" 2>&1)"; then
+      printf 'expected private config refusal for %s\n' "$command" >&2
+      return 1
+    fi
+    [[ "$output" == *"$expected"* && "$output" != *"$credential_canary"* ]]
+  done
+}
+
+check_config_refusals() (
+  local path="$STEWARD_CONFIG_PATH" mode
+  unset STEWARD_CONFIG_PATH
+  expect_config_refusal 'configuration path is required'
+  export STEWARD_CONFIG_PATH=relative.toml
+  expect_config_refusal 'configuration path must be absolute'
+  export STEWARD_CONFIG_PATH="$path"
+  mv "$path" "$path.saved"
+  expect_config_refusal 'configuration must be a regular file'
+  ln -s "$path.saved" "$path"
+  expect_config_refusal 'configuration must be a regular file'
+  unlink "$path"
+  mkdir "$path"
+  expect_config_refusal 'configuration must be a regular file'
+  rmdir "$path"
+  mv "$path.saved" "$path"
+  for mode in 000 200 500 700 1600 4600; do
+    chmod "$mode" "$path"
+    expect_config_refusal 'configuration must have mode 0600 or 0400'
+  done
+  chmod 640 "$path"
+  expect_config_refusal 'configuration permissions are unsafe'
+  for mode in 400 600; do
+    chmod "$mode" "$path"
+    "$manage" config >/dev/null
+  done
+  export STEWARD_UID=$((STEWARD_UID + 1))
+  expect_config_refusal 'configuration owner is mismatched'
+)
+
+check_daemon_config_file() (
+  # Exercise the entrypoint's real metadata check without a socket or service.
+  grep -Fxq 'check_secret /etc/coquic-steward/steward.toml config' "$script_dir/daemon-entrypoint.sh"
+  eval "$(sed -n '/^check_secret() {$/,/^}$/p' "$script_dir/daemon-entrypoint.sh")"
+  fail() { printf 'entrypoint refused (%s)\n' "$1" >&2; exit 78; }
+  local uid="$STEWARD_UID" path="$STEWARD_CONFIG_PATH" mode output
+  unset STEWARD_UID
+  for mode in 400 600; do
+    chmod "$mode" "$path"
+    check_secret "$path" config
+  done
+  for mode in 000 200 500 700 640 1600 4600; do
+    chmod "$mode" "$path"
+    if output="$(check_secret "$path" config 2>&1)"; then return 1; fi
+    [[ "$output" == *'mode 0600 or 0400'* && "$output" != *"$credential_canary"* ]]
+  done
+  chmod 600 "$path"
+  ln -s "$path" "$path.link"
+  if output="$(check_secret "$path.link" config 2>&1)"; then return 1; fi
+  [[ "$output" == *'not a regular file'* ]]
+  uid=$((uid + 1))
+  if output="$(check_secret "$path" config 2>&1)"; then return 1; fi
+  [[ "$output" == *'owner is mismatched'* && "$output" != *"$credential_canary"* ]]
+)
 
 restore_credential() {
   local path="$1" name="${1##*/}"
@@ -130,7 +203,7 @@ check_credential_refusals() {
     restore_credential "$path"
 
     unlink "$path"
-    ln -s "$CODEX_API_KEY_PATH" "$path"
+    ln -s "$GITHUB_TOKEN_PATH" "$path"
     expect_bootstrap_refusal "symlink ${path##*/}" 'regular file' || return 1
     restore_credential "$path"
 
@@ -146,7 +219,7 @@ check_credential_refusals() {
 
   local original_uid="$STEWARD_UID"
   export STEWARD_UID=$((original_uid + 1))
-  expect_bootstrap_refusal 'wrong owner codex-api' 'owner is mismatched' || return 1
+  expect_bootstrap_refusal 'wrong owner config' 'owner is mismatched' || return 1
   export STEWARD_UID="$original_uid"
 }
 
@@ -322,6 +395,7 @@ expect_manage_refusal() {
     return 1
   fi
   [[ "$output" == *'operation refused'* ]]
+  [[ "$output" != *"$credential_canary"* ]]
 }
 
 interrupt_upgrade_and_recover() {
@@ -672,10 +746,14 @@ check_mixed_version_lifecycle() (
 case "$mode" in
   --config)
     check_environment_template
-    "$manage" --config
+    check_config_refusals
+    check_daemon_config_file
+    config_output="$("$manage" --config)"
+    [[ "$config_output" != *"$credential_canary"* ]]
+    printf '%s\n' "$config_output"
     rendered="$(docker compose --project-name "$STEWARD_COMPOSE_PROJECT" --file "$script_dir/compose.yml" config --format json)"
     RENDERED_COMPOSE="$rendered" D1_SOURCE="$D1_TOKEN_PATH" R2_ID_SOURCE="$R2_ACCESS_KEY_ID_PATH" \
-      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" CODEX_SOURCE="$CODEX_API_KEY_PATH" \
+      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" \
       GITHUB_SOURCE="$GITHUB_TOKEN_PATH" SSH_KEY_SOURCE="$GIT_SSH_KEY_PATH" \
       KNOWN_HOSTS_SOURCE="$GIT_KNOWN_HOSTS_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
 import json, os, sys
@@ -690,7 +768,6 @@ assert service["user"] == f"{sys.argv[1]}:{sys.argv[2]}"
 assert {
     (item["source"], item["target"]) for item in service["secrets"]
 } == {
-    ("codex_api_key", "/run/secrets/codex-api-key"),
     ("github_token", "/run/secrets/github-token"),
     ("git_ssh_key", "/run/secrets/git-ssh-key"),
     ("d1_token", "/run/secrets/d1-read-token"),
@@ -698,7 +775,12 @@ assert {
     ("r2_secret_access_key", "/run/secrets/r2-secret-access-key"),
 }
 sources = value["secrets"]
-assert sources["codex_api_key"]["file"] == os.environ["CODEX_SOURCE"]
+assert "codex_api_key" not in sources
+config_mounts = [item for item in service["volumes"] if item["target"] == "/etc/coquic-steward/steward.toml"]
+assert len(config_mounts) == 1
+assert config_mounts[0]["type"] == "bind"
+assert config_mounts[0]["source"] == os.environ["STEWARD_CONFIG_PATH"]
+assert config_mounts[0]["read_only"] is True
 assert sources["github_token"]["file"] == os.environ["GITHUB_SOURCE"]
 assert sources["git_ssh_key"]["file"] == os.environ["SSH_KEY_SOURCE"]
 assert service["volumes"][-1]["source"] == os.environ["KNOWN_HOSTS_SOURCE"]
@@ -706,7 +788,8 @@ assert service["volumes"][-1]["target"] == "/etc/coquic-steward/known_hosts"
 assert sources["d1_token"]["file"] == os.environ["D1_SOURCE"]
 assert sources["r2_access_key_id"]["file"] == os.environ["R2_ID_SOURCE"]
 assert sources["r2_secret_access_key"]["file"] == os.environ["R2_SECRET_SOURCE"]
-assert all("credential-value" not in json.dumps(item) for item in (value,))
+assert "credential-value" not in json.dumps(value)
+assert not any("api_key" in name.lower() for name in environment)
 assert service["read_only"] is True
 assert not any(
     key.lower().startswith(("d1_", "r2_", "cloudflare", "coquic_steward_d1", "coquic_steward_public_r2"))

@@ -23,7 +23,7 @@ individual read-only files:
 
 | Host path | Compose target | Purpose |
 | --- | --- | --- |
-| `$COQUIC_HOME/private/credentials/codex-api` | `/run/secrets/codex-api-key` | provider credential delivered at a run boundary |
+| `$STEWARD_CONFIG_PATH` (normally `$COQUIC_HOME/private/runtime/steward.toml`) | `/etc/coquic-steward/steward.toml` | private daemon config with inline CLIProxyAPI client key |
 | `$COQUIC_HOME/private/credentials/github-token` | `/run/secrets/github-token` | GitHub API token |
 | `$COQUIC_HOME/private/credentials/git-ssh-key` | `/run/secrets/git-ssh-key` | Git SSH key |
 | `$COQUIC_HOME/private/credentials/d1-read-token` | `/run/secrets/d1-read-token` | Steward D1 publication token |
@@ -34,12 +34,18 @@ individual read-only files:
 The three publication files are produced by
 `infra/cloudflare/scripts/deploy-production.sh`. All credential files are
 regular, non-symlink files with mode `0600`, owned by `STEWARD_UID`; the
-credential directory is mode `0700`. Values never enter Compose YAML, `.env`,
-TOML, image labels, process arguments, SQLite, logs, or public objects.
+credential directory is mode `0700`. The daemon TOML and its backups are also
+secrets: use regular non-symlink files owned by the daemon UID, mode `0600`
+(`0400` is also accepted). Only `[steward.authentication].api_key` is inline;
+GitHub, SSH, D1, and R2 credentials remain separate files. Secret values never
+enter Compose YAML, `.env`, image labels, process arguments, SQLite, logs, or
+public objects. Never print the private TOML or dump a real rendered Compose
+configuration.
 
 Task, planner, and validation containers receive only their declared worktree,
 archive/history, session, scratch, Git, or output mounts. They receive no
-socket, repository clone, SQLite, deployment state, daemon home, or secret.
+socket, repository clone, SQLite, deployment state, daemon home, daemon
+configuration, or secret-file mount.
 Task roles get a read-only worktree view by default; only the implementation
 role gets one scoped writable worktree and scratch mount. Validation always gets
 a read-only worktree plus bounded output and store mounts. The planner has only
@@ -49,12 +55,13 @@ The daemon runs as the configured numeric host UID/GID and receives the local
 Docker socket group. Its container uses a read-only root with bounded `/tmp`
 and `/run` tmpfs. Validation runs with `--network none` and excludes raw
 subprocess output. The raw subprocess output is never exposed to validation.
-The task wrapper delivers `CODEX_API_KEY` as a
-length-prefixed value on stdin immediately before `execve`; it is not persisted
-in `auth.json`, TOML, labels, argv, SQLite, transcripts, or public artifacts.
-The same-session process inspection risk remains a known residual risk and
-cannot be fully eliminated. The credential is dedicated and revocable for this
-run.
+For planner attempts, task roles, and same-session resumes, the wrapper delivers
+`CODEX_API_KEY` from the daemon's private TOML as a length-prefixed value on stdin
+immediately before `execve`. It never enters Docker/Compose environment metadata,
+labels, argv, SQLite, transcripts, public artifacts, or worker config/auth files;
+there is no Codex `auth.json` or redundant Codex credential file. The model
+process receives the key in its environment; same-session process inspection
+remains a known residual risk. Use a dedicated, revocable CLIProxyAPI client key.
 
 ## Releases and state
 
@@ -129,8 +136,11 @@ or applies an unreviewed provider change.
    private environment (the checked-in example uses
    `/srv/coquic-steward/private/runtime/steward.toml`) from
    `steward/steward.example.toml`. Compose mounts that file in the daemon at
-   `/etc/coquic-steward/steward.toml`. The production override must include
-   the runtime boundary and every non-secret publication value:
+   `/etc/coquic-steward/steward.toml` as an individual read-only daemon-only
+   mount. Set ownership to `STEWARD_UID` and mode `0600` before bootstrap; keep
+   backups equally private (`0400` is accepted). The production override must
+   include authentication, the runtime boundary, and every non-secret publication
+   value (the authentication values below are fake):
 
    ```toml
    [steward]
@@ -141,12 +151,15 @@ or applies an unreviewed provider change.
    local_codex_test_harness = false
    dry_run = false
 
+   [steward.authentication]
+   proxy_url = "https://proxy.example.test/v1"
+   api_key = "fake-cliproxyapi-client-key-replace-me"
+
    [steward.container]
    enabled = true
    image = "coquic-steward-task"
    repository_host_path = "/srv/coquic-steward/repository"
    state_host_path = "/srv/coquic-steward"
-   codex_api_key_path = "/run/secrets/codex-api-key"
    docker_bin = "docker"
    network = "bridge"
 
@@ -161,7 +174,6 @@ or applies an unreviewed provider change.
    expected_remote = "origin"
    expected_branch = "main"
    compose_project = "coquic-steward"
-   codex_credential_path = "/run/secrets/codex-api-key"
    github_token_path = "/run/secrets/github-token"
    git_ssh_key_path = "/run/secrets/git-ssh-key"
    git_known_hosts_path = "/etc/coquic-steward/known_hosts"
@@ -192,17 +204,35 @@ or applies an unreviewed provider change.
    staging_root = "/srv/coquic-steward/private/publication-staging"
    ```
 
-   The checked-in example is intentionally local-safe: it disables the
-   container and deployment sections and enables the test harness. Copying it
-   without this production override is intentionally rejected when Compose
-   supplies `STEWARD_RELEASE_ID`.
+   The checked-in example is intentionally local-safe: authentication is
+   commented out, container and deployment sections are disabled, and the test
+   harness is enabled. Missing authentication is allowed for credential-free
+   inspection and idle fixtures, but production preflight requires both
+   `proxy_url` and `api_key`. Copying the example without this production
+   override is intentionally rejected when Compose supplies `STEWARD_RELEASE_ID`.
+
+   The API key is a **CLIProxyAPI client key**, not the proxy management key,
+   an upstream provider login, or a Codex login file. The URL and key apply to
+   planner attempts, all task roles, and resumes. Use a proxy address reachable
+   from the worker Docker bridge: host HTTP loopback (`127.0.0.1`) is not the
+   container's loopback and will not reach a host-only listener. Prefer HTTPS;
+   use HTTP only on a deliberately trusted, reachable bridge endpoint. Do not
+   use host networking to bypass isolation. `dry_run = true` still consumes
+   model API calls; it suppresses external task effects, not model usage.
+   Restart the daemon after changing authentication or execution mode.
+
+   Migration: remove `container.codex_api_key_path` and
+   `deployment.codex_credential_path`; both are rejected with migration guidance.
+   Remove the old `CODEX_API_KEY_PATH` deployment variable and Codex secret
+   source/mount. Configure the inline authentication pair instead; no separate
+   Codex credential file is required.
 
    Replace the example host prefix in `staging_root` when `COQUIC_HOME` is
    different, and create that real, non-symlink directory with mode `0700`
    before config validation. The credential paths in this override are
    daemon-container targets, not host paths; their host sources remain the
-   individual files listed in the credential table. Do not put any credential
-   value in this TOML file.
+   individual files listed in the credential table. Keep those GitHub/cloud/SSH
+   values out of TOML; only the CLIProxyAPI client key belongs inline.
 3. Load the non-secret environment in the operator shell and validate the
    production-shaped Compose file:
 
@@ -210,8 +240,8 @@ or applies an unreviewed provider change.
    bash steward/containers/manage.sh config
    ```
 
-4. Run bootstrap. It takes the deployment lock, validates every credential
-   without reading or printing its value, creates the private directory
+4. Run bootstrap. It validates config/credential file metadata without reading
+   or printing values, takes the deployment lock, creates the private directory
    skeleton, clones the configured remote only when the canonical clone is
    absent, builds and verifies images, and records the first release:
 
@@ -222,7 +252,9 @@ or applies an unreviewed provider change.
 5. Initialize the exact current Store while the daemon is stopped. The wrapper
    runs `coquic-steward init` in the selected daemon image with the production
    configuration, secrets, identity, and mounts. Repeating an exact init opens
-   the Store without repairing or rewriting it; mismatches remain unchanged:
+   the Store without repairing or rewriting it; mismatches remain unchanged.
+   The canonical Python loader validates TOML contents during init/start; shell
+   `config` and bootstrap checks inspect only metadata, never parse secrets:
 
    ```sh
    bash steward/containers/manage.sh init
@@ -554,9 +586,12 @@ nix develop -c bash steward/containers/smoke-test.sh --shutdown
 nix develop -c bash steward/containers/production-canary.sh
 ```
 
-The canary exercises real production-identity provisioning, sessions, and
-checkpoints, plus rejection of a deliberately failing candidate test. Only the
-model executable is fake; it does not launch a live service or contact a provider.
+The canary exercises real production-identity provisioning, sessions, inline
+authentication through the stdin wrapper, checkpoints, and rejection of a
+deliberately failing candidate test. A fixed fake key and reserved proxy URL
+are checked by the fake model executable without network calls; daemon config
+and auth files stay outside task mounts. It never launches a live service or
+contacts a provider.
 
 These checks use fake inputs where possible and do not publish anything or
 contact Cloudflare. No local proof command performs a live Cloudflare, Site

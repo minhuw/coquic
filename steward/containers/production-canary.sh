@@ -42,7 +42,7 @@ socket="${DOCKER_SOCKET:-/var/run/docker.sock}"
 docker_gid="$(stat -c %g "$socket")"
 mkdir -m 700 "$tmp/home"
 # Same identity/capability/read-only-root boundary as Compose, but no service,
-# credentials, host repository, remote, or publication authority is supplied.
+# live credentials, host repository, remote, or publication authority is supplied.
 docker run --rm --name "$name" --init --network none --read-only \
   --user "$(id -u):$(id -g)" --group-add "$docker_gid" \
   --cap-drop ALL --security-opt no-new-privileges:true \

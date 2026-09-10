@@ -27,6 +27,22 @@ uv run --project steward coquic-steward diagnostics
 uv run --project steward coquic-steward daemon
 ```
 
+The example leaves `[steward.authentication]` commented out for credential-free
+inspection and idle fixtures. Model execution uses an explicitly configured
+`proxy_url` and inline `api_key` (a CLIProxyAPI **client** key, not its management
+key or an upstream login). Keep this TOML and backups owned by the daemon UID,
+regular/non-symlink and mode `0600` (`0400` also accepted). Never commit or print
+them. Production requires both values; see the [private config and network
+setup](CONTAINER_OPERATIONS.md#ordered-launch). They apply to planner, task, and
+resume invocations, with no separate Codex credential/auth file. Restart the
+daemon after changes.
+
+Migration: nonempty `codex_profile` and `COQUIC_STEWARD_CODEX_PROFILE` are no
+longer supported. Steward's private Codex homes never import global profiles,
+configuration, or saved logins. Remove those settings; use `steward.codex_model`,
+`steward.codex_reasoning_effort`, or `[steward.codex.<stage>]` for model settings,
+and `[steward.authentication]` `proxy_url`/`api_key` for authentication.
+
 Use `daemon --once` for one cycle. `tick` only records a durable wakeup; the
 daemon consumes it. `status`, `timeline`, `audit-invariants`, and `diagnostics`
 are read-only inspection commands.
@@ -44,8 +60,8 @@ then admits work. `dry_run = true` is the fail-closed default. It is a
 startup-only setting: changing it requires a restart, and legacy integration settings are rejected with migration guidance.
 
 In dry-run mode, local planning, validation, commits, and archive materialization
-may run, but every external operation is suppressed and recorded as a bounded
-proposal. Terminal tasks are sealed and verified locally, their private archives
+may run, including model API calls that consume usage. External task effects
+are suppressed and recorded as bounded proposals. Terminal tasks are sealed and verified locally, their private archives
 are retained, and disposable containers, worktrees, and session homes are removed.
 The aggregate result is `not-applicable`, `not-applied`, or `applied`; dry-run
 success is rendered as validated with the external operation not applied. No

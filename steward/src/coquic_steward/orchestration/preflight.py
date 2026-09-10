@@ -57,6 +57,12 @@ def run_preflight(
     the task container section is explicitly enabled.
     """
 
+    if (config.container.enabled or config.deployment.enabled) and (
+        config.authentication.proxy_url is None or config.authentication.api_key is None
+    ):
+        raise StewardPreflightError(
+            "preflight failed: configure [steward.authentication] with proxy_url and api_key"
+        )
     config.ensure_dirs()
     checks: list[str] = ["directories"]
     warnings: list[str] = []
@@ -104,7 +110,6 @@ def run_preflight(
         if container.state_host_path is None or not container.state_host_path.exists():
             raise StewardPreflightError("preflight failed: state host path is unavailable")
         _validate_container_host_mapping(config)
-        _check_secret_file(container.codex_api_key_path, "Codex API key")
         _check_executable(container.docker_bin, "Docker", expected_name="docker")
         docker = run_command([container.docker_bin, "info"], cwd=config.repo_root, timeout=PREFLIGHT_TIMEOUT_SECONDS)
         if not docker.ok:
@@ -155,7 +160,6 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
     if deployment.docker_gid is not None and deployment.docker_gid not in os.getgroups() and os.getgid() != deployment.docker_gid:
         raise StewardPreflightError("preflight failed: daemon lacks configured Docker socket group")
     credentials = (
-        (deployment.codex_credential_path, "Codex API credential"),
         (deployment.github_token_path, "GitHub API token"),
         (deployment.git_ssh_key_path, "Git SSH key"),
         (deployment.git_known_hosts_path, "Git known-hosts"),

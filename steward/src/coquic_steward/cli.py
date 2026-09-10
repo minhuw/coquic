@@ -63,10 +63,10 @@ from .publication.publisher import (
     publication_health_view,
 )
 
-app = typer.Typer(help="CoQUIC Steward maintenance manager.")
-enqueue_app = typer.Typer(help="Enqueue tasks.")
+app = typer.Typer(help="CoQUIC Steward maintenance manager.", pretty_exceptions_show_locals=False)
+enqueue_app = typer.Typer(help="Enqueue tasks.", pretty_exceptions_show_locals=False)
 app.add_typer(enqueue_app, name="enqueue")
-publication_app = typer.Typer(help="Inspect and recover publication state.")
+publication_app = typer.Typer(help="Inspect and recover publication state.", pretty_exceptions_show_locals=False)
 app.add_typer(publication_app, name="publication")
 
 _PUBLICATION_LIMIT = 100

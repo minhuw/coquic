@@ -31,7 +31,6 @@ def _config(tmp_path: Path, *, token: str = "token-value") -> StewardConfig:
         enabled=True,
         home=tmp_path,
         repository=tmp_path / "repository",
-        codex_credential_path=tmp_path / "codex",
         min_free_bytes=100,
         max_owned_docker_bytes=200,
         recovery_free_bytes=150,

@@ -95,8 +95,12 @@ class ControlLoopLedger:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
+        # Share the Store policy without a module-level circular import.
+        from ..storage.sqlite import _disable_sqlite_close_checkpoint
+
         uri = self.path.resolve().as_uri() + "?mode=rw"
         connection = sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None)
+        _disable_sqlite_close_checkpoint(connection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")

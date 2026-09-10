@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -87,29 +88,18 @@ def _add_canonical_remote(repo: Path) -> None:
 
 
 def _invoke_cli_process(repo: Path, home: Path, *args: str):
-    code = """
-import sys
-from typer.testing import CliRunner
-from coquic_steward.cli import app
-from coquic_steward.core.config import load_config
-from coquic_steward.storage import TaskStore
-
-result = CliRunner().invoke(app, sys.argv[1:])
-print(result.output, end="")
-if result.exit_code:
-    raise SystemExit(result.exit_code)
-state = TaskStore.open(load_config().db_path).get_daemon_state()
-assert state is not None and state["lifecycle"] == "stopped", state
-"""
     env = os.environ.copy()
     env["COQUIC_HOME"] = str(home)
+    env["COQUIC_REPOSITORY"] = str(repo)
+    env["COQUIC_STEWARD_CONFIG_PATH"] = str(home / "steward.toml")
     return subprocess.run(
-        [sys.executable, "-c", code, *args],
+        [sys.executable, "-m", "coquic_steward.cli", *args],
         cwd=repo,
         env=env,
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
 
 
@@ -846,20 +836,33 @@ def test_cli_daemon_once_reopens_exact_store_in_new_process(
         "[steward]\ndry_run = true\nlocal_codex_test_harness = true\n\n[steward.signals]\nenabled = []\n",
         encoding="utf-8",
     )
-    config = load_config()
-    store = TaskStore.create(config.db_path)
-    store.engine.dispose()
+    config = load_config(repo_root=repo, config_path=coquic_home / "steward.toml")
+    initialized = _invoke_cli_process(repo, coquic_home, "init")
+    assert initialized.returncode == 0, initialized.stderr
 
-    daemon = _invoke_cli_process(
-        repo,
-        coquic_home,
-        "daemon",
-        "--once",
-        "--no-plan",
-        "--no-dispatch",
-    )
-    assert daemon.returncode == 0, daemon.stderr
-    assert "TickResult" in daemon.stdout
+    for _ in range(2):
+        daemon = _invoke_cli_process(
+            repo,
+            coquic_home,
+            "daemon",
+            "--once",
+            "--no-plan",
+            "--no-dispatch",
+        )
+        assert daemon.returncode == 0, daemon.stderr
+        assert "TickResult" in daemon.stdout
+        for suffix in ("-wal", "-shm"):
+            assert Path(f"{config.db_path}{suffix}").is_file()
+
+        readiness = _invoke_cli_process(repo, coquic_home, "health", "--store-only")
+        assert readiness.returncode == 0, readiness.stderr
+        assert json.loads(readiness.stdout) == {"mode": "store-only", "store": "ok"}
+
+        health = _invoke_cli_process(repo, coquic_home, "health")
+        assert health.returncode == 1, health.stderr
+        payload = json.loads(health.stdout)
+        assert payload["store"] == "ok"
+        assert payload["lifecycle"] == "stopped"
 
     status = _invoke_cli_process(repo, coquic_home, "status")
     assert status.returncode == 0, status.stderr

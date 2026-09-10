@@ -19,6 +19,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from infra.cloudflare.__main__ import (  # noqa: E402
     SITE_TOKEN_NAME,
     STEWARD_TOKEN_NAME,
+    _allow_policy,
     _derive_s3_secret_access_key,
     build_stack,
 )
@@ -126,12 +127,13 @@ class RecordingMocks(Mocks):
     def call(self, args: MockCallArgs) -> dict[str, Any]:
         self.calls.append(args)
         if args.token != (
-            "cloudflare:index/getAccountPermissionGroups:getAccountPermissionGroups"
+            "cloudflare:index/getAccountApiTokenPermissionGroupsList:"
+            "getAccountApiTokenPermissionGroupsList"
         ):
             raise AssertionError(f"unexpected provider call: {args.token}")
         names = {
             "D1 Read": "1" * 32,
-            "D1 Edit": "2" * 32,
+            "D1 Write": "2" * 32,
             "Workers R2 Storage Read": "3" * 32,
             "Workers R2 Storage Write": "4" * 32,
         }
@@ -142,7 +144,14 @@ class RecordingMocks(Mocks):
             "accountId": args.args["accountId"],
             "name": name,
             "maxItems": args.args.get("maxItems"),
-            "results": [{"id": names[name], "name": name}],
+            "scope": args.args.get("scope"),
+            "results": [
+                {
+                    "id": names[name],
+                    "name": name,
+                    "scopes": ["com.cloudflare.api.account"],
+                }
+            ],
         }
 
 
@@ -240,11 +249,15 @@ def test_tokens_and_permissions_are_least_privilege() -> None:
     mocks = run_mock_stack()
     assert [call.args["name"] for call in mocks.calls] == [
         "D1 Read",
-        "D1 Edit",
+        "D1 Write",
         "Workers R2 Storage Read",
         "Workers R2 Storage Write",
     ]
     assert all(call.args["maxItems"] == 2.0 for call in mocks.calls)
+    assert all(call.args["accountId"] == "a" * 32 for call in mocks.calls)
+    assert all(
+        call.args["scope"] == "com.cloudflare.api.account" for call in mocks.calls
+    )
 
     tokens = {
         resource.inputs["name"]: resource
@@ -255,6 +268,7 @@ def test_tokens_and_permissions_are_least_privilege() -> None:
     selector = json.dumps(
         {"com.cloudflare.api.account." + "a" * 32: "*"},
         sort_keys=True,
+        separators=(",", ":"),
     )
     steward_policy = tokens[STEWARD_TOKEN_NAME].inputs["policies"][0]
     assert steward_policy["effect"] == "allow"
@@ -270,6 +284,20 @@ def test_tokens_and_permissions_are_least_privilege() -> None:
     assert site_policy["effect"] == "allow"
     assert site_policy["resources"] == selector
     assert site_policy["permissionGroups"] == [{"id": "1" * 32}]
+
+
+def test_token_policy_matches_provider_normalization() -> None:
+    policy = _allow_policy(
+        "a" * 32, {"read": "2" * 32, "write": "1" * 32}, ("read", "write"),
+    )
+    assert policy == {
+        "effect": "allow",
+        "permission_groups": [{"id": "1" * 32}, {"id": "2" * 32}],
+        "resources": '{"com.cloudflare.api.account.' + "a" * 32 + '":"*"}',
+    }
+    assert _allow_policy("a" * 32, {"read": "2" * 32}, ("read",))["permission_groups"] == [
+        {"id": "2" * 32},
+    ]
 
 
 def test_tokens_and_outputs_derive_lower_case_sha256() -> None:

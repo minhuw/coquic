@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Cloudflare infrastructure for CoQUIC publication"
 requires-python = ">=3.11"
 dependencies = [
+  # Pulumi's Python language host uses `python -m pip` for package discovery.
+  "pip",
   "pulumi>=3.192.0,<4",
   "pulumi-cloudflare==6.18.0",
 ]

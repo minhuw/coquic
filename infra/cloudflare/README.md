@@ -15,11 +15,15 @@ the D1 database must never receive private-shaped rows.
 
 Run the bootstrap from the operator's local reproducible shell. It is not a
 GitHub Actions step, a Site deploy step, or a Steward lifecycle hook.
+The default Nix shell bundles Pulumi's Python language plugin; reopen
+`nix develop` after shell changes. Run Pulumi through `uv run --locked --project
+infra/cloudflare` from the repository root so its Python SDK and package-discovery
+`pip` come from the locked project environment.
 
 Before the bootstrap, the operator must have:
 
 - `nix develop`, Pulumi, Wrangler, and the repository checkout available;
-- a logged-in Pulumi CLI and the selected `production` stack;
+- a logged-in Pulumi CLI and the selected `coquic-production` stack;
 - a bootstrap `CLOUDFLARE_API_TOKEN` in the process environment only;
 - an absolute credential directory that is either absent or owned by the
   invoking user and mode `0700`; and
@@ -33,14 +37,30 @@ file, or captured output. It is not a Steward or Site runtime credential. Keep
 Pulumi state and any stack configuration containing secrets outside source
 control.
 
-Initialize or select the stack and set only these canonical non-secret values:
+The canonical non-secret inputs are listed in
+`Pulumi.coquic-production.yaml.example`.
+
+If an existing `production` stack manages these cloud resources, do not create
+a parallel stack. Optional operator-only migration, from `infra/cloudflare`
+with Pulumi already logged in:
+
+```sh
+pulumi stack select production
+pulumi stack rename coquic-production
+```
+
+After renaming, rerun and review the bootstrap preview. Do not copy or rename
+old saved plans or review records.
+
+For a fresh deployment without existing cloud resources, initialize or select
+`coquic-production` and set only these canonical non-secret values:
 
 ```sh
 nix develop
 nix develop -c uv sync --project infra/cloudflare --locked
 cd infra/cloudflare
 pulumi login
-pulumi stack select production
+pulumi stack select coquic-production --create
 pulumi config set account_id <account-id>
 pulumi config set zone_id <zone-id>
 pulumi config set database_name coquic-publication
@@ -61,8 +81,9 @@ Return to the repository root after setting the Pulumi configuration. The only
 rollout command is:
 
 ```sh
-nix develop -c infra/cloudflare/scripts/deploy-production.sh \
-  --stack production \
+nix develop -c uv run --locked --project infra/cloudflare \
+  bash infra/cloudflare/scripts/deploy-production.sh \
+  --stack coquic-production \
   --credentials-dir /srv/coquic-steward/private/credentials
 ```
 
@@ -73,14 +94,17 @@ retained in a private mode-`0700` plan directory; both files are mode `0400`.
 The default directory is `${XDG_STATE_HOME:-$HOME/.local/state}/coquic-cloudflare-bootstrap`;
 use `--plan-dir` to select another private absolute directory. Stop when the
 preview is malformed, contains a delete, replacement, or update, proposes a
-broader permission, or exposes a secret. The command never applies a plan in
-its default form.
+broader permission, or exposes a secret. Unchanged resources are included so
+retries can validate the complete graph; Pulumi's exact `[secret]` redaction
+marker is accepted, never an exposed credential value. The command never
+applies a plan in its default form.
 
 After reviewing the preview, rerun the same command with `--apply`:
 
 ```sh
-nix develop -c infra/cloudflare/scripts/deploy-production.sh \
-  --stack production \
+nix develop -c uv run --locked --project infra/cloudflare \
+  bash infra/cloudflare/scripts/deploy-production.sh \
+  --stack coquic-production \
   --credentials-dir /srv/coquic-steward/private/credentials \
   --apply
 ```
@@ -103,6 +127,11 @@ capture. Both objects carry the same `d1_database_id`; mismatched IDs,
 malformed IDs, unexpected fields, or invalid URLs stop the run without printing
 values.
 
+It generates a private temporary Wrangler binding pinned to the validated
+Pulumi database UUID and explicitly selects the validated account. No manual
+Wrangler configuration or database-name discovery is needed. The binding and
+Wrangler logs are removed with the private temporary directory on exit.
+
 It then queries D1 with a fixed read-only `sqlite_master` statement:
 
 - a blank database is bootstrapped from `contracts/steward-cloud/d1.sql` and
@@ -110,6 +139,10 @@ It then queries D1 with a fixed read-only `sqlite_master` statement:
 - an exact schema is a no-op; and
 - malformed output or any schema drift stops before host credentials are
   written.
+
+D1's system-owned `_cf_KV` table is excluded from the application comparison;
+a database containing only that table is blank. Other `_cf_` objects and all
+application tables, indexes, and triggers remain subject to the exact check.
 
 Schema changes require a separately reviewed forward change. Do not edit the
 schema in place or use a second database to hide drift.
@@ -157,6 +190,12 @@ The stages are intentionally separate:
 | Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership, mode, or path issues and rerun. |
 | Site SSH handoff | D1 and Steward files remain | Repair the protected SSH boundary and rerun; no automatic provider reversal runs. |
 
+After a post-apply failure (such as D1 inspection), the previous plan has
+already been consumed. Rerun without `--apply` and review a fresh preview;
+if the cloud apply completed without drift, expect eight unchanged resources.
+Then rerun with `--apply` to finish the remaining bootstrap steps. Do not
+recreate resources or restore the consumed plan.
+
 Each new preview repeats the destructive-plan and secret checks. An apply
 consumes only the retained reviewed plan, and the bootstrap repeats the D1
 schema check. An exact D1 schema is a no-op, and existing credential files are
@@ -171,8 +210,9 @@ provider reversal command.
 
 ## Local checks
 
-The provider tests use mocks and do not contact Cloudflare, Wrangler, SSH, or a
-live endpoint:
+The provider tests use mocks; the toolchain regression runs a real Pulumi
+Python preview against an isolated local file backend. Neither contacts
+Cloudflare, Wrangler, SSH, or a live endpoint:
 
 ```sh
 nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests -q

@@ -40,6 +40,7 @@ if args[:1] == ["whoami"]:
         raise SystemExit(1)
     print("operator@pulumi.example")
     raise SystemExit(0)
+assert args[args.index("--stack") + 1] == "coquic-production"
 if args[:1] == ["preview"]:
     if case == "preview-failure":
         print("provider output is hidden", file=sys.stderr)
@@ -47,6 +48,7 @@ if args[:1] == ["preview"]:
     plan = Path(args[args.index("--save-plan") + 1])
     plan.write_text(os.environ.get("PULUMI_PLAN_CONTENT", "saved-plan"), encoding="utf-8")
     resources = [
+        ("pulumi:pulumi:Stack", "coquic-cloudflare-coquic-production"),
         ("cloudflare:index/d1Database:D1Database", "publicationDatabase"),
         ("cloudflare:index/r2Bucket:R2Bucket", "publicArtifacts"),
         ("cloudflare:index/r2Bucket:R2Bucket", "privateOriginals"),
@@ -56,17 +58,54 @@ if args[:1] == ["preview"]:
         ("cloudflare:index/accountToken:AccountToken", "siteReaderToken"),
     ]
     if case == "malformed-preview":
-        print("not structured JSON")
+        print("not structured JSON fixture-secret")
+    elif case == "missing-operations":
+        print(json.dumps({"diagnostics": []}))
     elif case == "update":
-        print(json.dumps({"op": "update", "type": resources[0][0], "name": resources[0][1]}))
+        print(json.dumps({"op": "update", "type": resources[1][0], "name": resources[1][1]}))
     elif case == "destructive":
-        print(json.dumps({"op": "delete", "type": resources[0][0], "name": resources[0][1]}))
+        print(json.dumps({"op": "delete", "type": resources[1][0], "name": resources[1][1]}))
     elif case == "unexpected":
         resources.append(("cloudflare:index/r2Bucket:R2Bucket", "unexpectedBucket"))
         for resource_type, name in resources:
             print(json.dumps({"op": "same", "type": resource_type, "name": name}))
     elif case == "secret-preview":
-        print(json.dumps({"op": "same", "type": resources[0][0], "name": resources[0][1], "output": "fixture-secret"}))
+        print(json.dumps({"op": "same", "type": resources[1][0], "name": resources[1][1], "output": "fixture-secret"}))
+    elif case.startswith("summary"):
+        assert "--show-sames" in args
+        steps = [
+            {
+                "op": "create",
+                "urn": f"urn:pulumi:coquic-production::coquic-cloudflare::{resource_type}::{name}",
+                "newState": {"type": resource_type, "protect": True},
+                "detailedDiff": None,
+            }
+            for resource_type, name in resources
+        ]
+        if case == "summary-wrong-stack":
+            steps[0]["urn"] = steps[0]["urn"].replace("coquic-production", "other-stack")
+        elif case == "summary-stack-update":
+            steps[0]["op"] = "update"
+        elif case == "summary-stack-delete":
+            steps[0]["op"] = "delete"
+        elif case == "summary-stack-replace":
+            steps[0]["op"] = "replace"
+        elif case == "summary-extra-resource":
+            steps.append({"op": "create", "type": "pulumi:providers:other", "name": "default"})
+        elif case == "summary-conflict":
+            steps.append({**steps[0], "op": "same"})
+        elif case == "summary-no-identity":
+            steps.append({"op": "create"})
+        elif case == "summary-secret":
+            steps[0]["newState"]["outputs"] = {"api_key": "fixture-secret"}
+        elif case == "summary-secret-wrapper":
+            steps[0]["newState"]["outputs"] = {"secret": True, "value": "fixture-secret"}
+        elif case.startswith("summary-retry"):
+            for step in steps:
+                step["op"] = "same"
+            value = json.loads(os.environ.get("PREVIEW_SECRET_VALUE", '"[secret]"'))
+            steps[0]["oldState"] = {"outputs": {"steward_s3_secret_access_key": value}}
+        print(json.dumps({"steps": steps, "diagnostics": [], "changeSummary": {steps[0]["op"]: len(steps)}}))
     else:
         operation = "create" if case == "ok" else "same"
         for resource_type, name in resources:
@@ -77,7 +116,7 @@ if args[:1] == ["preview"]:
                         "op": resource_operation,
                         "type": resource_type,
                         "name": name,
-                        "urn": f"urn:pulumi:production::coquic-cloudflare::{resource_type}::{name}",
+                        "urn": f"urn:pulumi:coquic-production::coquic-cloudflare::{resource_type}::{name}",
                     }
                 }
             }))
@@ -121,6 +160,19 @@ with log.open("a", encoding="utf-8") as handle:
 
 if args[:2] != ["d1", "execute"]:
     raise SystemExit(2)
+assert args[2] == "PUBLICATION", "d1 execute takes a name or binding, not a UUID"
+assert os.environ.get("CLOUDFLARE_ACCOUNT_ID") == "a" * 32
+config_path = Path(args[args.index("--config") + 1])
+assert config_path.is_file() and not config_path.is_symlink()
+assert config_path.stat().st_mode & 0o777 == 0o600
+assert json.loads(config_path.read_text(encoding="utf-8")) == {
+    "d1_databases": [{
+        "binding": "PUBLICATION",
+        "database_id": "12345678-1234-4abc-8def-1234567890ab",
+    }],
+}
+assert Path(os.environ["WRANGLER_LOG_PATH"]).parent == config_path.parent
+assert os.environ.get("WRANGLER_SEND_METRICS") == "false"
 case = os.environ.get("WRANGLER_CASE", "exact")
 if "--file" in args:
     if case == "bootstrap-failure":
@@ -143,7 +195,8 @@ if case == "drift":
     }]}))
     raise SystemExit(0)
 if case in {"blank", "bootstrap-failure"} and not Path(os.environ["WRANGLER_BOOTSTRAPPED"]).exists():
-    print(json.dumps({"success": True, "results": []}))
+    rows = json.loads(Path(os.environ["SCHEMA_ROWS"]).read_text(encoding="utf-8"))["results"]
+    print(json.dumps({"success": True, "results": [row for row in rows if row["name"] == "_cf_KV"]}))
     raise SystemExit(0)
 rows_key = "SCHEMA_ROWS_POPULATED" if case == "exact-populated" else "SCHEMA_ROWS"
 print(Path(os.environ[rows_key]).read_text(encoding="utf-8"), end="")
@@ -214,6 +267,8 @@ def _schema_rows(path: Path, *, populated: bool = False) -> None:
     connection = sqlite3.connect(":memory:")
     try:
         connection.execute("PRAGMA foreign_keys = ON")
+        # D1 includes this system table even before application initialization.
+        connection.execute("CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID")
         connection.executescript(SCHEMA.read_text(encoding="utf-8"))
         if populated:
             connection.execute(
@@ -367,15 +422,20 @@ def harness(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _run(harness: dict[str, Any], *extra: str, apply: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    harness: dict[str, Any],
+    *extra: str,
+    apply: bool = False,
+    stack: str | None = "coquic-production",
+) -> subprocess.CompletedProcess[str]:
     args = [
-        "--stack",
-        "production",
         "--credentials-dir",
         str(harness["credentials"]),
         "--plan-dir",
         str(harness["plan_dir"]),
     ]
+    if stack is not None:
+        args.extend(["--stack", stack])
     if apply:
         args.append("--apply")
     args.extend(extra)
@@ -426,6 +486,10 @@ def test_help_describes_preview_and_apply() -> None:
     )
     assert result.returncode == 0
     text = result.stdout + result.stderr
+    assert text.splitlines()[0] == (
+        "usage: deploy-production.sh --stack coquic-production "
+        "--credentials-dir DIR [--plan-dir DIR] [--apply]"
+    )
     assert "Preview is read-only" in text
     assert "--apply" in text
 
@@ -437,10 +501,11 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     assert "no changes applied" in result.stdout
     assert not harness["applied"].exists()
     assert not any(harness["credentials"].iterdir())
-    reviewed_plan = harness["plan_dir"] / "production.plan"
-    review_record = harness["plan_dir"] / "production.review.json"
+    reviewed_plan = harness["plan_dir"] / "coquic-production.plan"
+    review_record = harness["plan_dir"] / "coquic-production.review.json"
     assert reviewed_plan.is_file()
     assert review_record.is_file()
+    assert json.loads(review_record.read_text(encoding="utf-8"))["stack"] == "coquic-production"
     assert stat.S_IMODE(reviewed_plan.stat().st_mode) == 0o400
     assert stat.S_IMODE(review_record.stat().st_mode) == 0o400
     assert stat.S_IMODE(harness["plan_dir"].stat().st_mode) == 0o700
@@ -448,11 +513,88 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     pulumi = _argv(logs, "pulumi")
     assert [argv[0] for argv in pulumi] == ["whoami", "preview"]
     preview = pulumi[1]
-    assert preview[preview.index("--stack") + 1] == "production"
+    assert preview[preview.index("--stack") + 1] == "coquic-production"
     assert "--save-plan" in preview
+    assert "--show-sames" in preview
+    assert Path(preview[preview.index("--save-plan") + 1]).name == "coquic-production.plan"
     assert _argv(logs, "wrangler") == []
     assert all(isinstance(entry, dict) for entry in logs)
     assert "bootstrap-" not in result.stdout + result.stderr
+
+
+def test_preview_accepts_pulumi_summary_with_root_stack(harness: dict[str, Any]) -> None:
+    harness["env"]["PULUMI_CASE"] = "summary"
+    result = _run(harness)
+    assert result.returncode == 0, result.stderr
+    assert "create=8" in result.stdout
+    assert "resources=8" in result.stdout
+    assert not harness["applied"].exists()
+    assert _argv(_logs(harness), "wrangler") == []
+    assert not any(harness["credentials"].iterdir())
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("summary-wrong-stack", "resource allowlist mismatch"),
+        ("summary-stack-update", "update, delete, replacement, or unsupported operation"),
+        ("summary-stack-delete", "update, delete, replacement, or unsupported operation"),
+        ("summary-stack-replace", "update, delete, replacement, or unsupported operation"),
+        ("summary-extra-resource", "resource allowlist mismatch"),
+        ("summary-conflict", "conflicting resource operations"),
+        ("summary-no-identity", "operation without resource identity"),
+        ("summary-secret", "unredacted sensitive field"),
+        ("summary-secret-wrapper", "unredacted secret wrapper"),
+        ("secret-preview", "secret-shaped string"),
+        ("malformed-preview", "invalid preview JSON"),
+        ("missing-operations", "missing resource operations"),
+    ],
+)
+def test_preview_checks_root_stack_without_bypassing_safety(
+    harness: dict[str, Any], case: str, reason: str,
+) -> None:
+    harness["env"]["PULUMI_CASE"] = case
+    result = _run(harness)
+    assert result.returncode != 0
+    assert result.stderr == (
+        "error: Pulumi preview was not a safe structured plan for the protected stack: "
+        f"{reason}\n"
+    )
+    assert "fixture-secret" not in result.stdout + result.stderr
+    assert not any(harness["plan_dir"].iterdir())
+    assert not harness["applied"].exists()
+    assert _argv(_logs(harness), "wrangler") == []
+
+
+def test_retry_reviews_unchanged_resources_and_redacted_outputs(
+    harness: dict[str, Any],
+) -> None:
+    harness["env"]["WRANGLER_CASE"] = "query-failure"
+    failed = _reviewed_apply(harness)
+    assert failed.returncode != 0
+    assert harness["applied"].exists()
+    assert not any(harness["plan_dir"].iterdir())
+    harness["env"].update(PULUMI_CASE="summary-retry", WRANGLER_CASE="exact")
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
+    assert "create=0 update=0 delete=0 same=8" in preview.stdout
+    result = _run(harness, apply=True)
+    assert result.returncode == 0, result.stderr
+    assert harness["site_input"].exists()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["[secret]-fixture-secret", "fixture-secret", " [secret]", {"secret": True, "value": "[secret]"}],
+)
+def test_retry_rejects_nonredacted_secret_outputs(harness: dict[str, Any], value: Any) -> None:
+    harness["env"]["PULUMI_CASE"] = "summary-retry"
+    harness["env"]["PREVIEW_SECRET_VALUE"] = json.dumps(value)
+    result = _run(harness)
+    assert result.returncode != 0
+    assert "safe structured plan" in result.stderr
+    assert "fixture-secret" not in result.stdout + result.stderr
+    assert not any(harness["plan_dir"].iterdir())
 
 
 def test_apply_requires_a_prior_reviewed_plan(harness: dict[str, Any]) -> None:
@@ -480,8 +622,8 @@ def test_apply_consumes_reviewed_plan_without_a_new_preview(
         "stack",
     ]
     assert harness["up_plan"].read_text(encoding="utf-8") == "saved-plan"
-    assert not (harness["plan_dir"] / "production.plan").exists()
-    assert not (harness["plan_dir"] / "production.review.json").exists()
+    assert not (harness["plan_dir"] / "coquic-production.plan").exists()
+    assert not (harness["plan_dir"] / "coquic-production.review.json").exists()
 
 
 def test_apply_pins_the_reviewed_plan_against_concurrent_replacement(
@@ -498,7 +640,7 @@ def test_apply_pins_the_reviewed_plan_against_concurrent_replacement(
             "bash",
             str(SCRIPT),
             "--stack",
-            "production",
+            "coquic-production",
             "--credentials-dir",
             str(harness["credentials"]),
             "--plan-dir",
@@ -527,13 +669,13 @@ def test_apply_pins_the_reviewed_plan_against_concurrent_replacement(
 
     assert apply_process.returncode == 0, stdout + stderr
     assert harness["up_plan"].read_text(encoding="utf-8") == "replacement-plan-P"
-    assert (harness["plan_dir"] / "production.plan").read_text(encoding="utf-8") == "replacement-plan-Q"
+    assert (harness["plan_dir"] / "coquic-production.plan").read_text(encoding="utf-8") == "replacement-plan-Q"
 
 
 def test_apply_rejects_a_changed_reviewed_plan(harness: dict[str, Any]) -> None:
     preview = _run(harness)
     assert preview.returncode == 0, preview.stderr
-    reviewed_plan = harness["plan_dir"] / "production.plan"
+    reviewed_plan = harness["plan_dir"] / "coquic-production.plan"
     reviewed_plan.chmod(0o600)
     reviewed_plan.write_text("tampered-plan", encoding="utf-8")
     reviewed_plan.chmod(0o400)
@@ -575,24 +717,35 @@ def test_preview_rejects_secret_shaped_data_without_leaking_it(
     assert _argv(_logs(harness), "wrangler") == []
 
 
-def test_wrong_stack_and_missing_auth_are_rejected(harness: dict[str, Any]) -> None:
-    wrong = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--stack",
-            "staging",
-            "--credentials-dir",
-            str(harness["credentials"]),
-        ],
-        cwd=ROOT,
-        env=harness["env"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert wrong.returncode != 0
-    assert "production" in wrong.stderr
+@pytest.mark.parametrize("stack", ["production", "staging"])
+@pytest.mark.parametrize("source", ["cli", "env"])
+@pytest.mark.parametrize("apply", [False, True])
+def test_wrong_stack_is_rejected_before_calls_or_plan_invalidation(
+    harness: dict[str, Any], stack: str, source: str, apply: bool
+) -> None:
+    artifacts = {
+        harness["plan_dir"] / f"{name}.{suffix}": f"retained-{name}-{suffix}"
+        for name in (stack, "coquic-production")
+        for suffix in ("plan", "review.json")
+    }
+    for path, content in artifacts.items():
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o400)
+    harness["env"]["PULUMI_STACK"] = stack if source == "env" else "coquic-production"
+
+    result = _run(harness, stack=stack if source == "cli" else None, apply=apply)
+
+    assert result.returncode != 0
+    assert result.stderr == "error: only the coquic-production stack is allowed\n"
+    assert _logs(harness) == []
+    assert set(harness["plan_dir"].iterdir()) == set(artifacts)
+    for path, content in artifacts.items():
+        assert path.read_text(encoding="utf-8") == content
+        assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    assert not any(harness["credentials"].iterdir())
+
+
+def test_missing_auth_is_rejected(harness: dict[str, Any]) -> None:
     no_auth_env = harness["env"].copy()
     no_auth_env.pop("CLOUDFLARE_API_TOKEN")
     no_auth = subprocess.run(
@@ -600,7 +753,7 @@ def test_wrong_stack_and_missing_auth_are_rejected(harness: dict[str, Any]) -> N
             "bash",
             str(SCRIPT),
             "--stack",
-            "production",
+            "coquic-production",
             "--credentials-dir",
             str(harness["credentials"]),
         ],
@@ -614,9 +767,14 @@ def test_wrong_stack_and_missing_auth_are_rejected(harness: dict[str, Any]) -> N
     assert "API_TOKEN" in no_auth.stderr
 
 
+@pytest.mark.parametrize("ambient_account", [None, "f" * 32])
 def test_apply_bootstraps_schema_installs_credentials_and_hands_site(
-    harness: dict[str, Any],
+    harness: dict[str, Any], ambient_account: str | None,
 ) -> None:
+    if ambient_account is None:
+        harness["env"].pop("CLOUDFLARE_ACCOUNT_ID", None)
+    else:
+        harness["env"]["CLOUDFLARE_ACCOUNT_ID"] = ambient_account
     harness["env"]["WRANGLER_CASE"] = "blank"
     result = _reviewed_apply(harness)
     assert result.returncode == 0, result.stderr
@@ -646,6 +804,9 @@ def test_apply_bootstraps_schema_installs_credentials_and_hands_site(
     wrangler = _argv(_logs(harness), "wrangler")
     assert any("--file" in argv for argv in wrangler)
     assert len([argv for argv in wrangler if "--command" in argv]) == 2
+    config_paths = {Path(argv[argv.index("--config") + 1]) for argv in wrangler}
+    assert len(config_paths) == 1
+    assert all(not path.parent.exists() for path in config_paths)
     joined = " ".join(json.dumps(entry) for entry in _logs(harness))
     assert "bootstrap-" not in joined
 
@@ -676,6 +837,33 @@ def test_schema_failure_stops_before_host_mutation(
     assert not harness["site_input"].exists()
 
 
+@pytest.mark.parametrize("initialized", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "name", "table", "sql"),
+    [
+        ("table", "_cf_application", "_cf_application", "CREATE TABLE _cf_application (id INTEGER)"),
+        ("table", " _cf_KV ", " _cf_KV ", 'CREATE TABLE " _cf_KV " (id INTEGER)'),
+        ("view", "_cf_KV", "_cf_KV", "CREATE VIEW _cf_KV AS SELECT 1"),
+        ("index", "_cf_KV", "tasks", "CREATE INDEX _cf_KV ON tasks (task_id)"),
+    ],
+)
+def test_system_table_exception_does_not_hide_schema_drift(
+    harness: dict[str, Any], initialized: bool, kind: str, name: str, table: str, sql: str,
+) -> None:
+    path = Path(harness["env"]["SCHEMA_ROWS"])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not initialized:
+        payload["results"] = [row for row in payload["results"] if row["name"] == "_cf_KV"]
+    payload["results"].append({"type": kind, "name": name, "tbl_name": table, "sql": sql})
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = _reviewed_apply(harness)
+    assert result.returncode != 0
+    assert "schema drift" in result.stderr
+    assert not harness["bootstrapped"].exists()
+    assert not any(harness["credentials"].iterdir())
+    assert not harness["site_input"].exists()
+
+
 def test_pulumi_apply_failure_stops_before_d1_or_files(harness: dict[str, Any]) -> None:
     harness["env"]["PULUMI_CASE"] = "apply-failure"
     result = _reviewed_apply(harness)
@@ -684,8 +872,8 @@ def test_pulumi_apply_failure_stops_before_d1_or_files(harness: dict[str, Any]) 
     assert _argv(_logs(harness), "wrangler") == []
     assert not any(harness["credentials"].iterdir())
     for path in (
-        harness["plan_dir"] / "production.plan",
-        harness["plan_dir"] / "production.review.json",
+        harness["plan_dir"] / "coquic-production.plan",
+        harness["plan_dir"] / "coquic-production.review.json",
     ):
         assert path.is_file()
         assert stat.S_IMODE(path.stat().st_mode) == 0o400

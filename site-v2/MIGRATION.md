@@ -23,11 +23,15 @@ nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contract
 ## Stage 2: Bootstrap Cloudflare locally
 
 Cloudflare bootstrap is an explicit local operator action, never a Site GitHub
-workflow step. From the reproducible Nix shell, run the read-only preview:
+workflow step. Select `coquic-production` first; for an existing `production`
+stack, follow the [stack rename guidance](../infra/cloudflare/README.md#inputs-and-authority)
+instead of creating a parallel stack. From the reproducible Nix shell, run the
+read-only preview:
 
 ```sh
-nix develop -c infra/cloudflare/scripts/deploy-production.sh \
-  --stack production \
+nix develop -c uv run --locked --project infra/cloudflare \
+  bash infra/cloudflare/scripts/deploy-production.sh \
+  --stack coquic-production \
   --credentials-dir /absolute/path/to/steward/credentials
 ```
 
@@ -37,8 +41,9 @@ privately; add `--apply` only after that review to consume exactly that plan.
 The apply invocation never creates a replacement preview:
 
 ```sh
-nix develop -c infra/cloudflare/scripts/deploy-production.sh \
-  --stack production \
+nix develop -c uv run --locked --project infra/cloudflare \
+  bash infra/cloudflare/scripts/deploy-production.sh \
+  --stack coquic-production \
   --credentials-dir /absolute/path/to/steward/credentials \
   --apply
 ```

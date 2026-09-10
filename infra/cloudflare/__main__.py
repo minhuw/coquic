@@ -31,19 +31,21 @@ STEWARD_TOKEN_NAME = "coquic-steward-publication"
 SITE_TOKEN_NAME = "coquic-site-reader"
 
 _D1_READ = "D1 Read"
-_D1_EDIT = "D1 Edit"
+_D1_WRITE = "D1 Write"
 _R2_READ = "Workers R2 Storage Read"
 _R2_WRITE = "Workers R2 Storage Write"
-_STEWARD_PERMISSION_GROUPS = (_D1_READ, _D1_EDIT, _R2_READ, _R2_WRITE)
+_STEWARD_PERMISSION_GROUPS = (_D1_READ, _D1_WRITE, _R2_READ, _R2_WRITE)
 _SITE_PERMISSION_GROUPS = (_D1_READ,)
 
 
 def _account_resource_selector(account_id: str) -> str:
     """Return the account-wide selector required by AccountToken policies."""
 
+    # Cloudflare returns compact JSON; the provider compares this as a string.
     return json.dumps(
         {f"com.cloudflare.api.account.{account_id}": "*"},
         sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -61,9 +63,11 @@ def _resolve_permission_group_ids(
 
     resolved: dict[str, str] = {}
     for name in names:
-        result = cloudflare.get_account_permission_groups(
+        # AccountToken policies use API-token groups, not IAM permission groups.
+        result = cloudflare.get_account_api_token_permission_groups_list(
             account_id=account_id,
             name=name,
+            scope="com.cloudflare.api.account",
             max_items=2,
         )
         matches = result.results
@@ -101,7 +105,8 @@ def _allow_policy(
         name not in permission_group_ids for name in selected_names
     ):
         raise ValueError("token policy contains an unresolved permission group")
-    selected_ids = [permission_group_ids[name] for name in selected_names]
+    # Match the provider's canonical ordering, not permission lookup order.
+    selected_ids = sorted(permission_group_ids[name] for name in selected_names)
     if len(set(selected_ids)) != len(selected_ids):
         raise ValueError("token policy contains duplicate permission group IDs")
     return {

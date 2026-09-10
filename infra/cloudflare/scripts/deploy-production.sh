@@ -14,7 +14,7 @@ readonly schema_path="${repository_root}/contracts/steward-cloud/d1.sql"
 
 usage() {
   cat >&2 <<'EOF'
-usage: deploy-production.sh --stack production --credentials-dir DIR [--plan-dir DIR] [--apply]
+usage: deploy-production.sh --stack coquic-production --credentials-dir DIR [--plan-dir DIR] [--apply]
 
 Preview is read-only and retains an accepted plan in the private plan directory.
 Review that plan, then rerun with --apply to consume exactly that plan; --apply
@@ -91,7 +91,7 @@ while (($#)); do
 done
 
 [[ -n "${stack}" ]] || fail "--stack is required"
-[[ "${stack}" == "production" ]] || fail "only the production stack is allowed"
+[[ "${stack}" == "coquic-production" ]] || fail "only the coquic-production stack is allowed"
 [[ -n "${credentials_dir}" ]] || fail "--credentials-dir is required"
 [[ "${credentials_dir}" == /* ]] || fail "--credentials-dir must be absolute"
 if [[ -z "${state_home}" && -z "${COQUIC_CLOUDFLARE_PLAN_DIR:-}" ]]; then
@@ -329,10 +329,11 @@ fi
 if ((apply == 0)); then
   preview_output="${temporary_dir}/pulumi-preview.json"
   preview_error="${temporary_dir}/pulumi-preview.err"
-  saved_plan="${temporary_dir}/production.plan"
+  saved_plan="${temporary_dir}/${stack}.plan"
   if ! "${pulumi_bin}" preview \
     --stack "${stack}" \
     --json \
+    --show-sames \
     --non-interactive \
     --save-plan "${saved_plan}" \
     >"${preview_output}" 2>"${preview_error}"; then
@@ -343,10 +344,10 @@ if ((apply == 0)); then
 fi
 
 if ((apply == 0)); then
-  # Pulumi JSON is a stream of event objects in current releases, while test
-# doubles and older releases may emit one JSON array/object. Parse both forms,
-# scan all values for secret-shaped material, and admit only this exact graph.
-if ! python3 - "${preview_output}" >"${temporary_dir}/preview-parse.out" 2>"${temporary_dir}/preview-parse.err" <<'PY'
+  # Pulumi --json emits a summary object by default, or an event stream when
+  # streaming is enabled. Parse both forms, scan all values for secret-shaped
+  # material, and admit only this exact graph, including Pulumi's root stack.
+if python3 - "${preview_output}" >"${temporary_dir}/preview-parse.out" 2>"${temporary_dir}/preview-parse.err" <<'PY'
 from __future__ import annotations
 
 import json
@@ -394,6 +395,7 @@ sensitive_value = re.compile(
 )
 
 expected_resources = {
+    ("pulumi:pulumi:stack", "coquic-cloudflare-coquic-production"),
     ("cloudflare:index/d1database:d1database", "publicationdatabase"),
     ("cloudflare:index/r2bucket:r2bucket", "publicartifacts"),
     ("cloudflare:index/r2bucket:r2bucket", "privateoriginals"),
@@ -444,17 +446,20 @@ def operation(value: object) -> str | None:
 def scan_sensitive(value: object) -> None:
     if isinstance(value, dict):
         for child_key, child in value.items():
+            # Pulumi redacts existing secret outputs in retry previews.
+            if child == "[secret]":
+                continue
             child_name = str(child_key)
             if child_name.strip().lower() == "secret" and child is True:
-                raise ValueError("preview contains a secret value")
+                raise SystemExit(20)
             if sensitive_key.search(child_name) and isinstance(child, str) and child.strip():
-                raise ValueError("preview contains a secret value")
+                raise SystemExit(21)
             scan_sensitive(child)
     elif isinstance(value, list):
         for child in value:
             scan_sensitive(child)
-    elif isinstance(value, str) and sensitive_value.search(value):
-        raise ValueError("preview contains a secret value")
+    elif isinstance(value, str) and value != "[secret]" and sensitive_value.search(value):
+        raise SystemExit(22)
 
 
 records: set[tuple[tuple[str, str], str]] = set()
@@ -482,7 +487,7 @@ def walk(value: object) -> int:
     for child in value.values():
         found += walk(child)
     if current_operation is not None and identity is None and found == 0:
-        raise ValueError("operation has no structured resource identity")
+        raise SystemExit(23)
     return found
 
 
@@ -490,28 +495,43 @@ for item in objects:
     walk(item)
 
 if not records:
-    raise ValueError("preview contains no structured resource events")
+    raise SystemExit(24)
 
 resource_operations: dict[tuple[str, str], set[str]] = {}
 for identity, op in records:
     resource_operations.setdefault(identity, set()).add(op)
 
 if set(resource_operations) != expected_resources:
-    raise ValueError("preview resource allowlist does not match the protected stack")
+    raise SystemExit(25)
 if any(len(operations) != 1 for operations in resource_operations.values()):
-    raise ValueError("preview contains conflicting operations for a resource")
+    raise SystemExit(26)
 
 allowed_operations = {"create", "same", "read", "refresh"}
 for operations in resource_operations.values():
     if next(iter(operations)) not in allowed_operations:
-        raise ValueError("preview contains a destructive or updating operation")
+        raise SystemExit(27)
 
 counts: Counter[str] = Counter(op for _, op in records)
 labels = ("create", "update", "delete", "same", "read", "refresh")
 print(" ".join(f"{label}={counts.get(label, 0)}" for label in labels) + f" resources={len(resource_operations)}")
 PY
 then
-  fail "Pulumi preview was not a safe structured plan for the protected stack"
+  : # Only a successfully checked preview can be retained below.
+else
+  # Report fixed labels only; never print provider text or parser tracebacks.
+  case "$?" in
+    2) reason="invalid preview JSON" ;;
+    20) reason="unredacted secret wrapper" ;;
+    21) reason="unredacted sensitive field" ;;
+    22) reason="secret-shaped string" ;;
+    23) reason="operation without resource identity" ;;
+    24) reason="missing resource operations" ;;
+    25) reason="resource allowlist mismatch" ;;
+    26) reason="conflicting resource operations" ;;
+    27) reason="update, delete, replacement, or unsupported operation" ;;
+    *) reason="unexpected parser failure" ;;
+  esac
+  fail "Pulumi preview was not a safe structured plan for the protected stack: ${reason}"
 fi
 fi
 
@@ -687,7 +707,21 @@ read_field() {
   printf '%s' "${value}"
 }
 
+d1_account_id="$(read_field account_id)"
 d1_database_id="$(read_field d1_database_id)"
+# Wrangler execute accepts a name/binding, not a raw UUID. Pin the binding to
+# the validated Pulumi ID instead of discovering a database by name.
+wrangler_config="${temporary_dir}/wrangler.json"
+printf '{"d1_databases":[{"binding":"PUBLICATION","database_id":"%s"}]}\n' \
+  "${d1_database_id}" >"${wrangler_config}"
+
+wrangler_d1() {
+  CLOUDFLARE_ACCOUNT_ID="${d1_account_id}" \
+    WRANGLER_LOG_PATH="${temporary_dir}/wrangler-logs" \
+    WRANGLER_SEND_METRICS=false \
+    "${wrangler_bin}" d1 execute PUBLICATION \
+    --config "${wrangler_config}" --remote "$@"
+}
 
 canonical_schema="${temporary_dir}/canonical-schema.json"
 if ! python3 - "${schema_path}" "${canonical_schema}" >"${temporary_dir}/canonical-schema.out" 2>"${temporary_dir}/canonical-schema.err" <<'PY'
@@ -827,7 +861,12 @@ def result_rows(value: object) -> object:
 rows = result_rows(response)
 if not isinstance(expected, list):
     raise ValueError("canonical schema is malformed")
-normalized = [normalize_row(row) for row in rows]
+normalized = []
+for row in rows:
+    item = normalize_row(row)
+    # Match D1's exact system-table identity, not a prefix or normalized name.
+    if (row["type"], row["name"], row["tbl_name"]) != ("table", "_cf_KV", "_cf_KV"):
+        normalized.append(item)
 expected_rows = [normalize_row(row) for row in expected]
 normalized.sort(key=lambda item: (item["type"] or "", item["name"] or ""))
 expected_rows.sort(key=lambda item: (item["type"] or "", item["name"] or ""))
@@ -854,9 +893,7 @@ PY
 
 query_schema() {
   local response_path="$1"
-  "${wrangler_bin}" d1 execute "${d1_database_id}" \
-    --remote \
-    --command "${schema_query}" \
+  wrangler_d1 --command "${schema_query}" \
     --json \
     >"${response_path}" 2>"${temporary_dir}/wrangler-query.err"
 }
@@ -868,9 +905,7 @@ fi
 schema_state="$(reconcile_schema "${schema_response}")" || fail "D1 schema output was malformed"
 case "${schema_state}" in
   blank)
-    if ! "${wrangler_bin}" d1 execute "${d1_database_id}" \
-      --remote \
-      --file "${schema_path}" \
+    if ! wrangler_d1 --file "${schema_path}" \
       --yes \
       >"${temporary_dir}/wrangler-bootstrap.out" 2>"${temporary_dir}/wrangler-bootstrap.err"; then
       fail "D1 bootstrap failed; no host credentials were installed"

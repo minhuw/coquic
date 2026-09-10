@@ -2225,6 +2225,7 @@ EOF
           pkgs.trufflehog
           pkgs.tesseract
           pkgs.pulumi
+          pkgs.pulumiPackages.pulumi-python
           pkgs.wrangler
           pkgs.uv
           duvetTool

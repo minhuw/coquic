@@ -53,8 +53,12 @@ sealed history, one private session, and output staging.
 
 The daemon runs as the configured numeric host UID/GID and receives the local
 Docker socket group. Its container uses a read-only root with bounded `/tmp`
-and `/run` tmpfs. Validation runs with `--network none` and excludes raw
-subprocess output. The raw subprocess output is never exposed to validation.
+and `/run` tmpfs. Only container invocations use Codex's externally sandboxed
+execution flag: Docker mounts, per-role UIDs/groups, dropped capabilities, and
+resource limits provide isolation without nested user namespaces. Local Codex
+invocations retain their configured sandbox. Validation runs with `--network none`
+and excludes raw subprocess output. The raw subprocess output is never exposed
+to validation.
 For planner attempts, task roles, and same-session resumes, the wrapper delivers
 `CODEX_API_KEY` from the daemon's private TOML as a length-prefixed value on stdin
 immediately before `execve`. It never enters Docker/Compose environment metadata,
@@ -584,6 +588,27 @@ nix develop -c bash steward/containers/smoke-test.sh --images --full-validation
 nix develop -c bash steward/containers/smoke-test.sh --isolation
 nix develop -c bash steward/containers/smoke-test.sh --shutdown
 nix develop -c bash steward/containers/production-canary.sh
+```
+
+For a focused task-image inspection-tool regression (no model or authentication),
+build only `nix build --offline .#steward-task-image --no-link --print-out-paths`.
+Before loading the returned archive, check free space on Docker's data filesystem
+(`docker info --format '{{.DockerRootDir}}'` and `df -h`); retain existing images.
+Load that exact archive with `docker load --input <archive>`, inspect its immutable
+ID and source-revision/closure labels, then use that ID below. This deliberately
+uses the image's default `PATH`, not a host tool mount or a task entrypoint:
+
+```sh
+docker run --rm --network none --entrypoint /bin/bash <immutable-task-image-id> -c '
+  set -euo pipefail
+  printf "PATH=%s\\n" "$PATH"
+  command -v sed grep rg
+  sed --version
+  grep --version
+  rg --version
+  result=$(printf "skip\\nreviewer-tools-ok\\n" | sed -n "2p" | grep "^reviewer-" | rg "tools-ok$")
+  test "$result" = reviewer-tools-ok
+'
 ```
 
 The canary exercises real production-identity provisioning, sessions, inline

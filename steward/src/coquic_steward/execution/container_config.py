@@ -139,7 +139,7 @@ class TaskContainerConfig:
     container_archive: str = "/task/archive"
     container_session: str = "/task/session"
     container_scratch: str = "/task/scratch"
-    container_git_dir: str = "/task/git/linked"
+    container_git_dir: str | None = None
     container_git_common_dir: str = "/task/git/common"
     limits: ContainerLimits = field(default_factory=ContainerLimits)
     network: str = "bridge"
@@ -172,6 +172,15 @@ class TaskContainerConfig:
             if not scratch.is_absolute():
                 raise ValueError("scratch must be absolute")
             object.__setattr__(self, "scratch", scratch)
+        if self.container_git_dir is None:
+            try:
+                relative = self.git_dir.relative_to(self.git_common_dir)
+            except ValueError:
+                container_git_dir = "/task/git/linked"
+            else:
+                # Preserve commondir's relative lookup and an existing RO mountpoint.
+                container_git_dir = str(PurePosixPath(self.container_git_common_dir) / relative)
+            object.__setattr__(self, "container_git_dir", container_git_dir)
         for value in (
             self.container_worktree_ro,
             self.container_worktree_rw,
@@ -221,9 +230,10 @@ class TaskContainerConfig:
             # A disposable trusted Docker helper provisions private homes.
             # The task wrapper itself already runs as the allocated session UID.
             ContainerMount(self.private_sessions, self.container_session, read_only=False),
-            ContainerMount(self.git_dir, self.container_git_dir),
             ContainerMount(self.git_common_dir, self.container_git_common_dir),
         ]
+        if self.container_git_dir != self.container_git_common_dir:
+            mounts.append(ContainerMount(self.git_dir, self.container_git_dir))
         return tuple(mounts)
 
     def mounts_for(self, role: TaskRole | str) -> tuple[ContainerMount, ...]:

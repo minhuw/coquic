@@ -1775,3 +1775,70 @@ def test_run_validation_applies_configured_timeout(
     assert result.exit_code == 124
     assert not result.passed
     assert "command timed out" in result.output_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("outcome", ["running", "stopped", "absent", "image", "labels", "mounts", "timeout"])
+def test_validation_cleanup_detaches_cancelled_owner(tmp_path: Path, outcome: str) -> None:
+    from coquic_steward.core.subprocesses import (
+        ProcessGroupCancellationOwner,
+        current_subprocess_owner,
+        use_subprocess_owner,
+    )
+
+    config = ValidationContainerConfig(
+        run_id="cancelled-cleanup",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=tmp_path / "worktree",
+        output=tmp_path / "output",
+        store=tmp_path / "store",
+    )
+    payload = _validation_inspection(config)
+    if outcome == "image":
+        payload["Image"] = "sha256:" + "f" * 64
+    elif outcome == "labels":
+        payload["Config"]["Labels"] = {}
+    elif outcome == "mounts":
+        payload["Mounts"] = []
+    elif outcome == "stopped":
+        payload["State"] = {"Status": "exited", "Running": False}
+    calls = []
+
+    class CleanupDocker(SubprocessDockerClient):
+        def run(self, argv, *, timeout=None):
+            assert current_subprocess_owner() is None
+            assert timeout == 3
+            calls.append(argv)
+            if outcome == "timeout" and argv[0] == "stop":
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if outcome == "absent":
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"Error: No such container: missing"
+                )
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload).encode(), b"")
+
+    runtime = ValidationContainerRuntime(config, client=CleanupDocker())
+    owner = ProcessGroupCancellationOwner("cancelled-validation")
+    owner.request_cancel()
+    with use_subprocess_owner(owner):
+        if outcome in {"image", "labels", "mounts", "timeout"}:
+            with pytest.raises(ContainerBoundaryError) as error:
+                runtime.cleanup_owned(timeout=1)
+            assert error.value.category is (
+                ContainerErrorCategory.timeout if outcome == "timeout"
+                else ContainerErrorCategory.identity_mismatch
+            )
+        else:
+            runtime.cleanup_owned(timeout=1)
+        assert current_subprocess_owner() is owner
+        assert owner.cancelled
+        with pytest.raises(InterruptedError, match="cancelled"):
+            with owner.launch_guard():
+                pytest.fail("cleanup must not re-enable phase launches")
+
+    expected = [["inspect", "--format", "{{json .}}", config.container_name]]
+    if outcome in {"running", "timeout"}:
+        expected.append(["stop", "--time", "1", "d" * 64])
+    if outcome in {"running", "stopped"}:
+        expected.append(["rm", "d" * 64])
+    assert calls == expected

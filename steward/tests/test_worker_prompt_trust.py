@@ -153,3 +153,37 @@ def test_provider_guidance_is_separate_and_source_context_is_rendered_once(
     assert prompt.count("END UNTRUSTED SOURCE CONTEXT") == 1
     assert "Do not push" in prompt
     assert "Do not modify these repository paths" in prompt
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [render_worker_prompt, render_implementation_plan_prompt],
+    ids=["worker", "implementation-planner"],
+)
+def test_worktree_and_missing_skill_instructions_are_portable(renderer, config):
+    host_path = config.repo_root / "host-only-worktree-sentinel"
+    task = _task(config).model_copy(update={"worktree_path": host_path})
+
+    prompt = renderer(task, config)
+
+    assert str(host_path) not in prompt
+    assert str(config.repo_root) not in prompt
+    assert (
+        "Required worktree: Use the invocation's current working directory "
+        "and repository-relative paths."
+    ) in prompt
+    assert "Missing skill at .agents/skills/quic-rag/SKILL.md." in prompt
+    assert "Source-context precedence:" in prompt
+    assert "BEGIN UNTRUSTED SOURCE CONTEXT" in prompt
+    assert (
+        "Scope control:"
+        if renderer is render_worker_prompt
+        else "- Keep every step inside the original task boundary."
+    ) in prompt
+
+    # External requirements remain verbatim, even when they contain host paths.
+    task.spec.prompt += f" External path evidence: {host_path}"
+    task.spec.metadata["source_context"]["external_path"] = str(host_path)
+    prompt = renderer(task, config)
+    assert task.spec.prompt in prompt
+    assert f'"external_path": "{host_path}"' in prompt

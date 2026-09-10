@@ -77,6 +77,7 @@ class InvocationRequest:
         *,
         codex_bin: str | None = None,
         path_mapper: Callable[[Path], str] | None = None,
+        externally_sandboxed: bool = False,
     ) -> list[str]:
         render_path = path_mapper or (lambda value: str(value))
         args = [codex_bin or self.codex_bin, "exec"]
@@ -96,8 +97,14 @@ class InvocationRequest:
             )
         if self.stage == CodexStage.code:
             args.extend(["--dangerously-bypass-hook-trust"])
+        if externally_sandboxed:
+            # The validated container boundary owns role isolation. Nested Codex
+            # namespaces cannot run under its unprivileged, capability-free exec.
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        elif not self.resume:
+            args.extend(["--sandbox", self.sandbox])
         if not self.resume:
-            args.extend(["--sandbox", self.sandbox, "--cd", render_path(self.cwd)])
+            args.extend(["--cd", render_path(self.cwd)])
         args.extend(
             ["--output-last-message", render_path(self.output_last_message)]
         )

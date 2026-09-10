@@ -811,7 +811,10 @@ class ContainerSessionInvoker:
                 command=[
                     "/bin/task-entrypoint.sh",
                     "run",
-                    *request.argv(codex_bin="codex", path_mapper=path_mapper),
+                    *request.argv(
+                        codex_bin="codex", path_mapper=path_mapper,
+                        externally_sandboxed=True,
+                    ),
                 ],
                 env={"COQUIC_STEWARD_RUN_ID": request.run_id},
                 workdir=path_mapper(request.cwd),
@@ -1852,6 +1855,35 @@ class SessionSupervisor:
         self._runtimes.pop(task_id, None)
         self._invokers.pop(task_id, None)
 
+    def remove_session_homes(self, task_id: str) -> None:
+        """Delete only store-owned terminal homes, without provisioning task paths."""
+        from ..core.models import TaskStatus
+
+        task = self.store.get(task_id)
+        if not TaskStatus(task.status).terminal or not self._container_cleanup_proven(task_id):
+            raise ValueError("session cleanup requires terminal container removal")
+        root = self.config.private_sessions_dir / task.id
+        # Reject a linked task root, including dangling links. Missing roots are
+        # already clean; do not recreate them (or the removed worktree) on retry.
+        try:
+            with _handoff_directory(root):
+                pass
+        except FileNotFoundError:
+            return
+        runtime = self.runtime or self._runtimes.get(task_id)
+        if runtime is None:
+            runtime = runtime_factory_for_config(self.config, provision_paths=False)(task)
+        if runtime.config.private_sessions != root:
+            raise ValueError("session cleanup root mismatch")
+        for session in self.store.list_sessions(task_id):
+            if (session.task_id != task_id or session.private_home_path != root / session.id
+                    or session.home_uid is None):
+                raise ValueError("session cleanup identity mismatch")
+            runtime.remove_session_home(session_id=session.id, session_uid=session.home_uid)
+        # Unknown children must block cleanup, never receive privileged deletion.
+        with _handoff_directory(root.parent) as parent:
+            os.rmdir(root.name, dir_fd=parent)
+
     def _allocate(
         self,
         task: TaskRecord,
@@ -2217,7 +2249,9 @@ class SessionSupervisor:
         return minutes * 60
 
 
-def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], TaskContainerRuntime]:
+def runtime_factory_for_config(
+    config: StewardConfig, *, provision_paths: bool = True,
+) -> Callable[[TaskRecord], TaskContainerRuntime]:
     """Return a lazy task-scoped runtime constructor for daemon/CLI wiring."""
 
     if not config.task_image_digest:
@@ -2228,7 +2262,7 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
             raise ValueError("task worktree must exist before creating its container")
         worktree = Path(os.path.abspath(task.worktree_path))
         linked_git = worktree / ".git"
-        if not linked_git.is_dir():
+        if provision_paths and not linked_git.is_dir():
             text = (_read_handoff(linked_git, max_bytes=4096) or b"").decode("utf-8").strip()
             if text.startswith("gitdir:"):
                 linked_git = Path(text.split(":", 1)[1].strip()).resolve()
@@ -2236,9 +2270,10 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
         scratch = config.private_dir / "task-scratch" / task.id
         archive = config.tasks_dir / task.id
         private_sessions = config.private_sessions_dir / task.id
-        for path, mode in ((archive, 0o755), (private_sessions, 0o711), (scratch, 0o700)):
-            with _handoff_directory(path, create=True) as fd:
-                os.fchmod(fd, mode)
+        if provision_paths:
+            for path, mode in ((archive, 0o755), (private_sessions, 0o711), (scratch, 0o700)):
+                with _handoff_directory(path, create=True) as fd:
+                    os.fchmod(fd, mode)
         task_write_gid = _task_group(task.id, 100000)
         validation_gid = _task_group(task.id, 200000)
         container_config = TaskContainerConfig(
@@ -2261,7 +2296,8 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
             container_config,
             docker_bin=config.container.docker_bin,
         )
-        runtime.provision_task_paths()
+        if provision_paths:
+            runtime.provision_task_paths()
         return runtime
 
     return build

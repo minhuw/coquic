@@ -4314,7 +4314,11 @@ class StewardDaemon:
         if not any(event.kind == "cleanup.session_homes_removed" for event in events):
             private_home = self.config.private_sessions_dir / task.id
             try:
-                if private_home.exists():
+                if not self.config.local_codex_test_harness:
+                    if self.session_supervisor is None:
+                        raise RuntimeError("container session cleanup requires a supervisor")
+                    self.session_supervisor.remove_session_homes(task.id)
+                elif private_home.exists():
                     resolved = private_home.resolve()
                     root = self.config.private_sessions_dir.resolve()
                     if root not in resolved.parents:

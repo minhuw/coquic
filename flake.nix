@@ -143,9 +143,12 @@
           pkgs.findutils
           pkgs.gawk
           pkgs.git
+          pkgs.gnugrep
+          pkgs.gnused
           pkgs.gnutar
           pkgs.gzip
           pkgs.pre-commit
+          pkgs.ripgrep
           pkgs.uv
           zig
           codexCli

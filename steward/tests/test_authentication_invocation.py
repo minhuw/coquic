@@ -70,6 +70,7 @@ def test_provider_overrides_preserve_stage_and_resume_options(authenticated_conf
         )
         assert args[:2] == [config.codex_bin, "exec"]
         assert "--profile" not in args
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
         assert args[args.index("--model") + 1] == "test-model"
         assert 'model_reasoning_effort="high"' in args
         assert ("--dangerously-bypass-hook-trust" in args) == (stage == CodexStage.code)
@@ -85,6 +86,27 @@ def test_provider_overrides_preserve_stage_and_resume_options(authenticated_conf
             assert args[-1] == "-"
     assert ("--skip-git-repo-check" in request.argv()) == (stage == CodexStage.signal_planner)
     assert not any(value.startswith("model_provider") for value in replace(request, proxy_url=None).argv())
+
+
+@pytest.mark.parametrize("stage", list(CodexStage))
+@pytest.mark.parametrize("resume", [None, "exact-provider-session"])
+def test_container_argv_uses_external_sandbox_only(config, stage, resume):
+    request = InvocationRequest(
+        codex_bin="codex", cwd=config.repo_root, prompt="synthetic", stage=stage,
+        output_last_message=config.private_dir / "last.md", sandbox="read-only",
+        provider_session_id=resume,
+    )
+    args = request.argv(externally_sandboxed=True)
+    assert args.count("--dangerously-bypass-approvals-and-sandbox") == 1
+    assert "--sandbox" not in args
+    assert ("--cd" in args) == (resume is None)
+    assert args[-1] == "-"
+    if resume:
+        assert args[2] == "resume"
+        assert args[-2] == resume
+    else:
+        assert args[args.index("--cd") + 1] == str(config.repo_root)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in request.argv()
 
 
 def test_provider_url_is_json_escaped(config):

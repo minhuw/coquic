@@ -508,8 +508,8 @@ assert set(mounts) == {
     "/task/archive",
     "/task/session",
     "/task/scratch",
-    "/task/git/linked",
-    "/task/git/common",
+    config.container_git_dir,
+    config.container_git_common_dir,
 }
 assert mounts["/task/worktree-ro"]["RW"] is False
 assert mounts["/task/worktree"]["RW"] is True

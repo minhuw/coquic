@@ -315,6 +315,22 @@ def _session_helper_main() -> None:
         return
     home = root / options["session_id"]
     uid = options["session_uid"]
+    if operation == "delete":
+        # The task root is daemon-owned; workers cannot replace its children.
+        # rmtree's descriptor implementation never traverses descendant links.
+        import shutil
+
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise ValueError("descriptor-safe removal is required")
+        with _handoff_directory(root) as parent:
+            try:
+                info = os.stat(home.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
+                raise ValueError("private session removal ownership mismatch")
+            shutil.rmtree(home.name, dir_fd=parent)
+        return
     with _handoff_directory(home) as fd:
         if operation == "provision":
             # Only daemon-authored inputs are handed over. Provider stores are
@@ -583,6 +599,9 @@ class TaskContainerRuntime:
 
     def provision_session(self, *, session_id: str, session_uid: int) -> None:
         self._session_files("provision", session_id=session_id, session_uid=session_uid)
+
+    def remove_session_home(self, *, session_id: str, session_uid: int) -> None:
+        self._session_files("delete", session_id=session_id, session_uid=session_uid)
 
     def validate_session_store(self, *, session_id: str, session_uid: int) -> None:
         self._session_files("store", session_id=session_id, session_uid=session_uid)
@@ -1236,11 +1255,44 @@ class ValidationContainerRuntime:
         )
         return argv
 
+    def _prepare_worktree_mountpoints(self) -> None:
+        """Create only declared cache directories beneath an existing safe root."""
+
+        root = self.config.worktree
+        try:
+            # Do not create missing worktrees or follow any of their ancestors.
+            with _handoff_directory(root):
+                pass
+            for target, _options in self.config.tmpfs:
+                if not target.startswith("/validation/worktree/"):
+                    continue
+                relative = Path(target).relative_to("/validation/worktree")
+                if ".." in relative.parts:
+                    raise ValueError("validation cache mountpoint is not normalized")
+                parent = root
+                for name in relative.parts:
+                    with _handoff_directory(parent) as fd:
+                        try:
+                            os.mkdir(name, 0o755, dir_fd=fd)
+                        except FileExistsError:
+                            pass
+                    parent = parent / name
+                    with _handoff_directory(parent):
+                        pass
+        except (OSError, ValueError) as exc:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "validation cache mountpoint must be a directory without symlinks",
+            ) from exc
+
     def run_argv(self, command: list[str]) -> list[str]:
+        """Prepare and render a one-shot launch, including direct client callers."""
+
         if not command or any("\x00" in value for value in command):
             raise ContainerBoundaryError(
                 ContainerErrorCategory.invalid, "validation command is empty or invalid"
             )
+        self._prepare_worktree_mountpoints()
         return [
             "run",
             "--rm",
@@ -1251,6 +1303,7 @@ class ValidationContainerRuntime:
         ]
 
     def create(self) -> str:
+        self._prepare_worktree_mountpoints()
         result = self._run(self.create_argv())
         identity = result.stdout.decode("utf-8", "replace").strip()
         if not identity:
@@ -1306,10 +1359,11 @@ class ValidationContainerRuntime:
                 )
             time.sleep(min(0.1, remaining))
 
-    def inspect(self) -> ContainerInspection:
+    def inspect(self, *, timeout: float | None = None) -> ContainerInspection:
         result = self._run(
             ["inspect", "--format", "{{json .}}", self.config.container_name],
             allow_not_found=True,
+            timeout=timeout,
         )
         if result.returncode:
             if _not_found(result.stderr):
@@ -1502,9 +1556,11 @@ class ValidationContainerRuntime:
             if exc.category is not ContainerErrorCategory.not_found:
                 raise
 
-    def remove(self, *, identifier: str | None = None) -> None:
+    def remove(
+        self, *, identifier: str | None = None, timeout: float | None = None
+    ) -> None:
         try:
-            self._run(["rm", identifier or self.config.container_name])
+            self._run(["rm", identifier or self.config.container_name], timeout=timeout)
         except ContainerBoundaryError as exc:
             if exc.category is not ContainerErrorCategory.not_found:
                 raise
@@ -1512,16 +1568,19 @@ class ValidationContainerRuntime:
     def cleanup_owned(self, *, timeout: float = 5) -> None:
         """Remove only an exactly inspected validation sibling."""
 
-        try:
-            inspection = self.inspect()
-        except ContainerBoundaryError as exc:
-            if exc.category is ContainerErrorCategory.not_found:
-                return
-            raise
-        self._validate_inspection(inspection)
-        if inspection.running:
-            self.stop(identifier=inspection.container_id, timeout=timeout)
-        self.remove(identifier=inspection.container_id)
+        # Exact-owned cleanup must finish even when its phase is cancelled.
+        with use_subprocess_owner(None):
+            command_timeout = max(0, timeout) + _DOCKER_STOP_ACK_SECONDS
+            try:
+                inspection = self.inspect(timeout=command_timeout)
+            except ContainerBoundaryError as exc:
+                if exc.category is ContainerErrorCategory.not_found:
+                    return
+                raise
+            self._validate_inspection(inspection)
+            if inspection.running:
+                self.stop(identifier=inspection.container_id, timeout=timeout)
+            self.remove(identifier=inspection.container_id, timeout=command_timeout)
 
 
 def bind_deployment_identity(

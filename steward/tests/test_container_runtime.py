@@ -1011,7 +1011,10 @@ def test_real_wrapper_receives_inline_key_only_through_stdin(
     assert not any(value.startswith(("CODEX_API_KEY=", "OPENAI_API_KEY=")) for value in docker_env)
     mapped = request.argv(
         codex_bin="codex", path_mapper=lambda path: container_config.container_path(path, role),
+        externally_sandboxed=True,
     )
+    assert "--dangerously-bypass-approvals-and-sandbox" in mapped
+    assert "--sandbox" not in mapped
     wrapper_index = runtime.argv.index("/bin/task-entrypoint.sh")
     assert runtime.argv[wrapper_index:] == ["/bin/task-entrypoint.sh", "run", *mapped]
     assert [value for value in mapped if value.startswith("model_provider")] == [

@@ -339,7 +339,7 @@ def render_worker_prompt(
         f"Worker: {agent.name}",
         f"Task ID: {task.id}",
         f"Task: {task.spec.title}",
-        f"Required worktree: {task.worktree_path}",
+        "Required worktree: Use the invocation's current working directory and repository-relative paths.",
         f"GitHub repository: {config.github_repository}",
         f"Enabled signals: {', '.join(config.enabled_signals) or 'none'}",
         "",
@@ -404,7 +404,7 @@ def render_implementation_plan_prompt(task: TaskRecord, config: StewardConfig) -
         "",
         f"Task ID: {task.id}",
         f"Task: {task.spec.title}",
-        f"Required worktree: {task.worktree_path}",
+        "Required worktree: Use the invocation's current working directory and repository-relative paths.",
         f"GitHub repository: {config.github_repository}",
     ]
     remote_boundary = _render_remote_write_boundary(task, config)
@@ -569,7 +569,9 @@ def _render_skills(config: StewardConfig, skill_names: tuple[str, ...]) -> str:
         if path.exists():
             blocks.append(f"## {name}\n\n{path.read_text(encoding='utf-8').strip()}")
         else:
-            blocks.append(f"## {name}\n\nMissing skill at {path}.")
+            blocks.append(
+                f"## {name}\n\nMissing skill at {path.relative_to(config.repo_root)}."
+            )
     return "\n\n".join(blocks)
 
 

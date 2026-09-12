@@ -167,6 +167,7 @@
           pkgs.docker
           pkgs.git
           pkgs.gh
+          pkgs.gnugrep
           pkgs.openssh
           pkgs.tesseract
           pkgs.trufflehog

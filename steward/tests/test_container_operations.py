@@ -163,6 +163,22 @@ def test_idle_entrypoint_handles_term_while_sleeping(tmp_path: Path, kind: str) 
 
 
 
+def test_daemon_tool_closure_includes_entrypoint_commands() -> None:
+    root = Path(__file__).resolve().parents[2]
+    flake = (root / "flake.nix").read_text()
+    closure = flake.split("stewardDaemonToolClosure = pkgs.buildEnv {", 1)[1].split("};", 1)[0]
+    paths = closure.split("paths = [", 1)[1].split("];", 1)[0].split()
+    # daemon-entrypoint.sh must not depend on tools from the host or task image.
+    assert {
+        "pkgs.bash",
+        "pkgs.coreutils",  # id, stat, tr
+        "pkgs.gnugrep",  # Docker socket supplementary-group check
+        "pkgs.docker",
+        "stewardPython",
+        "stewardLauncher",
+    } <= set(paths)
+
+
 def test_validation_offline_rfc_cache_matches_config_and_reseeds(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     flake = (root / "flake.nix").read_text()

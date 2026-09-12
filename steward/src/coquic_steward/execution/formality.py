@@ -284,7 +284,32 @@ FORMALITY_OUTPUT_SCHEMA = {
                     "sourceIndex": {"type": "integer", "minimum": 0},
                     "disposition": {"type": "string", "enum": [item.value for item in FormalityDisposition]},
                     "rationale": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
-                    "followUp": {"type": ["object", "null"]},
+                    "followUp": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "properties": {
+                            **{
+                                key: {"type": "string", "minLength": 1, "maxLength": MAX_TEXT}
+                                for key in ("title", "worker", "rationale")
+                            },
+                            "kind": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_TEXT,
+                                "enum": sorted(_KIND_VALUES),
+                            },
+                            **{
+                                key: {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 32,
+                                    "items": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
+                                }
+                                for key in ("scope", "nonGoals", "validation")
+                            },
+                        },
+                        "required": sorted(_FOLLOW_UP_KEYS),
+                    },
                 },
                 "required": sorted(_DISPOSITION_KEYS),
             },

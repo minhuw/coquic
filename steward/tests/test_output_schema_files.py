@@ -130,6 +130,26 @@ def test_commit_message_schema_matches_openai_structured_output_subset(
     assert schema["additionalProperties"] is False
     assert_openai_structured_output_schema(schema)
 
+def test_formality_schema_recursively_requires_closed_objects(config: StewardConfig) -> None:
+    schema = json.loads(formality_schema_path(config).read_text(encoding="utf-8"))
+
+    def visit(node: object) -> None:
+        if isinstance(node, dict):
+            node_type = node.get("type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            if "object" in types:
+                assert node.get("additionalProperties") is False
+                assert isinstance(node.get("properties"), dict)
+                assert set(node["required"]) == set(node["properties"])
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(schema)
+
+
 def assert_openai_structured_output_schema(schema: dict[str, object]) -> None:
     unsupported_keywords = {
         "allOf",

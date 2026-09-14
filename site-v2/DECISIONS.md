@@ -398,3 +398,14 @@ surface/canvas, line, and soft-blue selection tokens remain authoritative.
 Exact aggregate snapshot values and explicit freshness remain distinct from
 archive history; no live job IDs, moving jobs, inferred health, client state,
 polling, backend changes, or dependencies are introduced.
+
+## 2026-09-10 — Illustrative Steward factory, explicitly requested
+
+The user rejected the static four-station diagram. Replace it with one viewport-wide,
+continuous animated factory: moving representative pieces, sorter, parallel benches,
+and assembly. This narrowly overrides static-only motion and evidence-width rules
+for the canvas only. Keep theme-native surfaces, aggregate telemetry literally
+separate, no synthetic jobs, no browser acquisition, mandatory all-motion pause and
+continuous reduced-motion respect, stable keyboard inspection, compact reflow, and
+unchanged canonical evidence/archive routing. Browser gates must measure changing
+item positions and frozen pause/reduced-motion frames, not merely CSS declarations.

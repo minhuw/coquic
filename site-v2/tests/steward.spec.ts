@@ -211,136 +211,89 @@ test("Steward task navigation exposes the public task channels", async ({ page }
 
 for (const colorScheme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1600, height: 1000 }, { width: 768, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
-    test(`Steward channels stay theme-native: ${colorScheme} ${viewport.width}`, async ({ page }, testInfo) => {
-      await page.emulateMedia({ colorScheme });
+    test(`Factory continuous scene: ${colorScheme} ${viewport.width}`, async ({ page }, testInfo) => {
+      await page.emulateMedia({ colorScheme, reducedMotion: "no-preference" });
       await page.setViewportSize(viewport);
       await page.goto("/steward?view=tasks");
-      const channels = page.getByRole("region", { name: "Steward task channels" });
-      const selected = channels.locator('[aria-current="page"]');
-      const signals = channels.getByRole("link", { name: /^Signals/ });
-      // Resolve semantic tokens in the browser, so this guards rendering without freezing the palette.
-      const colors = await channels.evaluate((node) => {
-        const probe = document.createElement("span");
-        node.append(probe);
-        const values = Object.fromEntries(["surface", "ink", "line", "text-muted", "accent", "accent-soft", "canvas"].map((token) => {
-          probe.style.color = `var(--${token})`;
-          return [token, getComputedStyle(probe).color];
-        }));
-        probe.remove();
-        return values;
-      });
-      await expect(channels).toHaveCSS("background-color", colors.surface!);
-      await expect(channels).toHaveCSS("color", colors.ink!);
-      await expect(channels).toHaveCSS("border-top-color", colors.line!);
-      await expect(selected).toHaveAttribute("href", "/steward?view=tasks");
-      await expect(selected).toHaveCSS("background-color", colors["accent-soft"]!);
-      await expect(selected.locator("span").filter({ hasText: /^Tasks$/ })).toHaveCSS("color", colors.accent!);
-      await expect(selected.locator(".bottom-0")).toHaveCSS("height", "2px");
-      await expect(selected.locator(".bottom-0")).toHaveCSS("background-color", colors.accent!);
-      await expect(signals.locator(".text-xs").last()).toHaveCSS("color", colors["text-muted"]!);
-      await signals.hover();
-      await expect(signals).toHaveCSS("background-color", colors.canvas!);
-      await signals.focus();
-      await page.keyboard.press("Tab");
-      await expect(channels.locator("summary").first()).toBeFocused();
-      await page.keyboard.press("Tab");
-      const planning = channels.getByRole("link", { name: /^Planning/ });
-      await expect(planning).toBeFocused();
-      await expect(planning).toHaveCSS("background-color", colors["accent-soft"]!);
-      await expect(planning).toHaveCSS("outline-style", "solid");
-      await expect(planning).toHaveCSS("outline-width", "2px");
-      await expect(planning).toHaveCSS("outline-color", colors.accent!);
-      const boxes = await channels.getByRole("link").evaluateAll((nodes) => nodes.map((node) => {
-        const box = node.getBoundingClientRect();
-        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
-      }));
-      for (let index = 1; index < boxes.length; index += 1) {
-        const previous = boxes[index - 1]!;
-        const current = boxes[index]!;
-        expect(current.left >= previous.right || current.top >= previous.bottom).toBeTruthy();
+      const factory = page.getByRole("region", { name: "Steward task channels" });
+      await expect(factory).toHaveAttribute("data-motion", "running");
+      const item = factory.locator(".factory-scene:visible [data-factory-item]").first();
+      const before = await item.boundingBox();
+      await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}-moving-a.png`) });
+      await page.waitForTimeout(750);
+      const after = await item.boundingBox();
+      expect(Math.hypot(after!.x - before!.x, after!.y - before!.y)).toBeGreaterThan(5);
+      await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}-moving-b.png`) });
+      const pause = factory.getByRole("button", { name: "Pause illustration" });
+      await pause.focus(); await page.keyboard.press("Enter");
+      await expect(factory.getByRole("button", { name: "Play illustration" })).toBeFocused();
+      const frozen = await item.boundingBox();
+      const mechanism = factory.locator(".factory-scene:visible .factory-mechanism").first();
+      const mechanismBefore = await mechanism.boundingBox();
+      await page.waitForTimeout(350);
+      expect(await item.boundingBox()).toEqual(frozen);
+      expect(await mechanism.boundingBox()).toEqual(mechanismBefore);
+      const piece = item.getByRole("button");
+      const target = await piece.boundingBox();
+      expect(target!.width).toBeGreaterThanOrEqual(44);
+      expect(target!.height).toBeGreaterThanOrEqual(44);
+      await piece.click();
+      await expect(factory.getByRole("heading", { name: /Illustrative piece/ })).toBeVisible();
+      for (const name of ["Signals", "Planning", "Tasks", "Integration"]) {
+        const control = factory.getByRole("list", { name: "Production line in workflow order" }).getByRole("button", { name: new RegExp(name) });
+        await control.focus(); await page.keyboard.press("Enter");
+        await expect(control).toHaveAttribute("aria-pressed", "true");
+        for (const term of ["Input", "Work", "Output"]) await expect(factory.getByRole("term").filter({ hasText: new RegExp(`^${term}$`) })).toBeVisible();
       }
+      const representative = factory.getByRole("button", { name: "Inspect representative item" });
+      await representative.focus(); await page.keyboard.press("Enter");
+      await expect(factory.getByRole("heading", { name: /Illustrative piece/ })).toBeVisible();
+      await factory.locator('.factory-scene:visible [aria-label="Inspect Planning sorter"]').click();
+      await expect(factory.getByRole("heading", { name: "Planning sorter", exact: true })).toBeVisible();
+      const findings = (await new AxeBuilder({ page }).include(".steward-factory").analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");
+      expect(findings).toEqual([]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
-      await page.mouse.move(0, 0);
-      await page.evaluate(async () => {
-        window.scrollTo({ top: 0, behavior: "instant" });
-        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      });
-      const screenshot = await page.screenshot({ path: testInfo.outputPath(`channels-${colorScheme}-${viewport.width}.png`), fullPage: true });
-      expect(screenshot.byteLength).toBeGreaterThan(1_000);
-      await page.keyboard.press("Enter");
-      await expect(page).toHaveURL(/\/steward\?view=planning/);
-      await expect(channels.locator('[aria-current="page"]')).toHaveAttribute("href", "/steward?view=planning");
+      await page.locator("h1").click();
+      await page.evaluate(() => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo({ top: 0, behavior: "instant" }); });
+      await page.waitForTimeout(300);
+      await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}.png`), fullPage: true });
+      await factory.getByRole("link", { name: /^Planning/ }).click();
+      await expect(page).toHaveURL(/view=planning/);
+      await expect(factory.locator('[aria-current="page"]')).toHaveAttribute("href", "/steward?view=planning");
     });
   }
 }
 
-test("production line explains all ordered stages with native keyboard disclosures and selection", async ({ page }, testInfo) => {
-  await page.goto("/steward?view=signals");
-  const channels = page.getByRole("region", { name: "Steward task channels" });
-  const stations = channels.getByRole("list", { name: "Production line in workflow order" }).getByRole("listitem");
-  await expect(stations).toHaveCount(4);
-  const labels = ["Signals", "Planning", "Tasks", "Integration"];
-  for (const [index, label] of labels.entries()) {
-    const station = stations.nth(index);
-    await expect(station.getByRole("link")).toContainText(label);
-    if (index < 3) await expect(station).toContainText(`${label} → ${labels[index + 1]}`);
-    const summary = station.locator("summary");
-    await station.getByRole("link").focus();
-    await page.keyboard.press("Tab");
-    await expect(summary).toBeFocused();
-    await expect(summary).toHaveCSS("outline-width", "2px");
-    await page.keyboard.press("Enter");
-    await expect(station.locator("details")).toHaveAttribute("open", "");
-    for (const term of ["Input", "Work", "Output"]) await expect(station.getByRole("term").filter({ hasText: new RegExp(`^${term}$`) })).toBeVisible();
-    await expect(station.getByText("Conceptual workflow, not live telemetry.")).toBeVisible();
-    await page.keyboard.press("Space");
-    await expect(station.locator("details")).not.toHaveAttribute("open", "");
-    await station.getByRole("link").focus();
-    await page.keyboard.press("Enter");
-    const view = label === "Integration" ? "tasks" : label.toLowerCase();
-    await expect(page).toHaveURL(new RegExp(`view=${view}$`));
-    await expect(channels.locator('[aria-current="page"]')).toHaveAttribute("href", `/steward?view=${view}`);
-    await expect(channels.locator('[aria-current="page"]')).toHaveCount(1);
-  }
-  await channels.locator("summary").last().focus();
-  await page.keyboard.press("Enter");
-  await page.evaluate(async () => {
-    window.scrollTo({ top: 0, behavior: "instant" });
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-  });
-  await page.screenshot({ path: testInfo.outputPath("production-line-integration-open.png"), fullPage: true });
-  const findings = (await new AxeBuilder({ page }).include('[aria-label="Steward task channels"]').analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");
-  expect(findings).toEqual([]);
-});
-
-test("production line retains open explanations at 200% zoom and forced colors", async ({ browser, baseURL }, testInfo) => {
-  // A 1280px display at 200% browser zoom has a 640 CSS-pixel layout viewport.
-  // DPR 2 preserves the doubled raster size; CSS zoom alone does not reflow media queries.
-  const context = await browser.newContext({
-    baseURL, viewport: { width: 640, height: 500 }, deviceScaleFactor: 2,
-    forcedColors: "active", reducedMotion: "reduce",
-  });
+test("factory reduced motion, preference changes, forced colors and 200% zoom", async ({ browser, baseURL }, testInfo) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 640, height: 500 }, deviceScaleFactor: 2, forcedColors: "active", reducedMotion: "reduce" });
   try {
     const page = await context.newPage();
     await page.goto("/steward?view=tasks");
-    const channels = page.getByRole("region", { name: "Steward task channels" });
-    for (const summary of await channels.locator("summary").all()) {
-      await summary.focus();
-      await page.keyboard.press("Enter");
-    }
-    await expect(channels.locator("details[open]")).toHaveCount(4);
+    const factory = page.locator(".steward-factory");
+    await expect(factory).toHaveAttribute("data-motion", "paused");
+    const items = factory.locator(".factory-scene:visible [data-factory-item]");
+    const positions = () => items.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [r.x, r.y]; }));
+    await expect(factory.getByRole("button", { name: "Play illustration" })).toBeDisabled();
+    await page.evaluate(() => document.fonts.ready);
+    await page.waitForTimeout(300);
+    const before = await positions(); await page.waitForTimeout(500); expect(await positions()).toEqual(before);
+    await expect(factory.getByRole("button", { name: "Play illustration" })).toBeDisabled();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await factory.getByRole("button", { name: "Play illustration" }).click();
+    await expect(factory).toHaveAttribute("data-motion", "running");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(factory).toHaveAttribute("data-motion", "paused");
+    const station = factory.getByRole("button", { name: "4. Integration" });
+    await station.focus(); await page.keyboard.press("Enter");
+    await expect(station).toBeFocused();
+    await expect(station).toHaveCSS("outline-style", "solid");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
-    await expect(channels.locator("summary").last()).toBeFocused();
-    await expect(channels.locator("summary").last()).toHaveCSS("outline-style", "solid");
-    await expect(channels.locator('[aria-current="page"] .bottom-0')).toHaveCSS("border-bottom-width", "2px");
-    await page.evaluate(async () => {
-      window.scrollTo({ top: 0, behavior: "instant" });
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    await page.screenshot({ path: testInfo.outputPath("production-line-zoom-forced-colors.png"), fullPage: true });
-  } finally {
-    await context.close();
-  }
+    await page.locator("h1").click();
+    await page.evaluate(() => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo({ top: 0, behavior: "instant" }); });
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: testInfo.outputPath("factory-zoom-forced-colors.png"), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath("factory-zoom-forced-colors-viewport.png") });
+  } finally { await context.close(); }
 });
 
 test("Steward cached usage keeps exact totals, coverage, and task links", async ({ page }) => {

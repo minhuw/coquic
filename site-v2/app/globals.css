@@ -170,3 +170,62 @@ summary {
     outline-color: Highlight;
   }
 }
+
+/* Steward's illustrative factory is one continuous plane, not live telemetry. */
+.steward-factory { min-height: calc(100svh - 64px); display: flex; flex-direction: column; background: var(--surface); color: var(--ink); border-block: 1px solid var(--line); }
+.factory-opening { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 24px 48px 16px; }
+.factory-caption { padding-inline: 48px; color: var(--text-muted); font-size: 14px; }
+.factory-floor { flex: 1; display: grid; align-items: center; min-height: 360px; background: var(--canvas); margin-top: 16px; }
+.factory-scene { width: 100%; max-height: 48svh; min-height: 320px; }
+.factory-compact { display: none; }
+.factory-scene text { fill: var(--text-muted); font: 16px var(--font-sans); }
+.factory-tracks { stroke: var(--line); stroke-width: 32; }
+.factory-rails { stroke: var(--line-strong); stroke-width: 20; }
+.factory-machine { cursor: pointer; fill: var(--surface); stroke: var(--ink); stroke-width: 2; }
+.factory-machine > path, .factory-mechanism { fill: none; stroke: var(--accent); stroke-width: 3; }
+.factory-machine:hover > rect { fill: var(--accent-soft); }
+.factory-mechanism { animation: factory-sort 2s ease-in-out infinite alternate; }
+.factory-item { offset-rotate: 0deg; offset-anchor: 0px 0px; animation: factory-travel 10s linear infinite; }
+.factory-piece { width: 64px; height: 64px; display: grid; place-items: center; cursor: pointer; }
+.factory-wide .factory-piece { width: 96px; height: 96px; }
+.factory-piece svg { width: 40px; height: 40px; fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+.factory-item-2 .factory-piece svg { stroke: var(--ink); }
+.factory-item-3 .factory-piece svg { fill: var(--accent-soft); }
+.steward-factory[data-motion="paused"] *, .steward-factory:focus-within .factory-item:has(:focus) { animation-play-state: paused; }
+.factory-explore, .factory-telemetry { padding: 16px 48px; border-top: 1px solid var(--line); }
+.factory-stations { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.factory-control { display: inline-flex; min-height: 44px; min-width: 44px; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: 14px; cursor: pointer; }
+.factory-control:disabled { cursor: default; color: var(--text-muted); }
+.factory-control[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.factory-inspector { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 32px; margin-top: 16px; }
+.factory-inspector dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.factory-values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; margin-block: 8px 16px; }
+.factory-values a { display: flex; flex-direction: column; gap: 8px; padding-block: 8px; min-height: 44px; border-bottom: 2px solid var(--line); font-size: 14px; }
+.factory-values a[aria-current] { border-color: var(--accent); color: var(--accent); }
+@keyframes factory-travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+@keyframes factory-sort { to { transform: translateY(12px); } }
+@media (prefers-reduced-motion: reduce) { .steward-factory * { animation-play-state: paused !important; } }
+@media (max-width: 780px) {
+  .factory-opening { align-items: flex-start; flex-direction: column; padding: 24px 16px 16px; gap: 16px; }
+  .factory-caption { padding-inline: 16px; }
+  .factory-explore, .factory-telemetry { padding: 16px; }
+  .factory-inspector { grid-template-columns: 1fr; gap: 16px; }
+  .factory-values { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+}
+@media (max-width: 600px) {
+  .factory-wide { display: none; }
+  .factory-compact { display: block; min-height: 0; max-height: none; width: 100%; }
+  .factory-floor { min-height: 0; }
+  .factory-stations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .factory-stations button { width: 100%; }
+  .factory-inspector dl { grid-template-columns: 1fr; gap: 12px; }
+}
+@media (forced-colors: active) {
+  .factory-tracks { stroke: CanvasText; }
+  .factory-rails { stroke: Canvas; }
+  .factory-machine, .factory-piece svg { fill: Canvas; stroke: CanvasText; }
+  .factory-machine > path, .factory-mechanism { stroke: LinkText; }
+  .factory-values a[aria-current], .factory-control[aria-pressed="true"] { border-color: Highlight; }
+}
+
+@media (min-width: 601px) and (max-width: 1024px) { .factory-scene text { display: none; } }

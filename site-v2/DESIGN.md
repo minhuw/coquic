@@ -613,7 +613,8 @@ Every analytical figure has:
 | Route arrival       | {motion.route}  | Fade plus no more than 8px movement |
 | Figure introduction | {motion.figure} | One coordinated reveal, optional    |
 
-- No looping ambient animation on evidence pages.
+- No looping ambient animation on evidence pages, except the explicitly illustrative
+  Steward factory described below.
 - Do not animate dense table dimensions.
 - Prefer one orchestrated reveal over staggered decoration.
 - Interaction never waits for animation.
@@ -722,23 +723,29 @@ an inverse contrast plane. Selection uses accent-soft, an accent label, and the
 2px bottom indicator; hover uses canvas and keyboard focus uses accent-soft with
 the shared visible accent outline. Preserve the same grid in both themes.
 
-At the user’s request, Steward uses one connected, explorable production line:
-observation intake → triage and plan selection → parallel task workbench →
-reviewed output convergence. This is a literal workflow instrument, not
-permission for decorative factory chrome, dashboard cards, or a black band.
-Restrained static schematics and directional connectors explain the stages;
-the semantic ordered list runs horizontally on desktop, wraps with an explicit
-return connector on tablet, and runs vertically on narrow screens.
+At the user’s explicit request, Steward opens with one viewport-wide factory
+canvas below the site header, occupying at least the remaining small viewport
+height. A single connected conveyor carries fixed representative signal pieces
+into a planning sorter, through parallel task benches, and into integration
+assembly/output. Purposeful machine geometry and looping illustrative motion
+are a narrowly scoped exception to the static-only and evidence-width rules;
+this is not permission for independent cards, decorative chrome, or a black band.
+The pale neutral surface, existing tokens, and dark remapping remain mandatory.
 
-Each station pairs its schematic with labeled exact snapshot counts/state.
-Archive history is separate. Native keyboard-operable disclosures explain
-Input → Work → Output, explicitly as conceptual workflow rather than telemetry.
-Integration has its own disclosure even though its navigation links to Tasks.
-The legend states aggregate snapshot, not individual job tracking; freshness,
-stale values, unavailable values, idle, and numeric zero remain explicit.
-No moving jobs, invented health, looping animation, or new client state is
-introduced. These Steward-specific workflow semantics do not change the
-cross-route visual language or shared tokens.
+Label it “Illustrative workflow — not live job tracking.” Never derive piece
+counts, movement, timing, progress, or completion from aggregate snapshots.
+Literal live/stale/unavailable counts, daemon mode and observation time belong
+in a separate evidence strip; idle/zero can coexist with illustrative movement.
+Archive counts and links remain independent. Existing operational evidence below
+retains its maximum width and canonical query routing.
+
+One pause/play control stops every piece and machine. Start paused for reduced
+motion, continuously respect that preference, and pause while the page is hidden.
+Stable native station and representative-item controls provide the semantic list
+and keyboard equivalent of pointer inspection. The inspector explains Input,
+Work, Output, and what public evidence does and does not expose. Compact screens
+use a contained vertical factory rather than shrinking labels or overflowing.
+These exceptions apply only to this educational Steward canvas.
 
 #### Complete task trajectory
 

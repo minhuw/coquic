@@ -193,16 +193,25 @@ announced without replacing retained valid evidence with an error message.
   Integration`. Signals, Planning, Tasks, and Integration aggregate state comes
   only from the validated public live snapshot; the control loop is an
   instrument and navigation device, not an aggregate health score.
-- The production line MUST use an ordered semantic list with visible directional
-  connections and distinct intake, planning, parallel execution/validation, and
-  reviewed-output integration schematics. It is an educational workflow
-  instrument, not decorative factory chrome or individual live job tracking.
-- Every stage MUST expose native keyboard-operable Input → Work → Output
-  disclosures labeled conceptual workflow, including Integration without a
-  standalone view. The first three links retain URL selection and aria-current;
-  Integration links to Tasks. Exact labeled snapshot values appear below each
-  schematic; archive history remains separate. No animation, polling, fabricated
-  jobs, or inferred health is permitted.
+- “Explore factory” is the main experience: one screen-filling continuous animated
+  conveyor, signals converging on a planning sorter, parallel task workstations,
+  and integration assembly/output. The viewport-wide canvas sits below the site
+  header; a jump reaches the existing maximum-width detailed evidence below.
+- Use a fixed small number of representative items labeled “Illustrative workflow
+  — not live job tracking”; never synthesize jobs, IDs, titles, progress, durations,
+  or completions from counts. Motion is illustrative even with idle/zero telemetry.
+  Live/stale/unavailable aggregate values and archive history remain separate.
+- Click stations/items to inspect Input → Work → Output and public evidence limits.
+  An ordered semantic list of stable native buttons and a representative-item
+  control provides the full keyboard/non-SVG equivalent. Moving targets are at
+  least 44 CSS pixels. Integration inspection is independent of its Tasks link.
+- A pause/play control stops ALL factory motion. Reduced motion starts paused and
+  remains respected as the preference changes; page-hidden motion pauses too.
+  No polling, automatic fetches, streams, inferred health, or backend changes.
+  Compact layouts retain the entire connected workflow without document overflow.
+- Evidence links retain Signals, Planning, and Tasks query selection and aria-current;
+  Integration links to Tasks. This illustrative animation is a scoped exception
+  to the usual static-only evidence presentation, not new live telemetry.
 - Views are exactly Signals, Planning, and Tasks. Tasks is the default because
   execution evidence is the primary public value. Signals shows pending count,
   Planning shows active/idle/paused, and Integration remains visible in the

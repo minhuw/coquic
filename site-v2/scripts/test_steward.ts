@@ -1128,18 +1128,18 @@ async function main() {
       const line = html.match(/<section aria-label="Steward task channels"[\s\S]*?<\/section>/)?.[0];
       assert(line);
       assert.match(line, /<ol aria-label="Production line in workflow order"/);
-      assert.equal((line.match(/<details /g) ?? []).length, 4);
-      assert.equal((line.match(/Conceptual workflow, not live telemetry/g) ?? []).length, 4);
-      for (const connection of ["Signals → Planning", "Planning → Tasks", "Tasks → Integration"]) {
-        assert(line.replace(/<!--.*?-->/g, "").includes(connection));
-      }
+      assert.match(line, /Illustrative workflow — not live job tracking/);
+      assert.match(line, /Zero counts and an idle planner/);
+      assert.match(line, /Workflow inspector/);
+      for (const term of ["Input", "Work", "Output"]) assert(line.includes(`>${term}</dt>`));
+      assert.equal((line.match(/data-factory-item/g) ?? []).length, 18);
       if (availability === "unavailable") {
         assert.equal((line.match(/>Unavailable<\/span>/g) ?? []).length, 4);
         assert(!line.includes(">Idle"));
       } else {
         const suffix = availability === "stale" ? " (stale)" : "";
         assert(line.includes(`>Idle${suffix}</span>`));
-        assert.equal((line.match(new RegExp(`>0 / 0${availability === "stale" ? " \\(stale\\)" : ""}<`, "g")) ?? []).length, 2);
+        assert.equal(line.split(`>0 / 0${suffix}</span>`).length - 1, 2);
       }
       assert.match(html, /Archive history<\/dt><dd[^>]*>1/);
       assert.match(html, /Redacted publication fixture/);

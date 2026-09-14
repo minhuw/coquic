@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ArrowRight, ExternalLink } from "lucide-react";
 import Link from "next/link";
+import { StewardFactory } from "@/components/steward-factory";
 import { SiteHeader } from "@/components/site-header";
 import { getGitHubStars } from "@/lib/github";
 import { readStewardLiveSnapshot } from "@/lib/steward-live/reader";
@@ -80,142 +81,6 @@ function statusTone(value: string) {
 
 function Status({ value }: { value: string }) {
   return <span className={`font-medium ${statusTone(value)}`}>{titleCase(value)}</span>;
-}
-
-function ControlLoop({
-  activeView,
-  liveSnapshot,
-  historyPage,
-}: {
-  activeView: View;
-  liveSnapshot: StewardLiveSnapshot | null;
-  historyPage: CloudTaskPage | null;
-}) {
-  const steps: readonly {
-    id: View | null;
-    label: string;
-    value: string;
-    detail: string;
-    href: string;
-    station: string;
-    schematic: string;
-    workflow: readonly [string, string, string];
-  }[] = [
-    {
-      id: "signals",
-      label: "Signals",
-      value: liveValue(liveSnapshot, liveSnapshot?.signals.pending ?? ""),
-      detail: "pending",
-      href: "/steward?view=signals",
-      station: "Observation intake",
-      schematic: "M0 24H56L88 48 M0 48H88 M0 72H56L88 48 M88 24H144V72H88Z M100 36H132 M100 48H132 M100 60H120 M144 48H240",
-      workflow: ["Incoming repository observations.", "Collect signals for planning to consider.", "Pending signals awaiting triage."],
-    },
-    {
-      id: "planning",
-      label: "Planning",
-      value: liveValue(liveSnapshot, liveSnapshot ? titleCase(liveSnapshot.planning.state) : ""),
-      detail: "planner state",
-      href: "/steward?view=planning",
-      station: "Triage and plan selection",
-      schematic: "M0 48H64 M64 48L104 12L144 48L104 84Z M88 48L100 60L120 36 M144 48H168 M168 24H216V72H168Z M180 36H204 M180 48H204 M180 60H196 M216 48H240",
-      workflow: ["Pending signals.", "Triage observations and select a plan.", "Planned work for task execution; no live run details are published."],
-    },
-    {
-      id: "tasks",
-      label: "Tasks",
-      value: liveValue(liveSnapshot, liveSnapshot ? `${liveSnapshot.tasks.active} / ${liveSnapshot.tasks.queued}` : ""),
-      detail: "active / queued",
-      href: "/steward?view=tasks",
-      station: "Parallel task workbench",
-      schematic: "M0 48H40 M40 20V76 M40 20H72 M40 48H72 M40 76H72 M72 8H168V32H72Z M72 36H168V60H72Z M72 64H168V88H72Z M84 20H124 M84 48H124 M84 76H124 M140 18L146 24L156 14 M140 46L146 52L156 42 M140 74L146 80L156 70 M168 20H200 M168 48H240 M168 76H200 M200 20V76",
-      workflow: ["Planned tasks.", "Execute work in parallel and validate results.", "Task output and validation evidence for review."],
-    },
-    {
-      id: null,
-      label: "Integration",
-      value: liveValue(liveSnapshot, liveSnapshot ? `${liveSnapshot.integration.active} / ${liveSnapshot.integration.queued}` : ""),
-      detail: "active / queued",
-      href: "/steward?view=tasks",
-      station: "Reviewed output convergence",
-      schematic: "M0 20H48L88 48 M0 48H88 M0 76H48L88 48 M88 24H144V72H88Z M100 48L112 60L132 36 M144 48H176 M176 16H216L232 32V80H176Z M216 16V32H232 M188 48H220 M188 60H212 M232 48H240",
-      workflow: ["Task output and review evidence.", "Bring reviewed work together for integration.", "Integrated repository output. Published task evidence remains in the archive."],
-    },
-  ];
-
-  return (
-    <section
-      aria-label="Steward task channels"
-      className="mt-9 border-y border-line bg-surface text-ink"
-    >
-      <figure aria-labelledby="production-line-title">
-        <figcaption className="px-4 pt-5">
-          <h2 id="production-line-title" className="text-lg font-semibold">From observation to integrated output</h2>
-          <p className="mt-2 text-sm text-muted">Explore the conceptual workflow; the values below each station are the aggregate snapshot, not individual job tracking.</p>
-        </figcaption>
-        <ol aria-label="Production line in workflow order" className="grid gap-8 p-4 sm:grid-cols-2 lg:grid-cols-4">
-          {steps.map((step, index) => {
-            const selected = step.id === activeView;
-            return (
-              <li key={step.label} className="relative min-w-0">
-                <Link
-                  href={step.href}
-                  aria-current={selected ? "page" : undefined}
-                  className={`relative block min-w-0 px-4 py-4 text-ink no-underline focus-visible:bg-accent-soft ${selected ? "bg-accent-soft" : "hover:bg-canvas"}`}
-                >
-                  <span className={`flex items-baseline justify-between gap-2 text-sm font-medium ${selected ? "text-accent" : "text-muted"}`}>
-                    <span>{step.label}</span><span aria-hidden="true" className="text-xs">0{index + 1}</span>
-                  </span>
-                  <svg aria-hidden="true" viewBox="0 0 240 96" className="my-3 h-24 w-full text-ink" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
-                    <path d={step.schematic} />
-                    <path d="M234 42L240 48L234 54" />
-                  </svg>
-                  <span className="block text-sm font-medium">{step.station}</span>
-                  <span className="mt-4 block border-t border-line pt-3">
-                    <span className="block text-xs text-muted">Snapshot · {step.detail}</span>
-                    <span className="mt-1 block text-2xl font-medium data-text">{step.value}</span>
-                  </span>
-                  {selected ? <span className="absolute inset-x-0 bottom-0 h-0.5 border-b-2 border-accent bg-accent" /> : null}
-                </Link>
-                <details className="mt-2 border-b border-line">
-                  <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-muted">How {step.label} works</summary>
-                  <div className="px-4 pb-4">
-                    <p className="text-xs text-muted">Conceptual workflow, not live telemetry.</p>
-                    <dl className="mt-3 space-y-3 text-sm">
-                      {step.workflow.map((description, item) => (
-                        <div key={description}>
-                          <dt className="font-medium">{["Input", "Work", "Output"][item]}</dt>
-                          <dd className="mt-1 text-muted">{description}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </div>
-                </details>
-                {index < 3 ? (
-                  <>
-                    <span className="sr-only">{step.label} → {steps[index + 1]!.label}</span>
-                    <svg aria-hidden="true" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.8"
-                      className={`absolute -bottom-8 left-1/2 h-8 w-8 -translate-x-1/2 rotate-90 text-muted sm:-right-8 sm:bottom-auto sm:left-auto sm:top-20 sm:translate-x-0 sm:rotate-0 ${index === 1 ? "sm:hidden lg:block" : ""}`}>
-                      <path d="M0 16H30 M24 10L30 16L24 22" />
-                    </svg>
-                    {index === 1 ? (
-                      <svg aria-hidden="true" viewBox="0 0 100 32" preserveAspectRatio="none" fill="none" stroke="currentColor" strokeWidth="1.8"
-                        className="absolute -bottom-8 right-1/2 hidden h-8 w-[calc(100%+2rem)] text-muted sm:block lg:hidden">
-                        <path d="M100 0V16H1V30 M0 24L1 30L2 24" vectorEffect="non-scaling-stroke" />
-                      </svg>
-                    ) : null}
-                  </>
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
-        <p className="border-t border-line px-4 py-3 text-xs text-muted">
-          Arrows show workflow direction, not activity. Freshness is reported above. Archive history: <span className="data-text">{historyPage?.total ?? "Unavailable"}</span> · independent of live counts.
-        </p>
-      </figure>
-    </section>
-  );
 }
 
 function SectionOpening({
@@ -527,25 +392,8 @@ export default async function StewardPage({
     <>
       <SiteHeader githubStars={githubStars} />
       <main id="content">
-        <div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
-          <header className="pt-10 sm:pt-12">
-            <div>
-              <p className="text-sm font-medium text-muted">Repository automation</p>
-              <h1 className="mt-2 text-3xl font-medium leading-tight text-ink sm:text-4xl">Steward</h1>
-              <p className="mt-3 max-w-3xl text-base leading-7 text-muted">Follow current control-loop state and public task history without hiding unavailable evidence.</p>
-              <p className="mt-4 text-xs text-muted">
-                <span className={`font-medium ${liveSnapshot?.availability === "live" ? "text-accent" : "text-muted"}`}>
-                  {liveSnapshot ? `Live snapshot ${liveSnapshot.availability}` : "Live snapshot unavailable"}
-                </span>
-                {liveSnapshot ? (
-                  <span className="mt-1 block data-text">
-                    Daemon {titleCase(liveSnapshot.daemon.mode)} · observed {formatAge(liveSnapshot.observedAt)} · stale after {liveSnapshot.staleAfterSeconds}s
-                  </span>
-                ) : null}
-              </p>
-            </div>
-            <ControlLoop activeView={activeView} liveSnapshot={liveSnapshot} historyPage={historyPage} />
-          </header>
+        <StewardFactory snapshot={liveSnapshot} activeView={activeView} historyCount={historyPage?.total ?? null} />
+        <div id="steward-evidence" className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
           {activeView === "signals" ? <LiveDomainView domain="signals" snapshot={liveSnapshot} /> : null}
           {activeView === "planning" ? <LiveDomainView domain="planning" snapshot={liveSnapshot} /> : null}
           {activeView === "tasks" ? <TasksView liveSnapshot={liveSnapshot} status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} globalUsage={globalUsage} taskUsage={taskUsage} /> : null}

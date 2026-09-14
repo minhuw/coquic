@@ -140,6 +140,7 @@ class LiveSnapshotClient:
                     "Authorization": f"Bearer {_read_token(self.token_path)}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
+                    "User-Agent": "coquic-steward/0.1",
                 },
             )
             with self._open_request(request, timeout=self.timeout_seconds) as response:

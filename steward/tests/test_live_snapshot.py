@@ -242,6 +242,7 @@ def test_live_snapshot_client_posts_bearer_json_with_bounded_io(tmp_path: Path) 
     assert request.method == "POST"
     assert request.get_header("Authorization") == f"Bearer {token}"
     assert request.get_header("Content-type") == "application/json"
+    assert request.get_header("User-agent") == "coquic-steward/0.1"
     assert json.loads(request.data) == payload
     assert 0 < timeout <= 15
 

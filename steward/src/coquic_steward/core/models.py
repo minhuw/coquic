@@ -1230,8 +1230,10 @@ class SchedulerStoreSnapshot:
     pending_wakeups: tuple[SchedulerWakeup, ...] = ()
     recent_wakeups: tuple[SchedulerWakeup, ...] = ()
     pending_signal: bool = False
+    pending_signal_count: int = 0
     planner_retry_at: datetime | None = None
     planning_paused: bool = False
+    planning_active: bool = False
     latest_fetches: dict[str, SignalFetchRun | None] = field(default_factory=dict)
 
     @property

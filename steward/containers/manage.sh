@@ -29,6 +29,7 @@ require_paths() {
   is_abs "$repository" || die 'repository must be absolute'
   is_abs "$socket_path" || die 'DOCKER_SOCKET must be absolute'
   deployment="$home/private/deployment"
+  export LIVE_SNAPSHOT_TOKEN_PATH="${LIVE_SNAPSHOT_TOKEN_PATH:-$home/private/credentials/live-write-token}"
   local configured_host="${DOCKER_HOST:-}"
   if [[ -n "$configured_host" ]]; then
     [[ "$configured_host" == "unix://$socket_path" ]] || die 'DOCKER_HOST must match the configured local Unix socket'
@@ -94,6 +95,7 @@ validate_credentials() {
   check_private_file "${D1_TOKEN_PATH:-$home/private/credentials/d1-read-token}" 'D1 publication token'
   check_private_file "${R2_ACCESS_KEY_ID_PATH:-$home/private/credentials/r2-access-key-id}" 'R2 access-key ID'
   check_private_file "${R2_SECRET_ACCESS_KEY_PATH:-$home/private/credentials/r2-secret-access-key}" 'R2 secret access key'
+  check_private_file "${LIVE_SNAPSHOT_TOKEN_PATH:-$home/private/credentials/live-write-token}" 'live snapshot publication token'
 }
 
 validate_https_remote() {

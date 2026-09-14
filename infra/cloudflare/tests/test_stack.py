@@ -17,14 +17,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from infra.cloudflare.__main__ import (  # noqa: E402
+    LIVE_STATE_CLASS,
+    LIVE_WORKER_NAME,
     SITE_TOKEN_NAME,
     STEWARD_TOKEN_NAME,
     _allow_policy,
+    _derive_live_write_token,
     _derive_s3_secret_access_key,
     build_stack,
 )
 from infra.cloudflare.config import (  # noqa: E402
     CloudflareConfig,
+    LIVE_HOSTNAME,
     load_config,
     PRIVATE_RETENTION_SECONDS,
     PUBLIC_HOSTNAME,
@@ -39,6 +43,7 @@ def valid_values() -> dict[str, Any]:
         "public_bucket_name": "coquic-public-artifacts",
         "private_bucket_name": "coquic-private-originals",
         "public_hostname": PUBLIC_HOSTNAME,
+        "live_hostname": LIVE_HOSTNAME,
         "private_retention_seconds": PRIVATE_RETENTION_SECONDS,
     }
 
@@ -46,6 +51,13 @@ def valid_values() -> dict[str, Any]:
 def test_config_accepts_only_canonical_values() -> None:
     config = CloudflareConfig.from_mapping(valid_values())
     assert config.public_base_url == "https://artifacts.coquic.minhuw.dev"
+    assert config.live_url == "https://live.coquic.minhuw.dev/api/steward/live"
+
+
+def test_existing_config_defaults_fixed_live_hostname() -> None:
+    values = valid_values()
+    values.pop("live_hostname")
+    assert CloudflareConfig.from_mapping(values).live_hostname == LIVE_HOSTNAME
 
 
 @pytest.mark.parametrize(
@@ -57,6 +69,7 @@ def test_config_accepts_only_canonical_values() -> None:
         "public_r2_bucket_name",
         "private_r2_bucket_name",
         "hostname",
+        "live_domain",
         "private_retention_age_seconds",
         "unexpected",
     ],
@@ -96,10 +109,17 @@ def test_config_rejects_identical_buckets() -> None:
         CloudflareConfig.from_mapping(values)
 
 
-def test_config_rejects_wrong_hostname() -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("public_hostname", "objects.example.test", PUBLIC_HOSTNAME),
+        ("live_hostname", "live.example.test", LIVE_HOSTNAME),
+    ],
+)
+def test_config_rejects_wrong_hostname(field: str, value: str, expected: str) -> None:
     values = valid_values()
-    values["public_hostname"] = "objects.example.test"
-    with pytest.raises(ValueError, match=PUBLIC_HOSTNAME):
+    values[field] = value
+    with pytest.raises(ValueError, match=expected):
         CloudflareConfig.from_mapping(values)
 
 
@@ -202,6 +222,8 @@ def test_resources_match_single_database_topology() -> None:
             "cloudflare:index/r2Bucket:R2Bucket": 2,
             "cloudflare:index/r2CustomDomain:R2CustomDomain": 1,
             "cloudflare:index/r2BucketLifecycle:R2BucketLifecycle": 1,
+            "cloudflare:index/workersScript:WorkersScript": 1,
+            "cloudflare:index/workersCustomDomain:WorkersCustomDomain": 1,
         }
     )
 
@@ -241,6 +263,35 @@ def test_resources_match_single_database_topology() -> None:
             },
         }
     ]
+
+    worker = by_type["cloudflare:index/workersScript:WorkersScript"]
+    assert worker.inputs["scriptName"] == LIVE_WORKER_NAME
+    assert worker.inputs["mainModule"] == "live-state-worker.mjs"
+    assert worker.inputs["migrations"] == {
+        "newTag": "v1",
+        "newSqliteClasses": [LIVE_STATE_CLASS],
+    }
+    binding_values = worker.inputs["bindings"]["value"]
+    bindings = {binding["name"]: binding for binding in binding_values}
+    assert bindings["LIVE_STATE"] == {
+        "name": "LIVE_STATE",
+        "type": "durable_object_namespace",
+        "className": LIVE_STATE_CLASS,
+    }
+    assert bindings["WRITE_TOKEN"] == {
+        "name": "WRITE_TOKEN",
+        "type": "secret_text",
+        "text": _derive_live_write_token("mock-value-stewardPublicationToken"),
+    }
+    assert "idFromName(\"global\")" in worker.inputs["content"]
+    assert "mock-value-stewardPublicationToken" not in worker.inputs["content"]
+
+    live_domain = by_type[
+        "cloudflare:index/workersCustomDomain:WorkersCustomDomain"
+    ]
+    assert live_domain.inputs["hostname"] == LIVE_HOSTNAME
+    assert live_domain.inputs["service"] == LIVE_WORKER_NAME
+    assert live_domain.inputs["zoneId"] == "b" * 32
 
     assert all("credential" not in resource.inputs for resource in resources)
 
@@ -300,11 +351,15 @@ def test_token_policy_matches_provider_normalization() -> None:
     ]
 
 
-def test_tokens_and_outputs_derive_lower_case_sha256() -> None:
+def test_tokens_and_outputs_derive_distinct_lower_case_sha256_values() -> None:
     value = "one-time-token-value"
-    assert _derive_s3_secret_access_key(value) == hashlib.sha256(
-        value.encode("utf-8")
+    s3_value = _derive_s3_secret_access_key(value)
+    live_value = _derive_live_write_token(value)
+    assert s3_value == hashlib.sha256(value.encode("utf-8")).hexdigest()
+    assert live_value == hashlib.sha256(
+        b"coquic-steward-live-write\0" + value.encode("utf-8")
     ).hexdigest()
+    assert len({value, s3_value, live_value}) == 3
 
 
 def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
@@ -313,11 +368,13 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
         "d1_database_id",
         "public_bucket_name",
         "public_base_url",
+        "live_url",
         "steward_config",
         "site_config",
         "steward_d1_token",
         "steward_s3_access_key_id",
         "steward_s3_secret_access_key",
+        "steward_live_write_token",
         "site_d1_read_token",
     }
     secret_exports = {
@@ -326,6 +383,7 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
         "steward_d1_token",
         "steward_s3_access_key_id",
         "steward_s3_secret_access_key",
+        "steward_live_write_token",
         "site_d1_read_token",
     }
     for name in secret_exports:
@@ -340,10 +398,22 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
         "private_bucket_name",
         "s3_access_key_id",
         "s3_secret_access_key",
+        "live_url",
+        "live_write_token",
     }
     assert steward["s3_secret_access_key"] == _derive_s3_secret_access_key(
         steward["d1_token"]
     )
+    assert steward["live_write_token"] == _derive_live_write_token(
+        steward["d1_token"]
+    )
+    assert len(
+        {
+            steward["d1_token"],
+            steward["s3_secret_access_key"],
+            steward["live_write_token"],
+        }
+    ) == 3
 
     site = asyncio.run(exports["site_config"].future())
     assert set(site) == {
@@ -351,7 +421,9 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
         "d1_database_id",
         "d1_read_token",
         "public_base_url",
+        "live_url",
     }
     assert steward["d1_database_id"] == site["d1_database_id"]
+    assert steward["live_url"] == site["live_url"]
     assert all("private" not in key.lower() for key in site)
     assert all("bucket" not in key.lower() for key in site)

@@ -127,35 +127,39 @@ rich-text rhythm after sanitization; it does not own content loading or safety.
 
 ## Cloud reader and deployment boundary
 
-Site V2 is a standalone Next.js Node process. Server-side native `fetch` reads
-fixed, bounded D1 REST statements and validates public R2 descriptors before
-rendering or producing a same-origin 307 redirect. The browser never calls D1,
-receives a D1 token, or receives a direct provider URL.
+Site V2 is a standalone Next.js Node process. Server-side native `fetch`
+independently reads the bounded public Steward live snapshot and fixed, bounded
+D1 REST statements, then validates public R2 descriptors before rendering or
+producing a same-origin 307 redirect. The browser never calls the live endpoint
+or D1, receives a D1 token, or receives a direct upstream URL.
 
-The reader's only server configuration is:
+The readers' server configuration is:
 
 - `CLOUDFLARE_ACCOUNT_ID`;
 - `COQUIC_STEWARD_D1_DATABASE_ID`;
-- `COQUIC_STEWARD_D1_READ_TOKEN`; and
-- `COQUIC_STEWARD_PUBLIC_R2_BASE_URL`.
+- `COQUIC_STEWARD_D1_READ_TOKEN`;
+- `COQUIC_STEWARD_PUBLIC_R2_BASE_URL`; and
+- `COQUIC_STEWARD_LIVE_SNAPSHOT_URL`.
 
-All four values are server-only. The account-scoped D1 token is never bundled,
-logged, or passed to task, planner, or validation containers. Missing or unsafe
-values fail closed. Builds and tests use mocked transports and need no live
-credential.
+All five values are server-only; the live URL is non-secret and independent of
+the four archive values. The account-scoped D1 token is never bundled, logged,
+or passed to task, planner, or validation containers. Missing or unsafe values
+fail closed for their own reader. Builds and tests use mocked transports and
+need no live credential or endpoint.
 
 Cloudflare infrastructure is an independent local operator action. Run
 `infra/cloudflare/scripts/deploy-production.sh` from the reproducible Nix
 shell; it previews by default, requires explicit `--apply`, rejects unsafe
 Pulumi deletes/replacements, verifies the D1 schema, and installs the protected
-Steward credentials before handing four Site values to the SSH installer. It
-does not deploy Site or start Steward.
+Steward credentials before handing all five Site values to the SSH installer.
+It does not deploy Site or start Steward.
 
 Ordinary Site deploy/repair/rollback uses `site/deploy/deploy-remote.sh` and
-preserves the four protected values. GitHub Actions invokes that path only; it
-does not invoke Pulumi or Wrangler and stores no Cloudflare credential. There
-is no local SQLite/cache, filesystem archive importer, Worker, sidecar, D1
-mutation, compatibility reader, or history migration in this boundary.
+preserves all five installed values. GitHub Actions invokes that path only; it
+does not invoke Pulumi or Wrangler and stores no Cloudflare credential.
+Site deploys no Worker and has no local SQLite/cache, filesystem archive
+importer, sidecar, D1 mutation, compatibility reader, or history migration; the
+public Worker/Durable Object endpoint is a separate read-only upstream.
 
 ## Testing
 

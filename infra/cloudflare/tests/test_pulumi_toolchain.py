@@ -19,6 +19,8 @@ def test_python_language_plugin_runs_offline_preview_and_retry(tmp_path: Path) -
         ("cloudflare:index/r2BucketLifecycle:R2BucketLifecycle", "privateOriginalsLifecycle"),
         ("cloudflare:index/accountToken:AccountToken", "stewardPublicationToken"),
         ("cloudflare:index/accountToken:AccountToken", "siteReaderToken"),
+        ("cloudflare:index/workersScript:WorkersScript", "stewardLiveGateway"),
+        ("cloudflare:index/workersCustomDomain:WorkersCustomDomain", "stewardLiveDomain"),
     ]
     (project / "__main__.py").write_text(
         'import pulumi\n'
@@ -86,5 +88,5 @@ def test_python_language_plugin_runs_offline_preview_and_retry(tmp_path: Path) -
     )
     assert checked.returncode == 0, checked.stderr
     assert checked.stdout.strip() == (
-        "create=0 update=0 delete=0 same=8 read=0 refresh=0 resources=8"
+        "create=0 update=0 delete=0 same=10 read=0 refresh=0 resources=10"
     )

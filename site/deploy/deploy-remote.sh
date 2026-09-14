@@ -485,6 +485,7 @@ cloud_fields=(
   COQUIC_STEWARD_D1_DATABASE_ID
   COQUIC_STEWARD_D1_READ_TOKEN
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 )
 declare -A seen_fields=()
 
@@ -537,6 +538,9 @@ validate_cloud_value() {
         [[ ! "${lower_segment}" =~ %(0[0-9a-f]|1[0-9a-f]|7f) ]] || reject_cloud_config "contains an invalid ${field} value"
         [[ ! "${decoded}" =~ [[:cntrl:]] && "${decoded}" != *'/'* && "${decoded}" != *'\\'* ]] || reject_cloud_config "contains an invalid ${field} value"
       done
+      ;;
+    COQUIC_STEWARD_LIVE_SNAPSHOT_URL)
+      [[ "${value}" == "https://live.coquic.minhuw.dev/api/steward/live" ]] || reject_cloud_config "contains an invalid ${field} value"
       ;;
     *)
       reject_cloud_config "contains an unsupported field"
@@ -713,16 +717,16 @@ preserve_installed_cloud_exports() {
   local preserved_path="${remote_upload_dir}/app.env.cloud"
 
   # The ordinary deploy owns QA/preview configuration, but it must carry the
-  # four operator-installed cloud exports forward unchanged.
+  # five operator-installed cloud exports forward unchanged.
   sudo awk '
-    /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { next }
+    /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL|COQUIC_STEWARD_LIVE_SNAPSHOT_URL)=/ { next }
     { print }
   ' "${candidate_path}" > "${filtered_path}"
   sudo mv -f "${filtered_path}" "${candidate_path}"
 
   if sudo test -f "${source_path}"; then
     sudo awk '
-      /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { print }
+      /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL|COQUIC_STEWARD_LIVE_SNAPSHOT_URL)=/ { print }
     ' "${source_path}" > "${preserved_path}"
     if sudo test -s "${preserved_path}"; then
       sudo cat "${preserved_path}" >> "${candidate_path}"

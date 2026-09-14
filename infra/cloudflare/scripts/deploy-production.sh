@@ -403,6 +403,8 @@ expected_resources = {
     ("cloudflare:index/r2bucketlifecycle:r2bucketlifecycle", "privateoriginalslifecycle"),
     ("cloudflare:index/accounttoken:accounttoken", "stewardpublicationtoken"),
     ("cloudflare:index/accounttoken:accounttoken", "sitereadertoken"),
+    ("cloudflare:index/workersscript:workersscript", "stewardlivegateway"),
+    ("cloudflare:index/workerscustomdomain:workerscustomdomain", "stewardlivedomain"),
 }
 
 
@@ -507,8 +509,15 @@ if any(len(operations) != 1 for operations in resource_operations.values()):
     raise SystemExit(26)
 
 allowed_operations = {"create", "same", "read", "refresh"}
-for operations in resource_operations.values():
-    if next(iter(operations)) not in allowed_operations:
+worker_identity = (
+    "cloudflare:index/workersscript:workersscript",
+    "stewardlivegateway",
+)
+for identity, operations in resource_operations.items():
+    operation = next(iter(operations))
+    if operation not in allowed_operations and not (
+        identity == worker_identity and operation == "update"
+    ):
         raise SystemExit(27)
 
 counts: Counter[str] = Counter(op for _, op in records)
@@ -609,11 +618,13 @@ allowed_top = {
     "d1_database_id",
     "public_bucket_name",
     "public_base_url",
+    "live_url",
     "steward_config",
     "site_config",
     "steward_d1_token",
     "steward_s3_access_key_id",
     "steward_s3_secret_access_key",
+    "steward_live_write_token",
     "site_d1_read_token",
 }
 if set(payload) != allowed_top:
@@ -631,6 +642,8 @@ if set(steward) != {
     "private_bucket_name",
     "s3_access_key_id",
     "s3_secret_access_key",
+    "live_url",
+    "live_write_token",
 }:
     raise ValueError("Steward output fields drifted")
 if set(site) != {
@@ -638,6 +651,7 @@ if set(site) != {
     "d1_database_id",
     "d1_read_token",
     "public_base_url",
+    "live_url",
 }:
     raise ValueError("Site output fields drifted")
 
@@ -655,22 +669,36 @@ if not site_values["public_base_url"].startswith("https://") or any(
     char in site_values["public_base_url"] for char in "?#\r\n"
 ):
     raise ValueError("invalid public URL")
+if steward_values["live_url"] != "https://live.coquic.minhuw.dev/api/steward/live":
+    raise ValueError("invalid live URL")
+if site_values["live_url"] != steward_values["live_url"]:
+    raise ValueError("live URLs differ")
 if text(payload, "d1_database_id").lower() != steward_values["d1_database_id"].lower():
     raise ValueError("top-level database ID differs")
 if text(payload, "public_bucket_name") != steward_values["public_bucket_name"]:
     raise ValueError("top-level bucket name differs")
 if text(payload, "public_base_url") != site_values["public_base_url"]:
     raise ValueError("top-level public URL differs")
+if text(payload, "live_url") != site_values["live_url"]:
+    raise ValueError("top-level live URL differs")
 
 standalone = {
     "steward_d1_token": steward_values["d1_token"],
     "steward_s3_access_key_id": steward_values["s3_access_key_id"],
     "steward_s3_secret_access_key": steward_values["s3_secret_access_key"],
+    "steward_live_write_token": steward_values["live_write_token"],
     "site_d1_read_token": site_values["d1_read_token"],
 }
 for top_key, expected in standalone.items():
     if text(payload, top_key) != expected:
         raise ValueError("standalone output does not match composite")
+if steward_values["live_write_token"] in {
+    steward_values["d1_token"],
+    steward_values["s3_access_key_id"],
+    steward_values["s3_secret_access_key"],
+    site_values["d1_read_token"],
+}:
+    raise ValueError("live credential is not distinct")
 
 values = {
     "account_id": steward_values["account_id"].lower(),
@@ -678,10 +706,12 @@ values = {
     "d1_token": steward_values["d1_token"],
     "s3_access_key_id": steward_values["s3_access_key_id"],
     "s3_secret_access_key": steward_values["s3_secret_access_key"],
+    "live_write_token": steward_values["live_write_token"],
     "site_account_id": site_values["account_id"].lower(),
     "site_d1_database_id": site_values["d1_database_id"].lower(),
     "site_d1_read_token": site_values["d1_read_token"],
     "site_public_base_url": site_values["public_base_url"],
+    "site_live_url": site_values["live_url"],
 }
 for key, value in values.items():
     path = destination / key
@@ -939,7 +969,7 @@ ensure_credentials_directory() {
 install_steward_credentials() {
   ensure_credentials_directory
   local stage="${credentials_dir}/.coquic-steward-bootstrap.$$"
-  local -a names=(d1-read-token r2-access-key-id r2-secret-access-key)
+  local -a names=(d1-read-token r2-access-key-id r2-secret-access-key live-write-token)
   local -a old_names=()
   local -a installed_names=()
   local name destination value
@@ -983,6 +1013,9 @@ install_steward_credentials() {
       r2-secret-access-key)
         value="$(read_field s3_secret_access_key)" || { restore_credentials; fail "validated R2 secret credential is missing"; }
         ;;
+      live-write-token)
+        value="$(read_field live_write_token)" || { restore_credentials; fail "validated live credential is missing"; }
+        ;;
     esac
     if ! printf '%s\n' "${value}" >"${stage}/new-${name}"; then
       restore_credentials
@@ -1014,6 +1047,7 @@ site_input="${temporary_dir}/site-cloud-config.env"
   printf 'COQUIC_STEWARD_D1_DATABASE_ID=%s\n' "$(read_field site_d1_database_id)"
   printf 'COQUIC_STEWARD_D1_READ_TOKEN=%s\n' "$(read_field site_d1_read_token)"
   printf 'COQUIC_STEWARD_PUBLIC_R2_BASE_URL=%s\n' "$(read_field site_public_base_url)"
+  printf 'COQUIC_STEWARD_LIVE_SNAPSHOT_URL=%s\n' "$(read_field site_live_url)"
 } >"${site_input}"
 chmod 600 -- "${site_input}"
 

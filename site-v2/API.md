@@ -10,8 +10,8 @@
 - Dataset and raw transcript downloads include safe `Content-Disposition`.
 - `HEAD` on dataset archives returns the same metadata headers as `GET` without a body.
 - Unrelated V2 responses retain their documented schema headers and versions.
-  Steward cloud JSON bodies use `schemaVersion: "4.0"`; cloud routes do not
-  expose a live credential or a private locator.
+  Steward archive JSON bodies use `schemaVersion: "4.0"`; cloud routes do not
+  expose a credential, the live snapshot URL, or a private locator.
 
 ## Status codes
 
@@ -84,13 +84,27 @@ comes from `testcaseOrder`. Coverage collection order comes from the producer.
 
 ## Steward cloud reader
 
-Steward cloud endpoints are read-only. Site V2 is a standalone Next.js Node
-reader using server-side native `fetch` to Cloudflare D1 REST and anonymous
-public R2. D1 reads join only `visible` task heads and visible publications;
-staged, superseded, hidden, malformed, dangling, or private-shaped data fails
-closed. The account-scoped D1 Read token is server-only because Cloudflare cannot
-scope it to one database. The reader has no D1 write path, Worker/sidecar, local
-SQLite/cache, filesystem archive input, or alternate publication fallback.
+Steward reads are read-only. Site V2 is a standalone Next.js Node reader using
+server-side native `fetch` for two independent sources: the public Durable
+Object live snapshot and the Cloudflare D1/R2 archive. D1 reads join only
+`visible` task heads and visible publications; staged, superseded, hidden,
+malformed, dangling, or private-shaped data fails closed. The account-scoped D1
+Read token is server-only because Cloudflare cannot scope it to one database.
+Site deploys no Worker or sidecar and never uses live state as an archive
+fallback.
+
+### Public live snapshot
+
+For each `/steward` request, the server performs one bounded, no-store `GET` to
+the configured `COQUIC_STEWARD_LIVE_SNAPSHOT_URL`. The upstream response must
+validate exactly against `steward-live.schema.json#/$defs/snapshot`: schema
+version `1.0`, UTC `observedAt`, a 30-3600 second stale threshold, daemon mode,
+and closed Signals, Planning, Tasks, and Integration state. Unknown fields,
+unsafe integers, unsupported states or versions, malformed timestamps, timeout,
+non-JSON, non-2xx, and oversized responses make only live state unavailable.
+No same-origin live API is exposed because server rendering consumes the public
+snapshot directly. D1/R2 status, task pages, history, detail, transcript, usage,
+and artifact routes remain unchanged and are never used as a live fallback.
 
 ### Status and task pages
 

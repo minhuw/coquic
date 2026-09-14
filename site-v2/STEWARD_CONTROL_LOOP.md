@@ -1,59 +1,58 @@
 # Steward Global Control-Loop Boundary
 
-The initial Site V2 publication contains task-local events in each visible D1
-publication. It does not publish a global signal ledger, planner archive, or
-revision domain. Producer details belong to the [Steward cloud
-contracts](../contracts/steward-cloud/README.md); Site reader behavior belongs
-to [DATA.md](DATA.md), [API.md](API.md), and [FUNCTIONAL.md](FUNCTIONAL.md).
+Site V2 consumes two independent public Steward sources. The Durable Object
+live snapshot publishes aggregate control-loop state; visible D1 publications
+and immutable R2 objects remain the archive for task history and detail. Site
+never derives one source from the other or uses either as a fallback.
 
-## Published task boundary
+## Live snapshot boundary
 
-Task events are rows in the visible D1 publication for their owning task. They
-carry the task identity, positive sequence, event type, occurrence time, and
-bounded summary. Site validates task ownership, expected event count, and
-contiguous sequence before returning task detail. Events are evidence attached
-to one task; they are not a cross-task event stream and do not establish a
-global revision or snapshot.
+For every server-rendered `/steward` request, Site performs one bounded,
+no-store `GET` to `COQUIC_STEWARD_LIVE_SNAPSHOT_URL`. The response is the closed
+`schemaVersion: "1.0"` object defined by
+[`schemas/steward-live.schema.json`](schemas/steward-live.schema.json):
 
-A completed planning run attached to a task is task evidence. It is the same
-complete sanitized trajectory described by the task publication and is not a
-global scheduler-planner run. Site does not infer signal, planner, proposal, or
-revision relationships from task events, timestamps, labels, or payloads.
+- `availability`: `live` or `stale`;
+- strict UTC `observedAt` and `staleAfterSeconds` from 30 through 3600;
+- public daemon mode: `production` or `dry-run`;
+- pending Signals count;
+- Planning state: `active`, `idle`, or `paused`;
+- Tasks active and queued counts; and
+- Integration active and queued counts.
 
-## Unavailable product domains
+Counts are nonnegative safe integers. The object and every nested object are
+closed. Unsupported versions or states, unknown fields, invalid timestamps,
+unsafe integers, timeout, non-JSON, non-success, and oversized responses make
+live state explicitly unavailable. Stale values retain their exact count/state
+with a stale label. Site adds no polling, browser fetch, WebSocket, retry loop,
+or local cache.
 
-Signals, Planning, and revision remain discoverable navigation destinations, but
-the initial cloud publication has no public rows or objects for those global
-domains. They are product states, not API endpoints or alternate data sources.
-The UI keeps Signals and Planning discoverable and renders their explicit
-unavailable state without synthesizing a payload. An empty task publication is
-valid; it does not make a global domain available.
+The live snapshot intentionally carries no task IDs, titles, transcripts,
+artifacts, events, or history. Only the declared daemon mode is public; all
+other operator and daemon configuration remains private.
 
-The unavailable state is intentional product ownership, not a transport failure.
-The reader never polls, retries automatically, derives global state from task
-records, or uses a local fixture to populate these destinations. Task-local
-planning evidence remains available only through the published task graph.
+## Archive task boundary
 
-## Ownership and future activation
+Task events remain rows in the visible D1 publication for their owning task.
+Site validates task ownership, expected event count, contiguous sequence,
+relationships, and immutable R2 evidence before returning archive detail. A
+completed planning run attached to a task is archive evidence, not the global
+Planning state.
 
-The task publication producer owns event creation, validation, and exposure. The
-cloud contract in [`contracts/steward-cloud/`](../contracts/steward-cloud/)
-owns D1/R2 publication rules. Site owns read-only acquisition, validation, and
-rendering. This document owns only the global availability and ownership
-boundary; it does not add a transfer process, deployment operation, database, or
-control-plane mutation.
+Archive status, active publications, history counts, task detail, usage,
+trajectories, and artifacts retain their existing D1/R2 behavior. Live failure
+must not suppress archive history. Archive failure must not change a valid live
+snapshot. Site never infers live Signals, Planning, Tasks, or Integration values
+from archive rows.
 
-A future global domain requires its own producer contract, schema, fixtures,
-public-safe publication, API response, and reader tests. Until that contract
-exists, global Signals, Planning, and revision remain explicit unavailable
-product states. Task-local planning evidence remains available only through the
-published task graph.
+## Ownership
 
-## Reader input boundary
+The separately deployed Worker/Durable Object owns live snapshot production and
+availability. The Steward cloud publisher owns D1/R2 archive creation and
+exposure. Site owns server-only acquisition, exact boundary validation, honest
+state rendering, and deployment of the non-secret upstream URL. Site itself
+deploys no Worker, database, sidecar, importer, or control-plane mutation.
 
-The Site reader consumes only visible D1 task publications and immutable
-sanitized R2 objects addressed by validated artifact identity. It has no
-filesystem archive, JSONL tail, local cache, importer, control-plane mutation,
-or alternate publication input. Credentials, private paths, authenticated
-object locations, and raw internal control-loop records remain outside the
-public contract.
+Revision remains outside the live and archive contracts. Adding it requires a
+current schema and producer field rather than inference from task events,
+timestamps, labels, or payloads.

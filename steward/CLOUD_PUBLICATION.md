@@ -3,7 +3,9 @@
 Cloud publication is an optional, daemon-only boundary. SQLite and the local
 task and control-loop archives remain private operational truth. Site V2 sees
 only validated public metadata and precomputed usage projections in D1 plus
-immutable sanitized objects in R2. The field-level payload, D1, R2, and ATIF rules live in
+immutable sanitized objects in R2. A separate live-state worker may also send a
+closed scheduler snapshot to the Durable Object gateway; it shares neither the
+heartbeat path nor the D1/R2 archive worker. The field-level payload, D1, R2, and ATIF rules live in
 [contracts/steward-cloud](../contracts/steward-cloud/README.md); this document
 describes the lifecycle and recovery boundary without repeating those tables.
 
@@ -43,6 +45,26 @@ mode-restricted descriptor-anchored child below that root, removes it on success
 or failure, and never writes directly to the shared parent. Explicitly
 unconfigured library and test calls retain their private temporary fallback;
 the integration preflight source scan remains a separate source-safety boundary.
+
+## Live scheduler snapshots
+
+When `[steward.publication].live_snapshot_enabled` is true, Steward starts one
+independent daemon thread after startup reconciliation and daemon authority are
+established. It publishes immediately and then at the configured 30–3600 second
+interval to `live_snapshot_url`; the advertised stale window is three intervals,
+capped at one hour. Bearer authentication is read at runtime from
+`live_snapshot_token_path`. Production uses
+`https://live.coquic.minhuw.dev/api/steward/live` and the separately mounted
+`/run/secrets/live-write-token`.
+
+Each POST contains only schema version, UTC observation/staleness timestamps,
+daemon mode, exact pending-signal count, exact source/integration active and
+queued counts, and planning state. Planning is `paused` when the Store pause
+facts say so, `active` only while a current planner run is claimed/running, and
+otherwise `idle`. Task IDs, task content, credentials, and provider names are
+never included. HTTP failures are bounded and logged by error class; they do
+not crash Steward or delay heartbeat persistence. Shutdown signals and joins
+this worker separately from archive publication.
 
 ## Publication order
 

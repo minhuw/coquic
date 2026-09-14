@@ -28,7 +28,7 @@ git -C "$seed" commit -qm seed
 git -C "$seed" remote add origin "$remote"
 git -C "$seed" push -q origin main
 
-for file in d1-read-token r2-access-key-id r2-secret-access-key; do
+for file in d1-read-token r2-access-key-id r2-secret-access-key live-write-token; do
   printf 'synthetic-%s-credential-value\n' "$file" >"$home/private/credentials/$file"
   chmod 600 "$home/private/credentials/$file"
 done
@@ -50,6 +50,7 @@ export DOCKER_SOCKET="$tmp/docker.sock"
 export D1_TOKEN_PATH="$home/private/credentials/d1-read-token"
 export R2_ACCESS_KEY_ID_PATH="$home/private/credentials/r2-access-key-id"
 export R2_SECRET_ACCESS_KEY_PATH="$home/private/credentials/r2-secret-access-key"
+export LIVE_SNAPSHOT_TOKEN_PATH="$home/private/credentials/live-write-token"
 export STEWARD_UID="$(id -u)"
 export STEWARD_GID="$(id -g)"
 export STEWARD_DOCKER_GID="$(id -g)"
@@ -198,7 +199,7 @@ restore_credential() {
 
 check_credential_refusals() {
   local path
-  for path in "$D1_TOKEN_PATH" "$R2_ACCESS_KEY_ID_PATH" "$R2_SECRET_ACCESS_KEY_PATH"; do
+  for path in "$D1_TOKEN_PATH" "$R2_ACCESS_KEY_ID_PATH" "$R2_SECRET_ACCESS_KEY_PATH" "$LIVE_SNAPSHOT_TOKEN_PATH"; do
     rm -f "$path"
     expect_bootstrap_refusal "missing ${path##*/}" 'publication' || return 1
     restore_credential "$path"
@@ -798,7 +799,8 @@ case "$mode" in
     [[ ! -e "$home/private/runtime/daemon-passwd" && ! -e "$home/private/runtime/daemon-group" ]]
     rendered="$(docker compose --project-name "$STEWARD_COMPOSE_PROJECT" --file "$script_dir/compose.yml" config --format json)"
     RENDERED_COMPOSE="$rendered" D1_SOURCE="$D1_TOKEN_PATH" R2_ID_SOURCE="$R2_ACCESS_KEY_ID_PATH" \
-      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
+      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" LIVE_SOURCE="$LIVE_SNAPSHOT_TOKEN_PATH" \
+      python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
 import json, os, sys
 value = json.loads(os.environ["RENDERED_COMPOSE"])
 service = value["services"]["steward"]
@@ -814,6 +816,7 @@ assert {
     ("d1_token", "/run/secrets/d1-read-token"),
     ("r2_access_key_id", "/run/secrets/r2-access-key-id"),
     ("r2_secret_access_key", "/run/secrets/r2-secret-access-key"),
+    ("live_snapshot_token", "/run/secrets/live-write-token"),
 }
 sources = value["secrets"]
 assert "codex_api_key" not in sources
@@ -838,6 +841,7 @@ assert "github-token" not in json.dumps(value)
 assert sources["d1_token"]["file"] == os.environ["D1_SOURCE"]
 assert sources["r2_access_key_id"]["file"] == os.environ["R2_ID_SOURCE"]
 assert sources["r2_secret_access_key"]["file"] == os.environ["R2_SECRET_SOURCE"]
+assert sources["live_snapshot_token"]["file"] == os.environ["LIVE_SOURCE"]
 assert "credential-value" not in json.dumps(value)
 assert not any("api_key" in name.lower() for name in environment)
 assert service["read_only"] is True

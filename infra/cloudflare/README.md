@@ -2,14 +2,21 @@
 
 This stack is the provider boundary for Steward cloud publication and Site V2.
 It creates one protected current D1, one public R2 bucket for immutable
-sanitized objects, and one private R2 bucket for optional originals. The private
-bucket has no public endpoint and expires objects after 2,592,000 seconds
-(30 days).
+sanitized objects, one private R2 bucket for optional originals, and one Worker
+with a named Durable Object for live Steward state. The private bucket has no
+public endpoint and expires objects after 2,592,000 seconds (30 days).
 
 D1 rows and public objects contain only the validated public contract. Local
 SQLite, task archives, and the optional original remain Steward's private
 operational evidence. Cloudflare account-token policies are account-scoped, so
 the D1 database must never receive private-shaped rows.
+
+The live gateway exposes public `GET /api/steward/live`, authenticated `POST`
+on the same path, and public WebSocket updates at `/api/steward/live/ws` on
+`https://live.coquic.minhuw.dev`. Every request is routed to the single Durable
+Object selected with `idFromName("global")`. The response contract is
+`contracts/steward-live/live-state.schema.json`; no snapshot exists until the
+first accepted Steward update, so initial reads return JSON with status 503.
 
 ## Inputs and authority
 
@@ -49,8 +56,9 @@ pulumi stack select production
 pulumi stack rename coquic-production
 ```
 
-After renaming, rerun and review the bootstrap preview. Do not copy or rename
-old saved plans or review records.
+After renaming, rerun and review the bootstrap preview. Existing stacks that
+omit `live_hostname` use the fixed `live.coquic.minhuw.dev` default; setting it
+explicitly is optional. Do not copy or rename old saved plans or review records.
 
 For a fresh deployment without existing cloud resources, initialize or select
 `coquic-production` and set only these canonical non-secret values:
@@ -67,13 +75,14 @@ pulumi config set database_name coquic-publication
 pulumi config set public_bucket_name coquic-public-artifacts
 pulumi config set private_bucket_name coquic-private-originals
 pulumi config set public_hostname artifacts.coquic.minhuw.dev
+pulumi config set live_hostname live.coquic.minhuw.dev
 pulumi config set private_retention_seconds 2592000
 ```
 
 Use `pulumi config set --secret` for any later sensitive stack input. Token
 creation and the protected handoff are owned by this bootstrap; token rotation
-requires a separate review because the Steward R2 secret is derived from the
-Steward token.
+requires a separate review because the Steward R2 secret and the distinct,
+domain-separated live write token are derived from the Steward token.
 
 ## Preview and bootstrap
 
@@ -93,8 +102,9 @@ counts. After the safety checks pass, the exact plan and a review record are
 retained in a private mode-`0700` plan directory; both files are mode `0400`.
 The default directory is `${XDG_STATE_HOME:-$HOME/.local/state}/coquic-cloudflare-bootstrap`;
 use `--plan-dir` to select another private absolute directory. Stop when the
-preview is malformed, contains a delete, replacement, or update, proposes a
-broader permission, or exposes a secret. Unchanged resources are included so
+preview is malformed, contains a delete or replacement, updates anything except
+the live Worker script in place, proposes a broader permission, or exposes a
+secret. Unchanged resources are included so
 retries can validate the complete graph; Pulumi's exact `[secret]` redaction
 marker is accepted, never an exposed credential value. The command never
 applies a plan in its default form.
@@ -113,8 +123,8 @@ The bootstrap invocation authenticates, validates the retained review record
 and digest, and applies exactly that operator-reviewed plan with Pulumi. It
 never creates a replacement preview. Pulumi rejects a saved plan that no
 longer matches current provider state or configuration. The command then
-validates the one protected D1, checks the exact schema, installs the three
-Steward files, and passes exactly four fields through the protected Site
+validates the one protected D1, checks the exact schema, installs the four
+Steward files, and passes exactly five fields through the protected Site
 handoff. A blank D1 is initialized; an exact schema is a no-op; incompatible
 nonblank state fails without an unreviewed schema change. An empty Site is
 valid. Real-task verification stays with the on-demand deployment checker.
@@ -148,7 +158,7 @@ Schema changes require a separately reviewed forward change. Do not edit the
 schema in place or use a second database to hide drift.
 
 The `--credentials-dir` target must be a real mode-`0700` directory owned by
-the invoking user. The command atomically installs exactly these three regular
+the invoking user. The command atomically installs exactly these four regular
 files, each mode `0600`:
 
 | Path | Pulumi value | Compose target |
@@ -156,26 +166,28 @@ files, each mode `0600`:
 | `d1-read-token` | `steward_config.d1_token` | `/run/secrets/d1-read-token` |
 | `r2-access-key-id` | `steward_config.s3_access_key_id` | `/run/secrets/r2-access-key-id` |
 | `r2-secret-access-key` | `steward_config.s3_secret_access_key` | `/run/secrets/r2-secret-access-key` |
+| `live-write-token` | `steward_config.live_write_token` | `/run/secrets/live-write-token` |
 
 Symlinks, non-regular files, unowned targets, unsafe directory modes, and
 unsafe replacement states are refused. Existing regular files are staged and
-restored if any part of the three-file install fails. Values never appear in
+restored if any part of the four-file install fails. Values never appear in
 stdout, stderr, arguments, Compose environment, or public publication data.
 
 The bootstrap creates a mode-`0600` temporary input containing exactly these
-four Site fields and invokes the protected SSH handoff:
+five Site fields and invokes the protected SSH handoff:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
 COQUIC_STEWARD_D1_DATABASE_ID
 COQUIC_STEWARD_D1_READ_TOKEN
 COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 ```
 
 `site/deploy/install-cloud-config.sh` owns remote validation, atomic app-env
 replacement, service configuration, and its local transaction. The rollout
 explicitly unsets provider credentials for that child, so Site receives only
-the four fields listed above. It installs Site's cloud values but does not
+the five fields listed above. It installs Site's cloud values but does not
 deploy a Site release or launch Steward.
 
 ## Failure and rerun boundaries
@@ -187,12 +199,12 @@ The stages are intentionally separate:
 | Pulumi auth/preview/parse | No provider or host mutation; no accepted apply artifact | Correct local inputs and rerun the preview. |
 | Pulumi apply | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next safe preview, then rerun the bootstrap. |
 | Outputs or schema verification | Cloud apply may be complete; no host files were installed | Resolve the provider or schema issue under review, then rerun. |
-| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership, mode, or path issues and rerun. |
+| Four-file credential install | Prior regular files are restored, or no new set exists | Fix ownership, mode, or path issues and rerun. |
 | Site SSH handoff | D1 and Steward files remain | Repair the protected SSH boundary and rerun; no automatic provider reversal runs. |
 
 After a post-apply failure (such as D1 inspection), the previous plan has
 already been consumed. Rerun without `--apply` and review a fresh preview;
-if the cloud apply completed without drift, expect eight unchanged resources.
+if the cloud apply completed without drift, expect ten unchanged resources.
 Then rerun with `--apply` to finish the remaining bootstrap steps. Do not
 recreate resources or restore the consumed plan.
 

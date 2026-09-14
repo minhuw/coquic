@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "availability": "live",
+  "observedAt": "2026-09-14T11:00:00Z",
+  "staleAfterSeconds": 60,
+  "daemon": {
+    "mode": "production"
+  },
+  "signals": {
+    "pending": 3
+  },
+  "planning": {
+    "state": "active"
+  },
+  "tasks": {
+    "active": 2,
+    "queued": 4
+  },
+  "integration": {
+    "active": 1,
+    "queued": 2
+  }
+}

@@ -56,6 +56,7 @@ void (async () => {
     const cloudDatabase = "12345678-1234-4abc-8def-1234567890ab";
     const cloudSecret = ["handoff", "read", "token"].join("-");
     const cloudBaseUrl = "https://objects.example.test/public";
+    const liveSnapshotUrl = "https://live.coquic.minhuw.dev/api/steward/live";
     const sshLog = join(root, "ssh.log");
     const systemdLog = join(root, "systemd.log");
     await mkdir(app, { recursive: true }); await mkdir(fakeBin);
@@ -65,6 +66,7 @@ void (async () => {
       `export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
       `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
       `export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
+      `export COQUIC_STEWARD_LIVE_SNAPSHOT_URL=${liveSnapshotUrl}`,
       "export COQUIC_DEMO_QA_ENABLED=false",
       "export COQUIC_V2_PREVIEW_PASSWORD=preview-fixture",
       "",
@@ -73,6 +75,7 @@ void (async () => {
     const rejectInternalPreviewEnv = 'for field in preview_password preview_access_token steward_status_curl_config; do [[ ! ${!field+x} ]] || exit 42; done';
     await executable(join(release, "h3-server"), `#!/usr/bin/env bash
 ${rejectInternalPreviewEnv}
+[[ ! \${COQUIC_STEWARD_LIVE_SNAPSHOT_URL+x} ]] || exit 42
 echo h3 >>"\${FAKE_PROCESS_LOG}"
 sleep 0.2
 `);
@@ -87,12 +90,13 @@ cloud_token_state=missing
 preview_password_state=missing
 if [[ -n "\${COQUIC_STEWARD_D1_READ_TOKEN:-}" ]]; then cloud_token_state=set; fi
 if [[ "\${COQUIC_V2_PREVIEW_PASSWORD:-}" == preview-fixture ]]; then preview_password_state=set; fi
-printf 'next:%s:%s:%s:%s:%s\\n' "\${CLOUDFLARE_ACCOUNT_ID:-}" "\${COQUIC_STEWARD_D1_DATABASE_ID:-}" "\${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}" "\${cloud_token_state}" "\${preview_password_state}" >>"\${FAKE_PROCESS_LOG}"
+printf 'next:%s:%s:%s:%s:%s:%s\\n' "\${CLOUDFLARE_ACCOUNT_ID:-}" "\${COQUIC_STEWARD_D1_DATABASE_ID:-}" "\${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}" "\${COQUIC_STEWARD_LIVE_SNAPSHOT_URL:-}" "\${cloud_token_state}" "\${preview_password_state}" >>"\${FAKE_PROCESS_LOG}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `);
     await executable(join(fakeBin, "curl"), `#!/usr/bin/env bash
 ${rejectInternalPreviewEnv}
+[[ ! \${COQUIC_STEWARD_LIVE_SNAPSHOT_URL+x} ]] || exit 42
 url="\${!#}"
 config=""
 if [[ " $* " == *" --config - "* ]]; then config="$(cat)"; fi
@@ -109,7 +113,7 @@ else printf '%s\\n' ready; fi
     assert.equal(first.code, 0, first.output);
     const processes = await readFile(processLog, "utf8");
     assert.equal(processes.split("\n").filter((line) => line.startsWith("next:")).length, 1, "exactly one Next process receives cloud configuration");
-    assert.match(processes, new RegExp(`next:${cloudAccount}:${cloudDatabase}:${cloudBaseUrl}:set:set`));
+    assert.match(processes, new RegExp(`next:${cloudAccount}:${cloudDatabase}:${cloudBaseUrl}:${liveSnapshotUrl}:set:set`));
     const curlCalls = await readFile(curlLog, "utf8");
     assert.match(curlCalls, /\/api\/steward\/status/);
     assert.match(curlCalls, new RegExp(`config:header = "Cookie: coquic-v2-preview=${previewToken}"`));
@@ -221,7 +225,7 @@ if [[ " $* " == *" -I "* ]]; then printf 'HTTP/1.1 200 OK\\r\\nalt-svc: h3=\":44
 elif [[ " $* " == *" -w "* ]]; then printf 3;
 else printf '%s\\n' coquic-wasm-demo-v1; fi
 `);
-    const deployEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_CERT_CHAIN_PEM: "fixture cert", COQUIC_DEMO_PRIVATE_KEY_PEM: "fixture key", COQUIC_DEMO_REMOTE_SSH_KEY_PATH: sshKey, COQUIC_DEPLOY_OFFLINE_ROOT: remoteRoot, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_V2_PREVIEW_PASSWORD: "preview-fixture", COQUIC_DEMO_VERIFICATION_ATTEMPTS: "1", COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS: "0", COQUIC_DEMO_VERIFY_WASM: "false", FAKE_SYSTEMD_STATE: remoteState, FAKE_SYSTEMD_LOG: systemdLog, FAKE_SSH_LOG: sshLog, FAKE_NIX_OUT: nixOut, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, GITHUB_SHA: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+    const deployEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_CERT_CHAIN_PEM: "fixture cert", COQUIC_DEMO_PRIVATE_KEY_PEM: "fixture key", COQUIC_DEMO_REMOTE_SSH_KEY_PATH: sshKey, COQUIC_DEPLOY_OFFLINE_ROOT: remoteRoot, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_V2_PREVIEW_PASSWORD: "preview-fixture", COQUIC_DEMO_VERIFICATION_ATTEMPTS: "1", COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS: "0", COQUIC_DEMO_VERIFY_WASM: "false", FAKE_SYSTEMD_STATE: remoteState, FAKE_SYSTEMD_LOG: systemdLog, FAKE_SSH_LOG: sshLog, FAKE_NIX_OUT: nixOut, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_REAL_NODE: process.execPath, GITHUB_SHA: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
     const releasesRoot = join(remoteRoot, "opt", "coquic-demo", "releases");
     const current = join(remoteRoot, "opt", "coquic-demo", "current");
     const retainedRelease = join(releasesRoot, "retained-sentinel");
@@ -302,6 +306,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}/`));
     assert.match(installedAppEnv, /export COQUIC_DEMO_QA_ENABLED=false/);
     assert.match(installedAppEnv, /export COQUIC_V2_PREVIEW_PASSWORD=preview-fixture/);
+    assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_LIVE_SNAPSHOT_URL=${liveSnapshotUrl}`));
     assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
     const restartCount = () => readFile(systemdLog, "utf8").then((value) => value.split("\n").filter((line) => line.startsWith("restart ")).length);
     const restartCountAfterInstall = await restartCount();
@@ -404,6 +409,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal(await readlink(current), firstTarget, "same-release repair preserves the release identity");
     const repairedAppEnv = await readFile(appEnvPath, "utf8");
     assert.ok(repairedAppEnv.includes(`export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`), "same-release repair preserves cloud configuration");
+    assert.ok(repairedAppEnv.includes(`export COQUIC_STEWARD_LIVE_SNAPSHOT_URL=${liveSnapshotUrl}`), "same-release repair preserves live snapshot configuration");
     const rolledBack = await run("bash", [deployRemote, binary, deployApp], { ...deployEnv, GITHUB_SHA: "222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbb", FAKE_VERIFY_FAILURE: "1" });
     assert.notEqual(rolledBack.code, 0, rolledBack.output);
     assert.equal(await readlink(current), firstTarget, "failed verification restores the previous release");

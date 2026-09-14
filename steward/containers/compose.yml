@@ -87,6 +87,11 @@ services:
         uid: "${STEWARD_UID:?}"
         gid: "${STEWARD_GID:?}"
         mode: 0400
+      - source: live_snapshot_token
+        target: /run/secrets/live-write-token
+        uid: "${STEWARD_UID:?}"
+        gid: "${STEWARD_GID:?}"
+        mode: 0400
     healthcheck:
       test: ["CMD", "/usr/bin/env", "coquic-steward", "health"]
       interval: 30s
@@ -101,3 +106,5 @@ secrets:
     file: ${R2_ACCESS_KEY_ID_PATH:?}
   r2_secret_access_key:
     file: ${R2_SECRET_ACCESS_KEY_PATH:?}
+  live_snapshot_token:
+    file: ${LIVE_SNAPSHOT_TOKEN_PATH:?}

@@ -138,9 +138,10 @@ archival evidence.
 
 ## D-016: Steward configuration remains private
 
-Public Steward payloads exclude daemon and operator configuration. Integration
-policy, mutation limits, timeouts, and other control-plane values are not needed
-to inspect public work evidence and create avoidable operational disclosure.
+Public Steward payloads exclude daemon and operator configuration except the
+coarse `production`/`dry-run` daemon mode adopted by D-028. Integration policy,
+mutation limits, timeouts, and other control-plane values are not needed to
+inspect public work evidence and create avoidable operational disclosure.
 
 Observed state such as queue occupancy, active work, and available source
 capacity remains public because it describes the sanitized publication boundary,
@@ -201,9 +202,9 @@ no account data, and remains disabled in ordinary local development.
 
 ## D-023: Standalone Site V2 reads the public cloud publication
 
-Site V2 uses one initial architecture for public Steward data: a standalone
-Next.js Node reader over validated Cloudflare D1 metadata and immutable,
-sanitized Cloudflare R2 objects. This is the sole current reader contract.
+Site V2 uses a standalone Next.js Node archive reader over validated Cloudflare
+D1 metadata and immutable, sanitized Cloudflare R2 objects. D-028 later adds an
+independent live snapshot reader without changing this archive contract.
 
 ### Context
 
@@ -228,9 +229,9 @@ artifact identity.
 - Artifact actions accept a validated logical path, derive the content-addressed
   public key, and return exactly one same-origin `307 Temporary Redirect` to the
   anonymous R2 object. Site never proxies bytes or accepts a caller-supplied URL.
-- Global Signals, Planning, and revision are product states rather than initial
-  cloud resources. The UI keeps the destinations discoverable and renders them
-  unavailable until a current public contract exists.
+- Global Signals, Planning, and revision are not archive resources. D-028 now
+  supplies Signals and Planning aggregate state through a separate live
+  contract; revision remains unavailable.
 
 ### Consequences and ownership
 
@@ -350,3 +351,24 @@ validation boundary; renderers do not retain parallel aliases or infer between
 old and new shapes. Explicit notes and reasoning remain text fields, while
 empty arrays render honestly as unavailable. Raw ATIF validation and its
 standard input fields remain unchanged.
+
+## D-028: Live control-loop state is an independent server-only read
+
+On 2026-09-14, Site V2 adds the public Steward Durable Object snapshot as a
+second read-only source. One server-only non-secret URL configures a bounded,
+no-store GET per `/steward` request. The closed version-1.0 boundary validates
+strict UTC observation time, stale threshold, daemon production/dry-run mode,
+pending Signals, Planning active/idle/paused state, and active/queued Tasks and
+Integration counts with safe integers.
+
+Live state and D1/R2 archive evidence remain independent. Live responses contain
+no task identity or detail; task history, task routes, trajectories, usage, and
+artifacts remain archive-only. A live failure renders unavailable instead of
+zero and does not suppress archive history. A stale response retains its exact
+values with an explicit stale label. Site performs no browser polling,
+WebSocket, retry loop, local cache, archive fallback, or Site-owned Worker.
+
+The non-secret URL is installed by ordinary Site deployment, while the four
+protected archive values retain their existing operator handoff and rollback
+behavior. Schema and example ownership lives under `site-v2/`; the upstream
+Worker/Durable Object deployment remains a separate operator concern.

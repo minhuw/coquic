@@ -10,6 +10,7 @@ import createNext from "next";
 
 import cleanPublication from "../../contracts/steward-cloud/fixtures/clean-publication.json";
 import redactedPublication from "../../contracts/steward-cloud/fixtures/redacted-publication.json";
+import liveSnapshotFixture from "../examples/steward-live-snapshot.json";
 import { canonicalAtifBytes, type AtifDocument } from "../lib/steward-archive/atif";
 import { parseCloudResponse, STEWARD_CLOUD_SCHEMA_VERSION, type CloudCompleteTrajectory, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
@@ -95,7 +96,9 @@ function loadCloudRepository(): CloudRepositoryModule {
     return previous.call(this, request, parent, isMain, options);
   };
   try {
-    return requireForTest(resolve(process.cwd(), "lib/steward-archive/cloud-repository.ts")) as CloudRepositoryModule;
+    const repository = requireForTest(resolve(process.cwd(), "lib/steward-archive/cloud-repository.ts")) as CloudRepositoryModule;
+    requireForTest(resolve(process.cwd(), "lib/steward-live/reader.ts"));
+    return repository;
   } finally {
     runtimeModule._resolveFilename = previous;
   }
@@ -151,6 +154,7 @@ type Scenario = {
   readonly activeRows: readonly TaskRow[];
   readonly historyRows: readonly TaskRow[];
   readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error" | "timeout";
+  readonly live?: unknown;
   readonly detail?: DetailScenario;
   readonly details?: Readonly<Record<string, DetailScenario>>;
   readonly usage?: UsageScenario;
@@ -162,12 +166,14 @@ const ENV_KEYS = [
   "COQUIC_STEWARD_D1_DATABASE_ID",
   "COQUIC_STEWARD_D1_READ_TOKEN",
   "COQUIC_STEWARD_PUBLIC_R2_BASE_URL",
+  "COQUIC_STEWARD_LIVE_SNAPSHOT_URL",
 ] as const;
 const VALID_ENV: Record<(typeof ENV_KEYS)[number], string> = {
   CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
   COQUIC_STEWARD_D1_DATABASE_ID: "12345678-1234-4abc-8def-1234567890ab",
   COQUIC_STEWARD_D1_READ_TOKEN: "route-harness-token",
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL: "https://objects.example.test/public/",
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL: "https://live.example.test/steward",
 };
 const PUBLICATION_ID = "publication-harness";
 const EXPOSED_AT = "2026-07-28T00:00:02Z";
@@ -571,6 +577,10 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     calls.count += 1;
     const url = String(input);
     calls.urls.push(url);
+    if (url === VALID_ENV.COQUIC_STEWARD_LIVE_SNAPSHOT_URL) {
+      if (scenarioValue.mode === "outage") throw new Error("live snapshot unavailable");
+      return new Response(JSON.stringify(scenarioValue.live ?? liveSnapshotFixture), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith(VALID_ENV.COQUIC_STEWARD_PUBLIC_R2_BASE_URL)) {
       if (scenarioValue.mode === "timeout") throw new DOMException("route harness timeout", "AbortError");
       if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
@@ -944,15 +954,22 @@ async function main() {
     assert(!html.includes("archiveState"));
   }
 
-  await runCase("overview empty render", scenario([], []), async () => {
+  await runCase("overview empty archive with live state", scenario([], []), async () => {
     const html = await renderOverview();
     assert.match(html, /No visible tasks are published yet/);
+    assert.match(html, /Live active/);
+    assert.match(html, />2<\/dd>/);
+    assert.match(html, /Live queued/);
+    assert.match(html, />4<\/dd>/);
+    assert.match(html, /Archive history/);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
     const signalsHtml = await renderOverview({ view: "signals" });
-    assert.match(signalsHtml, /Signals unavailable/);
+    assert.match(signalsHtml, /Signals live state/);
+    assert.match(signalsHtml, /3 pending/);
     const planningHtml = await renderOverview({ view: "planning" });
-    assert.match(planningHtml, /Planning unavailable/);
+    assert.match(planningHtml, /Planning live state/);
+    assert.match(planningHtml, />Active<\/dd>/);
     assertOverviewHasNoLegacyOutput(html);
     assertOverviewHasNoLegacyOutput(signalsHtml);
     assertOverviewHasNoLegacyOutput(planningHtml);
@@ -960,6 +977,7 @@ async function main() {
 
   await runCase("overview active after planning render", scenario(activeRows, historyRows), async () => {
     const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /Current task load and visible history/);
     assert.match(html, /Active publication fixture/);
     assert.match(html, /Redacted publication fixture/);
     assert.match(html, /href="\/steward\/tasks\/task-active"/);
@@ -1075,10 +1093,25 @@ async function main() {
 
   await runCase("overview outage render", { ...scenario([], []), mode: "outage" }, async () => {
     const html = await renderOverview();
-    assert.match(html, /Cloud task overview unavailable/);
+    assert.match(html, /Cloud task archive unavailable/);
+    assert.match(html, /Live snapshot unavailable/);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
     assertOverviewHasNoLegacyOutput(html);
+  });
+
+  await runCase("live unavailable preserves archive history", scenario(activeRows, historyRows), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /Live active<\/dt><dd[^>]*>Unavailable/);
+    assert.match(html, /Archive history<\/dt><dd[^>]*>1/);
+    assert.match(html, /Redacted publication fixture/);
+  }, { ...VALID_ENV, COQUIC_STEWARD_LIVE_SNAPSHOT_URL: undefined });
+
+  await runCase("stale live snapshot is explicit", { ...scenario(activeRows, historyRows), live: { ...liveSnapshotFixture, availability: "stale" } }, async () => {
+    const html = await renderOverview({ view: "signals" });
+    assert.match(html, /Signals snapshot stale/);
+    assert.match(html, /3 pending/);
+    assert.match(html, />Stale<\/dd>/);
   });
 
   function assertTaskHasNoLegacyOutput(html: string) {

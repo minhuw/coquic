@@ -200,7 +200,7 @@ async function holdTrajectoryResponse(page: Page, taskId: string, runId: string,
 test("Steward task navigation exposes the public task channels", async ({ page }) => {
   await page.goto("/steward?view=tasks");
   await expect(page.getByRole("heading", { level: 1, name: "Steward" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Every visible task publication" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Current task load and visible history" })).toBeVisible();
   const channels = page.getByRole("region", { name: "Steward task channels" });
   for (const label of ["Signals", "Planning", "Tasks", "Integration"]) await expect(channels.getByRole("link", { name: new RegExp(label) })).toBeVisible();
   const taskLinks = page.locator('a[href^="/steward/tasks/"]');
@@ -273,12 +273,19 @@ test("Steward usage tables keep horizontal scrolling inside their containers at 
   }
 });
 
-test("global Signals and Planning remain explicit terminal unavailable states", async ({ page, request }) => {
-  for (const [view, heading] of [["signals", "Signals unavailable"], ["planning", "Planning unavailable"]] as const) {
-    await page.goto(`/steward?view=${view}`);
-    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
-    await expect(page.getByText("No local fallback or fixture records are displayed.", { exact: true })).toBeVisible();
-  }
+test("Steward live channels expose validated signals, planning, tasks, integration, mode, and age", async ({ page }) => {
+  await page.goto("/steward?view=signals");
+  await expect(page.getByRole("heading", { name: "Signals live state" })).toBeVisible();
+  await expect(page.getByText("3 pending", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Daemon Production · observed .* · stale after 60s/)).toBeVisible();
+
+  await page.goto("/steward?view=planning");
+  await expect(page.getByRole("heading", { name: "Planning live state" })).toBeVisible();
+  await expect(page.getByRole("definition").filter({ hasText: "Active" }).first()).toBeVisible();
+
+  const channels = page.getByRole("region", { name: "Steward task channels" });
+  await expect(channels.getByRole("link", { name: /Tasks.*2 \/ 4.*active \/ queued.*3 archive history/ })).toBeVisible();
+  await expect(channels.getByRole("link", { name: /Integration.*1 \/ 2.*active \/ queued/ })).toBeVisible();
 });
 
 test("complete trajectory renders every record in source order with stable anchors", async ({ page }) => {

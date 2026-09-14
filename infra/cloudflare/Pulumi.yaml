@@ -1,4 +1,4 @@
 name: coquic-cloudflare
 runtime:
   name: python
-description: Cloudflare infrastructure for CoQUIC publication
+description: Cloudflare infrastructure for CoQUIC publication and live state

@@ -12,6 +12,8 @@ import pulumi
 
 
 PUBLIC_HOSTNAME = "artifacts.coquic.minhuw.dev"
+LIVE_HOSTNAME = "live.coquic.minhuw.dev"
+LIVE_PATH = "/api/steward/live"
 PRIVATE_RETENTION_SECONDS = 2_592_000
 
 _CLOUDFLARE_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -24,6 +26,7 @@ _CANONICAL_FIELDS = frozenset(
         "public_bucket_name",
         "private_bucket_name",
         "public_hostname",
+        "live_hostname",
         "private_retention_seconds",
     }
 )
@@ -59,6 +62,7 @@ class CloudflareConfig:
     public_bucket_name: str
     private_bucket_name: str
     public_hostname: str
+    live_hostname: str
     private_retention_seconds: int
 
     def __post_init__(self) -> None:
@@ -72,11 +76,14 @@ class CloudflareConfig:
             self.private_bucket_name, "private_bucket_name"
         )
         public_hostname = _text(self.public_hostname, "public_hostname")
+        live_hostname = _text(self.live_hostname, "live_hostname")
 
         if public_bucket_name == private_bucket_name:
             raise ValueError("public_bucket_name and private_bucket_name must differ")
         if public_hostname != PUBLIC_HOSTNAME:
             raise ValueError(f"public_hostname must be exactly {PUBLIC_HOSTNAME}")
+        if live_hostname != LIVE_HOSTNAME:
+            raise ValueError(f"live_hostname must be exactly {LIVE_HOSTNAME}")
         if isinstance(self.private_retention_seconds, bool) or not isinstance(
             self.private_retention_seconds, int
         ):
@@ -92,11 +99,14 @@ class CloudflareConfig:
         object.__setattr__(self, "public_bucket_name", public_bucket_name)
         object.__setattr__(self, "private_bucket_name", private_bucket_name)
         object.__setattr__(self, "public_hostname", public_hostname)
+        object.__setattr__(self, "live_hostname", live_hostname)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "CloudflareConfig":
         """Build a configuration from the closed canonical key set."""
 
+        values = dict(values)
+        values.setdefault("live_hostname", LIVE_HOSTNAME)
         unexpected = sorted(set(values) - _CANONICAL_FIELDS)
         if unexpected:
             names = ", ".join(unexpected)
@@ -126,12 +136,17 @@ class CloudflareConfig:
             public_bucket_name=values["public_bucket_name"],
             private_bucket_name=values["private_bucket_name"],
             public_hostname=values["public_hostname"],
+            live_hostname=values["live_hostname"],
             private_retention_seconds=retention,
         )
 
     @property
     def public_base_url(self) -> str:
         return f"https://{self.public_hostname}"
+
+    @property
+    def live_url(self) -> str:
+        return f"https://{self.live_hostname}{LIVE_PATH}"
 
 
 def _pulumi_runtime_values(stack_config: pulumi.Config) -> Mapping[str, Any]:

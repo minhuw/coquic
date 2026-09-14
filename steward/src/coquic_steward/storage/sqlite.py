@@ -7646,17 +7646,18 @@ class SQLiteTaskStore:
                 .order_by(SchedulerWakeupRow.created_at.desc())
                 .limit(20)
             ).all()
-            pending_signal = (
+            pending_signal_count = int(
                 session.scalar(
-                    select(SignalItemRow.id)
+                    select(func.count())
+                    .select_from(SignalItemRow)
                     .where(
                         SignalItemRow.status == SignalItemStatus.pending.value,
                         SignalItemRow.kind != "signal-error",
                     )
-                    .limit(1)
                 )
-                is not None
+                or 0
             )
+            pending_signal = pending_signal_count > 0
             if provider_names:
                 ranked_fetches = (
                     select(
@@ -7690,6 +7691,10 @@ class SQLiteTaskStore:
                 "SELECT EXISTS(SELECT 1 FROM steward_resource_pressure WHERE id=1 AND state='resource_pressure') "
                 "OR EXISTS(SELECT 1 FROM control_loop_meta WHERE key='planning_blocked' AND value='1')"
             )))
+            planning_active = bool(session.scalar(text(
+                "SELECT EXISTS(SELECT 1 FROM control_loop_planner_runs "
+                "WHERE state IN ('claimed','running'))"
+            )))
             pending_wakeups = tuple(
                 row_to_scheduler_wakeup(row, path_codec=self.path_codec)
                 for row in pending_wakeup_rows
@@ -7707,11 +7712,13 @@ class SQLiteTaskStore:
             pending_wakeups=pending_wakeups,
             recent_wakeups=recent_wakeups,
             pending_signal=pending_signal,
+            pending_signal_count=pending_signal_count,
             planner_retry_at=(
                 datetime.fromisoformat(retry_at.replace("Z", "+00:00"))
                 if retry_at else None
             ),
             planning_paused=planning_paused,
+            planning_active=planning_active,
             latest_fetches=latest_fetches,
         )
 

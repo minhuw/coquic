@@ -66,14 +66,13 @@
 
 ### Steward cloud reader trust boundary
 
-- Cloud configuration has exactly four server-side values: Cloudflare account
+- Archive configuration has exactly four server-side values: Cloudflare account
   ID, D1 database ID, account-scoped D1 Read token, and anonymous public R2 base
-  URL. Account ID, D1 database ID, and token MUST never reach client bundles,
-  browser responses, task/validation containers, or logs. The validated
-  anonymous public R2 base URL MAY appear only as the prefix of the derived
-  artifact `Location` header; it MUST not appear elsewhere in client bundles,
-  browser responses, task/validation containers, or logs. Missing or unsafe
-  values fail closed.
+  URL. The independent live reader adds the non-secret server-only
+  `COQUIC_STEWARD_LIVE_SNAPSHOT_URL`. None may reach client bundles or browser
+  bodies; only the R2 prefix may appear in its derived artifact `Location`.
+  Missing or unsafe values fail their own reader closed without substituting the
+  other source.
 - D1 acquisition MUST use fixed parameterized statements with bounded timeout,
   response bytes, result sets, and rows. Queries join only a `visible` task
   head to its `visible` publication; staged, superseded, hidden, malformed,
@@ -95,9 +94,10 @@
 - Trajectory Markdown links MUST use the allowlist, external links MUST isolate
   their opener, and image/download actions MUST remain same-origin logical-path
   routes. Browser assertions MUST never depend on a direct private or R2 URL.
-- The reader has no D1 mutation, local SQLite/cache, filesystem archive,
-  Worker, sidecar, alternate publication reader, automatic polling, or raw
-  fallback. Public output contains no private locator, credential,
+- Site deploys no Worker and has no D1 mutation, local SQLite/cache, filesystem
+  archive, sidecar, automatic polling, or raw fallback. The public
+  Worker/Durable Object live endpoint is an independent read-only source, never
+  an archive fallback. Public output contains no private locator, credential,
   matched secret, scanner record, or filesystem path.
 - `steward-overhead` is aggregate-only. Public rows MUST NOT expose individual
   overhead invocations, turns, provider/session identifiers, or raw sidecar
@@ -129,8 +129,11 @@
 
 ## Steward cloud reader gates
 
-- Mocked cloud unit and route tests MUST cover available, valid empty, transient
-  unavailable, terminal unavailable, malformed, and integrity-failure states;
+- Mocked live tests MUST cover live, stale, missing, malformed, unsafe integer,
+  unsupported version/state, timeout, media-type, size, and no-store behavior,
+  plus UI independence from archive history. Mocked cloud unit and route tests
+  MUST cover available, valid empty, transient unavailable, terminal
+  unavailable, malformed, and integrity-failure states;
   visible-head/generation filtering; active-after-planning visibility;
   relational task ownership/count/sequence checks; complete trajectory
   validation; one same-origin `307` redirect; R2 base/key containment; and the
@@ -145,10 +148,11 @@
   bound timeout, response bytes, result sets, and rows. They MUST exercise
   invalid identifiers, unsafe logical paths, dangling rows, private-shaped data,
   and caller-supplied URL rejection without leaking diagnostic values.
-- Deployment-path tests MUST prove the four protected values are validated,
-  redacted from output, preserved across ordinary deploy/repair/rollback, and
-  passed only to the Next.js process. They MUST prove missing, insecure, or
-  symlinked host configuration fails before mutation.
+- Deployment-path tests MUST prove the four protected archive values are
+  validated, redacted, preserved across ordinary deploy/repair/rollback, and
+  passed only to the Next.js process. They MUST also prove the non-secret live
+  URL is allowlisted, validated before mutation, installed by production Site
+  deployment, and passed only to Next.
 - The on-demand checker MUST accept a valid empty publication with explicit
   detail/trajectory/artifact skips. With one real task it MUST select the first
   visible task, verify ownership and complete trajectory content, call the

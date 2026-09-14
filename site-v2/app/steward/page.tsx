@@ -3,6 +3,8 @@ import { ArrowRight, ExternalLink, GitBranch, Radio, Route, type LucideIcon } fr
 import Link from "next/link";
 import { SiteHeader } from "@/components/site-header";
 import { getGitHubStars } from "@/lib/github";
+import { readStewardLiveSnapshot } from "@/lib/steward-live/reader";
+import type { StewardLiveSnapshot } from "@/lib/steward-live/schema";
 import {
   getCloudRepository,
   type CloudTaskPage,
@@ -50,6 +52,22 @@ function formatDateTime(value: string | null) {
   }).format(new Date(value));
 }
 
+function formatAge(value: string) {
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function liveValue(snapshot: StewardLiveSnapshot | null, value: string | number) {
+  if (!snapshot) return "Unavailable";
+  return snapshot.availability === "stale" ? `${value} (stale)` : String(value);
+}
+
 function statusTone(value: string) {
   return value === "active" || value === "available"
     ? "text-accent"
@@ -66,18 +84,13 @@ function Status({ value }: { value: string }) {
 
 function ControlLoop({
   activeView,
-  status,
-  activePage,
+  liveSnapshot,
   historyPage,
 }: {
   activeView: View;
-  status: CloudStatus | null;
-  activePage: CloudTaskPage | null;
+  liveSnapshot: StewardLiveSnapshot | null;
   historyPage: CloudTaskPage | null;
 }) {
-  const taskDetail = status
-    ? `${activePage?.total ?? "Unavailable"} active / ${historyPage?.total ?? "Unavailable"} history`
-    : "not connected";
   const steps: readonly {
     id: View | null;
     label: string;
@@ -89,32 +102,32 @@ function ControlLoop({
     {
       id: "signals",
       label: "Signals",
-      value: "Unavailable",
-      detail: "not published",
+      value: liveValue(liveSnapshot, liveSnapshot?.signals.pending ?? ""),
+      detail: liveSnapshot ? "pending" : "live state unavailable",
       href: "/steward?view=signals",
       icon: Radio,
     },
     {
       id: "planning",
       label: "Planning",
-      value: "Unavailable",
-      detail: "not published",
+      value: liveValue(liveSnapshot, liveSnapshot ? titleCase(liveSnapshot.planning.state) : ""),
+      detail: liveSnapshot ? "planner state" : "live state unavailable",
       href: "/steward?view=planning",
       icon: Route,
     },
     {
       id: "tasks",
       label: "Tasks",
-      value: status ? String(status.taskCount) : "Unavailable",
-      detail: taskDetail,
+      value: liveValue(liveSnapshot, liveSnapshot ? `${liveSnapshot.tasks.active} / ${liveSnapshot.tasks.queued}` : ""),
+      detail: `active / queued · ${historyPage?.total ?? "Unavailable"} archive history`,
       href: "/steward?view=tasks",
       icon: GitBranch,
     },
     {
       id: null,
       label: "Integration",
-      value: "Unavailable",
-      detail: "not published",
+      value: liveValue(liveSnapshot, liveSnapshot ? `${liveSnapshot.integration.active} / ${liveSnapshot.integration.queued}` : ""),
+      detail: liveSnapshot ? "active / queued" : "live state unavailable",
       href: "/steward?view=tasks",
       icon: ArrowRight,
     },
@@ -179,10 +192,54 @@ function SectionOpening({
 function UnavailableView({ title, description }: { title: string; description: string }) {
   return (
     <div className="py-10 sm:py-12">
-      <SectionOpening label="Cloud channel" title={title} description={description} />
+      <SectionOpening label="Live control loop" title={title} description={description} />
       <p className="mt-8 border-y border-line py-8 text-sm text-muted">
         No local fallback or fixture records are displayed.
       </p>
+    </div>
+  );
+}
+
+function LiveDomainView({
+  domain,
+  snapshot,
+}: {
+  domain: "signals" | "planning";
+  snapshot: StewardLiveSnapshot | null;
+}) {
+  const label = titleCase(domain);
+  if (!snapshot) {
+    return (
+      <UnavailableView
+        title={`${label} live state unavailable`}
+        description="The public live snapshot could not be read. Archive task publications remain independent."
+      />
+    );
+  }
+  const stale = snapshot.availability === "stale";
+  const value = domain === "signals" ? `${snapshot.signals.pending} pending` : titleCase(snapshot.planning.state);
+  return (
+    <div className="py-10 sm:py-12">
+      <SectionOpening
+        label="Live control loop"
+        title={`${label} ${stale ? "snapshot stale" : "live state"}`}
+        description={domain === "signals"
+          ? "Pending signals come directly from the public Steward live snapshot."
+          : "The planner state comes directly from the public Steward live snapshot."}
+      />
+      <dl className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">
+        {[
+          [domain === "signals" ? "Pending" : "State", value],
+          ["Availability", titleCase(snapshot.availability)],
+          ["Daemon", titleCase(snapshot.daemon.mode)],
+          ["Observed", formatAge(snapshot.observedAt)],
+        ].map(([term, detail], index) => (
+          <div key={term} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}>
+            <dt className="text-xs text-muted">{term}</dt>
+            <dd className="mt-1 text-lg font-medium text-ink data-text">{detail}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -235,6 +292,7 @@ function tasksHref(cursor: string | null, activeCursor: string | null) {
 }
 
 function TasksView({
+  liveSnapshot,
   status,
   activePage,
   historyPage,
@@ -243,6 +301,7 @@ function TasksView({
   globalUsage,
   taskUsage,
 }: {
+  liveSnapshot: StewardLiveSnapshot | null;
   status: CloudStatus | null;
   activePage: CloudTaskPage | null;
   historyPage: CloudTaskPage | null;
@@ -252,15 +311,37 @@ function TasksView({
   taskUsage: ReadonlyMap<string, CloudUsageReadResult<CloudUsageSummary> | null>;
 }) {
   const usageEvidence = <UsageEvidence usage={globalUsage} />;
+  const summary = (
+    <>
+      <SectionOpening
+        label="Live queues and cloud archive"
+        title="Current task load and visible history"
+        description="Live active and queued counts come from the public snapshot. Task history and detail remain independent D1/R2 archive evidence."
+      />
+      <dl className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">
+        {[
+          ["Live active", liveValue(liveSnapshot, liveSnapshot?.tasks.active ?? "")],
+          ["Live queued", liveValue(liveSnapshot, liveSnapshot?.tasks.queued ?? "")],
+          ["Archive history", historyPage?.total ?? "Unavailable"],
+          ["Latest archive", formatDateTime(status?.latestPublicationAt ?? null)],
+        ].map(([label, value], index) => (
+          <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}>
+            <dt className="text-xs text-muted">{label}</dt>
+            <dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  );
   if (!status || !activePage || !historyPage) {
     return (
-      <>
-        <UnavailableView
-          title="Cloud task overview unavailable"
-          description="The public task status or collection is temporarily unavailable."
-        />
+      <div className="py-10 sm:py-12">
+        {summary}
+        <p className="mt-8 border-y border-line py-8 text-sm text-muted">
+          Cloud task archive unavailable. Live task counts remain independent when published above.
+        </p>
         {usageEvidence}
-      </>
+      </div>
     );
   }
 
@@ -269,24 +350,7 @@ function TasksView({
   const selectedTask = activeRows[0] ?? historyRows[0] ?? null;
   return (
     <div className="py-10 sm:py-12">
-      <SectionOpening
-        label="Cloud task archive"
-        title="Every visible task publication"
-        description="Active work and completed history come from the public cloud collections. Each task links to its validated detail view."
-      />
-      <div className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">
-        {[
-          ["Visible tasks", status.taskCount],
-          ["Active", activePage.total],
-          ["History", historyPage.total],
-          ["Latest publication", formatDateTime(status.latestPublicationAt)],
-        ].map(([label, value], index) => (
-          <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}>
-            <dt className="text-xs text-muted">{label}</dt>
-            <dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd>
-          </div>
-        ))}
-      </div>
+      {summary}
       <section className="mt-8 border-y border-line xl:grid xl:grid-cols-[17rem_minmax(0,1fr)_19rem]" aria-labelledby="task-list-title">
         <div className="py-6 xl:border-r xl:border-line xl:pr-6">
           <div className="flex items-baseline justify-between gap-4">
@@ -366,6 +430,7 @@ export default async function StewardPage({
   const activeView: View = views.includes(requested as View) ? requested as View : "tasks";
   const cursor = typeof params.cursor === "string" ? params.cursor : null;
   const activeCursor = typeof params.activeCursor === "string" ? params.activeCursor : null;
+  const liveSnapshotPromise = readStewardLiveSnapshot().catch(() => null);
   let status: CloudStatus | null = null;
   let activePage: CloudTaskPage | null = null;
   let historyPage: CloudTaskPage | null = null;
@@ -408,33 +473,33 @@ export default async function StewardPage({
     });
   }
 
-  const githubStars = await getGitHubStars();
+  const [liveSnapshot, githubStars] = await Promise.all([liveSnapshotPromise, getGitHubStars()]);
   return (
     <>
       <SiteHeader githubStars={githubStars} />
       <main id="content">
         <div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
           <header className="pt-10 sm:pt-12">
-            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <div>
-                <p className="text-sm font-medium text-muted">Repository automation</p>
-                <h1 className="mt-2 text-3xl font-medium leading-tight text-ink sm:text-4xl">Steward</h1>
-                <p className="mt-3 max-w-3xl text-base leading-7 text-muted">Follow the public task publications without hiding partial work.</p>
-              </div>
-              <p className="text-xs text-muted lg:text-right">
-                <span className="font-medium text-accent">Cloud archive</span>
-                <span className="mt-1 block data-text">{formatDateTime(status?.latestPublicationAt ?? null)}</span>
+            <div>
+              <p className="text-sm font-medium text-muted">Repository automation</p>
+              <h1 className="mt-2 text-3xl font-medium leading-tight text-ink sm:text-4xl">Steward</h1>
+              <p className="mt-3 max-w-3xl text-base leading-7 text-muted">Follow current control-loop state and public task history without hiding unavailable evidence.</p>
+              <p className="mt-4 text-xs text-muted">
+                <span className={`font-medium ${liveSnapshot?.availability === "live" ? "text-accent" : "text-muted"}`}>
+                  {liveSnapshot ? `Live snapshot ${liveSnapshot.availability}` : "Live snapshot unavailable"}
+                </span>
+                {liveSnapshot ? (
+                  <span className="mt-1 block data-text">
+                    Daemon {titleCase(liveSnapshot.daemon.mode)} · observed {formatAge(liveSnapshot.observedAt)} · stale after {liveSnapshot.staleAfterSeconds}s
+                  </span>
+                ) : null}
               </p>
             </div>
-            <ControlLoop activeView={activeView} status={status} activePage={activePage} historyPage={historyPage} />
+            <ControlLoop activeView={activeView} liveSnapshot={liveSnapshot} historyPage={historyPage} />
           </header>
-          {activeView === "signals" ? (
-            <UnavailableView title="Signals unavailable" description="The initial public cloud contract does not publish a global signal domain." />
-          ) : null}
-          {activeView === "planning" ? (
-            <UnavailableView title="Planning unavailable" description="The initial public cloud contract does not publish global planning evidence." />
-          ) : null}
-          {activeView === "tasks" ? <TasksView status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} globalUsage={globalUsage} taskUsage={taskUsage} /> : null}
+          {activeView === "signals" ? <LiveDomainView domain="signals" snapshot={liveSnapshot} /> : null}
+          {activeView === "planning" ? <LiveDomainView domain="planning" snapshot={liveSnapshot} /> : null}
+          {activeView === "tasks" ? <TasksView liveSnapshot={liveSnapshot} status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} globalUsage={globalUsage} taskUsage={taskUsage} /> : null}
         </div>
       </main>
       <footer className="border-t border-line">

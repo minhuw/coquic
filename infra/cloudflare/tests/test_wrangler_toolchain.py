@@ -198,6 +198,7 @@ def test_deploy_with_real_wrangler(harness: dict[str, Any], blank: bool) -> None
         "d1-read-token": values["d1_token"],
         "r2-access-key-id": values["s3_access_key_id"],
         "r2-secret-access-key": values["s3_secret_access_key"],
+        "live-write-token": values["live_write_token"],
     }
     assert {path.name for path in harness["credentials"].iterdir()} == set(expected_files)
     for name, value in expected_files.items():
@@ -209,6 +210,7 @@ def test_deploy_with_real_wrangler(harness: dict[str, Any], blank: bool) -> None
         f"COQUIC_STEWARD_D1_DATABASE_ID={DATABASE}",
         f"COQUIC_STEWARD_D1_READ_TOKEN={values['d1_read_token']}",
         "COQUIC_STEWARD_PUBLIC_R2_BASE_URL=https://artifacts.coquic.minhuw.dev",
+        "COQUIC_STEWARD_LIVE_SNAPSHOT_URL=https://live.coquic.minhuw.dev/api/steward/live",
     ]
     assert not list(project.rglob(".wrangler"))
     assert not list(home.rglob("*.log"))

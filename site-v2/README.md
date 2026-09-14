@@ -1,10 +1,11 @@
 # CoQUIC Site V2
 
 Site V2 is the standalone Next.js Node application for CoQUIC's public
-Steward publication. The server reads validated metadata from Cloudflare D1
-and immutable sanitized objects from anonymous public R2. Browser code uses
-only validated same-origin routes; it never receives a Cloudflare token or a
-provider locator.
+Steward evidence. The server independently reads the public Steward Durable
+Object live snapshot, validated metadata from Cloudflare D1, and immutable
+sanitized objects from anonymous public R2. Browser code uses only rendered
+live values and validated same-origin archive routes; it never receives a
+Cloudflare token or an upstream locator.
 
 This directory is a clean-room product and interface specification. An
 implementation MUST be buildable from it without reading `site/next`, its
@@ -16,12 +17,14 @@ canonical routes defined here are public contracts.
 ## Production boundary
 
 Site V2 owns the reader and its Node deployment. Cloudflare infrastructure and
-Steward publication are separate operator concerns. Site has no Worker,
-sidecar, D1 write path, local database or cache, filesystem archive importer, or
-raw fallback. It reads only the current validated cloud publication and never
-accepts a prior data shape or deployment input.
+Steward publication are separate operator concerns. Site deploys no Worker and
+has no sidecar, D1 write path, local database or cache, filesystem archive
+importer, or raw fallback. Its live reader calls the separately deployed public
+Worker/Durable Object endpoint; its archive reader remains the existing D1/R2
+path with no fallback between them.
 
-The server receives exactly four protected values:
+The server receives four protected archive values and one independent
+non-secret live endpoint URL:
 
 | Value | Use | Exposure |
 | --- | --- | --- |
@@ -29,11 +32,12 @@ The server receives exactly four protected values:
 | `COQUIC_STEWARD_D1_DATABASE_ID` | D1 REST database path | server only |
 | `COQUIC_STEWARD_D1_READ_TOKEN` | account-scoped D1 Read authorization | server only |
 | `COQUIC_STEWARD_PUBLIC_R2_BASE_URL` | validated public artifact prefix | server-derived redirects only |
+| `COQUIC_STEWARD_LIVE_SNAPSHOT_URL` | public Durable Object live snapshot | server only |
 
-The values are installed manually through the protected SSH handoff owned by
+All five values are installed through the protected SSH handoff owned by
 `site/deploy/install-cloud-config.sh`. Ordinary Site deployment preserves them
 and passes them only to the standalone Next server. Builds and tests use
-mocked cloud responses and do not require live credentials.
+mocked responses and do not require live credentials or a live endpoint.
 
 ## Preview access
 

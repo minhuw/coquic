@@ -51,7 +51,7 @@ nix develop -c uv run --locked --project infra/cloudflare \
 The command applies one protected current D1, verifies the exact schema,
 initializes a blank database when needed, writes the three mode-0600 Steward
 credential files into the mode-0700 operator directory, and passes exactly four
-fields to `site/deploy/install-cloud-config.sh`. An exact schema is idempotent;
+archive fields to `site/deploy/install-cloud-config.sh`. An exact schema is idempotent;
 unsupported nonblank state fails without an automatic schema change. A valid
 empty Site is accepted. Real-task checking remains on demand.
 
@@ -64,9 +64,11 @@ Before starting the daemon, confirm the bootstrap has installed:
 - `COQUIC_STEWARD_D1_READ_TOKEN`; and
 - `COQUIC_STEWARD_PUBLIC_R2_BASE_URL`.
 
-The values are stored in mode-0600 regular files on the host. The run wrapper
-validates them and passes them only to the Next.js Node process. The ordinary
-remote deploy path preserves those exports while installing a new release. It
+The Cloudflare handoff also installs the non-secret
+`COQUIC_STEWARD_LIVE_SNAPSHOT_URL`. The values are stored in mode-0600 regular
+files on the host. The run wrapper validates them and passes them only to the
+Next.js Node process. The ordinary remote deploy path preserves those exports
+while installing a new release. It
 verifies the service, HTTP/3, page marker, and configured optional checks before
 declaring success.
 

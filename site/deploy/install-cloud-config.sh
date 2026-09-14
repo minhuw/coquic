@@ -78,6 +78,7 @@ cloud_fields=(
   COQUIC_STEWARD_D1_DATABASE_ID
   COQUIC_STEWARD_D1_READ_TOKEN
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 )
 declare -A allowed_fields=()
 declare -A seen_fields=()
@@ -160,6 +161,10 @@ validate_field() {
       done
       [[ "${normalized_value}" == */ ]] || normalized_value+="/"
       ;;
+    COQUIC_STEWARD_LIVE_SNAPSHOT_URL)
+      normalized_value="$(trim_value "${value}")"
+      [[ "${normalized_value}" == "https://live.coquic.minhuw.dev/api/steward/live" ]] || reject_input "malformed ${field} value"
+      ;;
     *)
       reject_input "unsupported field ${field}"
       ;;
@@ -182,6 +187,10 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
   cloud_values["${field}"]="${normalized_value}"
 done < "${input_path}"
 
+if [[ ${seen_fields["COQUIC_STEWARD_LIVE_SNAPSHOT_URL"]+present} != present ]]; then
+  seen_fields["COQUIC_STEWARD_LIVE_SNAPSHOT_URL"]=1
+  cloud_values["COQUIC_STEWARD_LIVE_SNAPSHOT_URL"]="https://live.coquic.minhuw.dev/api/steward/live"
+fi
 for field in "${cloud_fields[@]}"; do
   [[ ${seen_fields["${field}"]+present} == present ]] || reject_input "missing field ${field}"
 done
@@ -246,6 +255,7 @@ cloud_fields=(
   COQUIC_STEWARD_D1_DATABASE_ID
   COQUIC_STEWARD_D1_READ_TOKEN
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 )
 declare -A allowed_fields=()
 declare -A seen_fields=()
@@ -326,6 +336,10 @@ validate_field() {
       done
       [[ "${normalized_value}" == */ ]] || normalized_value+="/"
       ;;
+    COQUIC_STEWARD_LIVE_SNAPSHOT_URL)
+      normalized_value="$(trim_value "${value}")"
+      [[ "${normalized_value}" == "https://live.coquic.minhuw.dev/api/steward/live" ]] || reject_input "malformed ${field} value"
+      ;;
     *)
       reject_input "unsupported field ${field}"
       ;;
@@ -372,7 +386,7 @@ fi
 
 if sudo test -f "${remote_app_env}"; then
   sudo awk '
-    /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { next }
+    /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL|COQUIC_STEWARD_LIVE_SNAPSHOT_URL)=/ { next }
     { print }
   ' "${remote_app_env}" > "${candidate_path}"
 else

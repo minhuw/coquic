@@ -64,6 +64,12 @@ network_timeout_seconds = 30
 lease_duration_seconds = 300
 max_retries = 3
 retry_backoff_seconds = 5
+# Live scheduler state uses a separate worker and credential from D1/R2 archive
+# publication. Production enables this in its private override.
+live_snapshot_enabled = false
+live_snapshot_url = "https://live.coquic.minhuw.dev/api/steward/live"
+live_snapshot_token_path = "/tmp/fake-coquic-home/private/credentials/live-write-token"
+live_snapshot_interval_seconds = 60
 
 # Docker Compose deployment is opt-in. Production must uncomment every path,
 # numeric identity, credential file, image ID, and resource threshold; these

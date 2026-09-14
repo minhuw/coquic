@@ -14,11 +14,13 @@ and [QUALITY.md](QUALITY.md).
 
 ## Public source and visibility
 
-Site V2 is a standalone Next.js Node reader. It uses server-side native
-`fetch` for Cloudflare D1 and anonymous public R2. It never writes D1, runs a
-Worker or sidecar, scans a local archive, or accepts a caller-supplied object
-URL. The four server-only values are the Cloudflare account ID, D1 database ID,
-account-scoped D1 Read token, and anonymous public R2 base URL.
+Site V2 is a standalone Next.js Node reader. Its archive path uses server-side
+native `fetch` for Cloudflare D1 and anonymous public R2. It never writes D1,
+runs a Site-owned Worker or sidecar, scans a local archive, or accepts a
+caller-supplied object URL. The four archive values remain the Cloudflare
+account ID, D1 database ID, account-scoped D1 Read token, and anonymous public
+R2 base URL. The separate live snapshot URL and aggregate state are defined in
+[STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md), not this archive contract.
 
 The public source is one visible D1 task head joined to its visible publication
 generation. A query is valid only when all rows belong to that generation and
@@ -126,8 +128,8 @@ This contract does not define or permit:
   authenticated R2 access;
 - private-original access, a raw fallback, a compatibility reader, or
   historical archive migration; or
-- a global signal, planner, revision, snapshot, or inferred control-loop
-  publication. Those availability boundaries are recorded in
+- inferred live control-loop state, live task identity/detail, or revision.
+  The independent aggregate live snapshot boundary is recorded in
   [STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md).
 
 ### Historical context (non-normative)

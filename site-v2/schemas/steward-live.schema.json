@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/steward-live.schema.json",
+  "title": "Steward live snapshot",
+  "$ref": "#/$defs/snapshot",
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "availability",
+        "observedAt",
+        "staleAfterSeconds",
+        "daemon",
+        "signals",
+        "planning",
+        "tasks",
+        "integration"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.0" },
+        "availability": { "enum": ["live", "stale"] },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+        },
+        "staleAfterSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "daemon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "enum": ["production", "dry-run"] }
+          }
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pending"],
+          "properties": {
+            "pending": { "$ref": "#/$defs/count" }
+          }
+        },
+        "planning": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "enum": ["active", "idle", "paused"] }
+          }
+        },
+        "tasks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["active", "queued"],
+          "properties": {
+            "active": { "$ref": "#/$defs/count" },
+            "queued": { "$ref": "#/$defs/count" }
+          }
+        },
+        "integration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["active", "queued"],
+          "properties": {
+            "active": { "$ref": "#/$defs/count" },
+            "queued": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    }
+  }
+}

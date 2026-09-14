@@ -33,6 +33,9 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.enabled is False
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
+    assert config.publication.live_snapshot_enabled is False
+    assert config.publication.live_snapshot_url == "https://live.coquic.minhuw.dev/api/steward/live"
+    assert config.publication.live_snapshot_interval_seconds == 60
     assert config.telemetry.billing_mode == "unknown"
     assert config.authentication.proxy_url is None
     assert config.read_codex_api_key_bytes() is None

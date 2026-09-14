@@ -23,6 +23,7 @@ EXAMPLE_TARGETS = {
     "scenario-catalog.json": ("catalog.schema.json", "scenarioCatalog"),
     "steward-daily-summary.json": ("steward.schema.json", "dailySummary"),
     "steward-growth-summary.json": ("steward.schema.json", "growthSummary"),
+    "steward-live-snapshot.json": ("steward-live.schema.json", "snapshot"),
     "transcript-search.json": ("transcript.schema.json", "searchResponse"),
     "workbench-command.json": ("workbench.schema.json", "command"),
     "steward-cloud/redacted-publication.json": ("steward-cloud.schema.json", "taskDetailResponse"),

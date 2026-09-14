@@ -49,6 +49,7 @@ check_secret /etc/coquic-steward/steward.toml config
 check_secret /run/secrets/d1-read-token
 check_secret /run/secrets/r2-access-key-id
 check_secret /run/secrets/r2-secret-access-key
+check_secret /run/secrets/live-write-token
 stop_grace="${STEWARD_STOP_GRACE:-0}"
 [[ "$stop_grace" =~ ^[0-9]+$ ]] || fail 'stop grace is not numeric'
 (( stop_grace > 30 )) || fail 'stop grace is shorter than daemon shutdown grace'

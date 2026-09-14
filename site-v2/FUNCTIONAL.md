@@ -190,33 +190,30 @@ announced without replacing retained valid evidence with an error message.
 - This surface is a read-only sanitized publication; it MUST NOT expose mutation
   controls or secrets.
 - Keep the public control-loop navigation `Signals → Planning → Tasks →
-  Integration`, but treat Signals and Planning as explicitly unavailable global
-  domains until they are published. The control loop is an instrument and
-  navigation device, not an aggregate health score.
+  Integration`. Signals, Planning, Tasks, and Integration aggregate state comes
+  only from the validated public live snapshot; the control loop is an
+  instrument and navigation device, not an aggregate health score.
 - Views are exactly Signals, Planning, and Tasks. Tasks is the default because
-  execution evidence is the primary public value; Signals and Planning remain
-  discoverable and show an explicit unavailable state without synthesized data.
-- At wide desktop widths, Tasks uses parallel queue, selected execution, and
-  current-evidence panes; Signals and Planning retain their named panes while
-  unavailable. These panes return to source order as one readable column on
-  compact screens.
-- Tasks separate active, queued, attention, and retained counts. Every row shows
-  the five-stage pipeline and links to detail only when detail is published.
-- Archive inventory and aggregate outcomes may remain supporting evidence, but
-  they do not displace the three control-loop domains.
-- Daemon and operator configuration MUST NOT be published or rendered.
-- Stale, incompatible, missing, and malformed publications are distinct.
+  execution evidence is the primary public value. Signals shows pending count,
+  Planning shows active/idle/paused, and Integration remains visible in the
+  control-loop card.
+- Show live Tasks active/queued counts independently from D1/R2 archive history
+  count and detail. A live failure MUST say unavailable rather than zero and
+  MUST NOT prevent archive history from rendering.
+- Live, stale, unavailable, incompatible, and malformed snapshot states are
+  distinct. Stale values retain their counts/state with an explicit stale label.
+- Render only the public daemon `production`/`dry-run` mode and observed age;
+  all other daemon/operator configuration remains private.
+- No live task IDs or details exist. Every task row and detail link continues to
+  come only from the archive publication.
 
 ## Steward planning `/steward?view=planning`
 
-- Keep the global Planning destination discoverable, but render its documented
-  unavailable state because the global planner domain is not published by the
-  cloud reader. Do not synthesize planner runs, read another source, or expose a
-  partial fallback. Planning evidence attached to a published task remains
-  available in that task's relational detail.
-- Distinguish loading, empty, unavailable, running, succeeded, failed, and invalid
-  states wherever a state is meaningful; the global Planning surface is
-  explicitly unavailable in the initial publication.
+- Read the global Planning state only from the public live snapshot and render
+  `active`, `idle`, or `paused` when live. Stale and unavailable are explicit;
+  do not synthesize planner runs or use archive rows as a fallback.
+- Planning evidence attached to a published task remains independent archive
+  detail. Live Planning supplies no task identity, transcript, or history.
 
 ## Steward task `/steward/tasks/[taskId]`
 
@@ -253,10 +250,10 @@ announced without replacing retained valid evidence with an error message.
 
 ## Steward cloud reader
 
-- Read only the validated public publication: visible task heads and visible
-  generations in Cloudflare D1, plus immutable sanitized objects in public R2.
-  Local filesystems, SQLite, rsync, Workers, sidecars, and alternate publication
-  sources are not inputs to this surface.
+- Read two validated public sources independently: aggregate live state from the
+  configured Worker/Durable Object URL, and visible task heads/generations plus
+  immutable sanitized objects from D1/R2 for archive evidence. Local
+  filesystems, SQLite, rsync, Site-owned Workers, and sidecars are not inputs.
 - Active and history task views show only visible, complete summaries. An active
   task remains reachable after a completed planning publication; staged,
   superseded, hidden, malformed, dangling, or private-shaped rows fail closed.
@@ -280,9 +277,9 @@ announced without replacing retained valid evidence with an error message.
   content-addressed public R2 key below the configured base, and return exactly
   one same-origin `307 Temporary Redirect`. Site never proxies bytes or accepts
   a caller-supplied URL; unavailable artifacts remain unavailable.
-- Global Signals, Planning, and revision destinations remain discoverable but
-  render the documented unavailable product state. They never read another
-  source or fabricate data from fixtures.
+- Signals, Planning, Tasks, and Integration aggregate state reads only the
+  closed live snapshot. Live failure never fabricates zero or suppresses D1/R2
+  history; revision remains unavailable.
 - Cloud states distinguish available, valid empty, transient unavailable,
   terminal unavailable, malformed, and integrity failure. Only transient
   network, timeout, rate-limit, or server failures offer a manual retry; no route

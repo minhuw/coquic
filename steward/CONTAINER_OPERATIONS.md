@@ -28,8 +28,9 @@ individual read-only files:
 | `$COQUIC_HOME/private/credentials/d1-read-token` | `/run/secrets/d1-read-token` | Steward D1 publication token |
 | `$COQUIC_HOME/private/credentials/r2-access-key-id` | `/run/secrets/r2-access-key-id` | public R2 access-key ID |
 | `$COQUIC_HOME/private/credentials/r2-secret-access-key` | `/run/secrets/r2-secret-access-key` | public R2 secret access key |
+| `$COQUIC_HOME/private/credentials/live-write-token` | `/run/secrets/live-write-token` | Durable Object live-state write token |
 
-The three publication files are produced by
+All four cloud credential files are produced by
 `infra/cloudflare/scripts/deploy-production.sh`. All credential files are
 regular, non-symlink files with mode `0600`, owned by `STEWARD_UID`; the
 credential directory is mode `0700`. The daemon TOML and its backups are also
@@ -104,7 +105,7 @@ remove objects that are not proven Steward-owned and unreferenced.
 ## Ordered launch
 
 Use this sequence after the Cloudflare operator has completed the direct
-bootstrap and installed the three publication files. Keep non-secret Compose
+bootstrap and installed the four cloud credential files. Keep non-secret Compose
 values in a private copy of `steward/containers/.env.example`; it contains
 paths and limits, not credential values. Before bootstrap or start, the daemon
 configuration must enable publication and point its credential fields at the
@@ -231,6 +232,10 @@ or applies an unreviewed provider change.
    private_bucket = "<private-bucket-name>"
    public_base_url = "https://<public-r2-host>/"
    staging_root = "/srv/coquic-steward/private/publication-staging"
+   live_snapshot_enabled = true
+   live_snapshot_url = "https://live.coquic.minhuw.dev/api/steward/live"
+   live_snapshot_token_path = "/run/secrets/live-write-token"
+   live_snapshot_interval_seconds = 60
    ```
 
    The checked-in example is intentionally local-safe: authentication is
@@ -269,8 +274,9 @@ or applies an unreviewed provider change.
    different, and create that real, non-symlink directory with mode `0700`
    before config validation. The credential paths in this override are
    daemon-container targets, not host paths; their host sources remain the
-   individual D1/R2 files listed in the credential table. Keep cloud credential
-   values out of TOML; GitHub and CLIProxyAPI credentials belong inline.
+   individual D1/R2 and live-state files listed in the credential table. Keep
+   cloud credential values out of TOML; GitHub and CLIProxyAPI credentials
+   belong inline.
 3. Load the non-secret environment in the operator shell and validate the
    production-shaped Compose file:
 

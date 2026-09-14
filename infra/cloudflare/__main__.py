@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Iterable
 
 import pulumi
@@ -25,10 +26,14 @@ class StorageResources:
     private_bucket: cloudflare.R2Bucket
     public_domain: cloudflare.R2CustomDomain
     private_lifecycle: cloudflare.R2BucketLifecycle
+    live_worker: cloudflare.WorkersScript
+    live_domain: cloudflare.WorkersCustomDomain
 
 
 STEWARD_TOKEN_NAME = "coquic-steward-publication"
 SITE_TOKEN_NAME = "coquic-site-reader"
+LIVE_WORKER_NAME = "coquic-steward-live"
+LIVE_STATE_CLASS = "LiveState"
 
 _D1_READ = "D1 Read"
 _D1_WRITE = "D1 Write"
@@ -124,6 +129,24 @@ def _derive_s3_secret_access_key(value: str) -> str:
             "Cloudflare token value is required for S3 credential derivation"
         )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _derive_live_write_token(value: str) -> str:
+    """Derive a domain-separated Steward live-state credential."""
+
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "Cloudflare token value is required for live token derivation"
+        )
+    return hashlib.sha256(
+        b"coquic-steward-live-write\0" + value.encode("utf-8")
+    ).hexdigest()
+
+
+def _live_worker_source() -> str:
+    return Path(__file__).with_name("live-state-worker.mjs").read_text(
+        encoding="utf-8"
+    )
 
 
 def _secret_object(**values: Any) -> pulumi.Output[dict[str, Any]]:
@@ -222,6 +245,43 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
         opts=_protected_options(),
     )
 
+    live_write_token = pulumi.Output.secret(
+        steward_token.value.apply(_derive_live_write_token)
+    )
+    live_worker = cloudflare.WorkersScript(
+        "stewardLiveGateway",
+        account_id=config.account_id,
+        script_name=LIVE_WORKER_NAME,
+        content=_live_worker_source(),
+        main_module="live-state-worker.mjs",
+        compatibility_date="2026-06-12",
+        bindings=[
+            {
+                "name": "LIVE_STATE",
+                "type": "durable_object_namespace",
+                "class_name": LIVE_STATE_CLASS,
+            },
+            {
+                "name": "WRITE_TOKEN",
+                "type": "secret_text",
+                "text": live_write_token,
+            },
+        ],
+        migrations={
+            "new_tag": "v1",
+            "new_sqlite_classes": [LIVE_STATE_CLASS],
+        },
+        opts=_protected_options(),
+    )
+    live_domain = cloudflare.WorkersCustomDomain(
+        "stewardLiveDomain",
+        account_id=config.account_id,
+        hostname=config.live_hostname,
+        service=live_worker.script_name,
+        zone_id=config.zone_id,
+        opts=_protected_options(),
+    )
+
     steward_s3_access_key_id = pulumi.Output.secret(steward_token.id)
     steward_s3_secret_access_key = pulumi.Output.secret(
         steward_token.value.apply(_derive_s3_secret_access_key)
@@ -234,22 +294,27 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
         private_bucket_name=private_bucket.name,
         s3_access_key_id=steward_s3_access_key_id,
         s3_secret_access_key=steward_s3_secret_access_key,
+        live_url=config.live_url,
+        live_write_token=live_write_token,
     )
     site_config = _secret_object(
         account_id=config.account_id,
         d1_database_id=database.id,
         d1_read_token=site_token.value,
         public_base_url=config.public_base_url,
+        live_url=config.live_url,
     )
 
     pulumi.export("d1_database_id", database.id)
     pulumi.export("public_bucket_name", public_bucket.name)
     pulumi.export("public_base_url", config.public_base_url)
+    pulumi.export("live_url", config.live_url)
     pulumi.export("steward_config", steward_config)
     pulumi.export("site_config", site_config)
     pulumi.export("steward_d1_token", pulumi.Output.secret(steward_token.value))
     pulumi.export("steward_s3_access_key_id", steward_s3_access_key_id)
     pulumi.export("steward_s3_secret_access_key", steward_s3_secret_access_key)
+    pulumi.export("steward_live_write_token", live_write_token)
     pulumi.export("site_d1_read_token", pulumi.Output.secret(site_token.value))
 
     return StorageResources(
@@ -258,6 +323,8 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
         private_bucket=private_bucket,
         public_domain=public_domain,
         private_lifecycle=private_lifecycle,
+        live_worker=live_worker,
+        live_domain=live_domain,
     )
 
 

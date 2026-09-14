@@ -440,7 +440,7 @@ def _publication_int(value: object, label: str, *, maximum: int) -> int:
 
 @dataclass(frozen=True)
 class StewardPublicationConfig:
-    """Strict, daemon-only Cloudflare D1/R2 publication settings.
+    """Strict daemon-only archive and live-state publication settings.
 
     The object stores credential *paths* only.  Validation uses ``lstat`` for
     metadata and never reads credential bytes; transport workers own that
@@ -462,10 +462,16 @@ class StewardPublicationConfig:
     lease_duration_seconds: float = 300.0
     max_retries: int = 3
     retry_backoff_seconds: float = 5.0
+    live_snapshot_enabled: bool = False
+    live_snapshot_url: str = ""
+    live_snapshot_token_path: Path | None = None
+    live_snapshot_interval_seconds: int = 60
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("publication.enabled must be a boolean")
+        if not isinstance(self.live_snapshot_enabled, bool):
+            raise ValueError("publication.live_snapshot_enabled must be a boolean")
 
         account = self.account_id
         database = self.d1_database_id
@@ -479,6 +485,9 @@ class StewardPublicationConfig:
         staging = self.staging_root
         lease = self.lease_duration_seconds
         retries = self.max_retries
+        live_url = self.live_snapshot_url
+        live_token_path = self.live_snapshot_token_path
+        live_interval = self.live_snapshot_interval_seconds
 
         for value, label in (
             (account, "account_id"),
@@ -487,6 +496,7 @@ class StewardPublicationConfig:
             (public_bucket, "public_bucket"),
             (private_bucket, "private_bucket"),
             (public_url, "public_base_url"),
+            (live_url, "live_snapshot_url"),
         ):
             if value not in (None, "") and not isinstance(value, str):
                 raise ValueError(f"publication.{label} must be a string")
@@ -504,6 +514,10 @@ class StewardPublicationConfig:
             secret_path, "r2_secret_access_key_path"
         )
         staging = _publication_optional_path(staging, "staging_root")
+        live_url = live_url.strip() if isinstance(live_url, str) else ""
+        live_token_path = _publication_optional_path(
+            live_token_path, "live_snapshot_token_path"
+        )
 
         if account:
             if _CLOUDFLARE_ACCOUNT_ID.fullmatch(account) is None:
@@ -517,6 +531,8 @@ class StewardPublicationConfig:
             endpoint = _publication_url(endpoint, "r2_endpoint")
         if public_url:
             public_url = _publication_url(public_url, "public_base_url")
+        if live_url:
+            live_url = _publication_url(live_url, "live_snapshot_url")
         if public_bucket:
             public_bucket = _publication_bucket(public_bucket, "public_bucket")
         if private_bucket:
@@ -540,6 +556,10 @@ class StewardPublicationConfig:
             "retry_backoff_seconds",
             maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
         )
+        if type(live_interval) is not int or not 30 <= live_interval <= 3600:
+            raise ValueError(
+                "publication.live_snapshot_interval_seconds must be an integer between 30 and 3600"
+            )
 
         if self.enabled:
             required = (
@@ -566,6 +586,19 @@ class StewardPublicationConfig:
             credential_paths = {token_path, access_path, secret_path}
             if len(credential_paths) != 3:
                 raise ValueError("publication credential paths must be separate files")
+        if self.live_snapshot_enabled:
+            if not live_url:
+                raise ValueError(
+                    "enabled live snapshot publication requires live_snapshot_url"
+                )
+            live_token_path = _publication_credential_path(
+                live_token_path, "live_snapshot_token_path"
+            )
+            archive_paths = {token_path, access_path, secret_path} - {None}
+            if live_token_path in archive_paths:
+                raise ValueError(
+                    "live snapshot publication requires a separate credential file"
+                )
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "d1_database_id", database)
         object.__setattr__(self, "d1_token_path", token_path)
@@ -580,6 +613,9 @@ class StewardPublicationConfig:
         object.__setattr__(self, "lease_duration_seconds", lease_seconds)
         object.__setattr__(self, "max_retries", retry_count)
         object.__setattr__(self, "retry_backoff_seconds", retry_backoff)
+        object.__setattr__(self, "live_snapshot_url", live_url)
+        object.__setattr__(self, "live_snapshot_token_path", live_token_path)
+        object.__setattr__(self, "live_snapshot_interval_seconds", live_interval)
 
 
 @dataclass(frozen=True)
@@ -1353,6 +1389,10 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
         "lease_duration_seconds",
         "max_retries",
         "retry_backoff_seconds",
+        "live_snapshot_enabled",
+        "live_snapshot_url",
+        "live_snapshot_token_path",
+        "live_snapshot_interval_seconds",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -1379,6 +1419,12 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
         lease_duration_seconds=data.get("lease_duration_seconds", 300.0),
         max_retries=data.get("max_retries", 3),
         retry_backoff_seconds=data.get("retry_backoff_seconds", 5.0),
+        live_snapshot_enabled=data.get("live_snapshot_enabled", False),
+        live_snapshot_url=data.get("live_snapshot_url", ""),
+        live_snapshot_token_path=data.get("live_snapshot_token_path"),
+        live_snapshot_interval_seconds=data.get(
+            "live_snapshot_interval_seconds", 60
+        ),
     )
 
 

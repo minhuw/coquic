@@ -123,7 +123,10 @@ recovery contract.
 
 Steward keeps SQLite and local task/control-loop archives private. A completed,
 inspected, sanitized generation is the only data sent to Cloudflare D1/R2; no
-raw archive transport or transcript fallback runs beside it. See
+raw archive transport or transcript fallback runs beside it. An optional,
+independent live-state worker POSTs only exact aggregate scheduler counts and
+mode/planning state to the Durable Object gateway; heartbeat persistence never
+performs network I/O. See
 [CLOUD_PUBLICATION.md](CLOUD_PUBLICATION.md) for eligibility, publication
 order, recovery, and terminal archive cleanup.
 

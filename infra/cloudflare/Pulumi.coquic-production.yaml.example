@@ -5,4 +5,5 @@ config:
   coquic-cloudflare:public_bucket_name: "coquic-public-artifacts"
   coquic-cloudflare:private_bucket_name: "coquic-private-originals"
   coquic-cloudflare:public_hostname: "artifacts.coquic.minhuw.dev"
+  coquic-cloudflare:live_hostname: "live.coquic.minhuw.dev"
   coquic-cloudflare:private_retention_seconds: 2592000

@@ -9,12 +9,13 @@ cloud_fields=(
   COQUIC_STEWARD_D1_DATABASE_ID
   COQUIC_STEWARD_D1_READ_TOKEN
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 )
 
 for cloud_field in "${cloud_fields[@]}"; do
   unset "${cloud_field}"
 done
-unset preview_password preview_access_token steward_status_curl_config
+unset COQUIC_STEWARD_LIVE_SNAPSHOT_URL preview_password preview_access_token steward_status_curl_config
 if [[ -f "${rag_env_file}" ]]; then
   set -a
   # shellcheck source=/dev/null
@@ -64,6 +65,7 @@ cloud_account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
 cloud_database_id="${COQUIC_STEWARD_D1_DATABASE_ID:-}"
 cloud_read_token="${COQUIC_STEWARD_D1_READ_TOKEN:-}"
 cloud_public_r2_base_url="${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}"
+steward_live_snapshot_url="${COQUIC_STEWARD_LIVE_SNAPSHOT_URL:-}"
 preview_password="${COQUIC_V2_PREVIEW_PASSWORD:-}"
 [[ "${cloud_account_id}" =~ ^[[:xdigit:]]{32}$ ]] || cloud_config_error "CLOUDFLARE_ACCOUNT_ID"
 [[ "${cloud_database_id}" =~ ^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$ ]] || cloud_config_error "COQUIC_STEWARD_D1_DATABASE_ID"
@@ -82,13 +84,14 @@ if [[ "${cloud_url_authority}" == *:* ]]; then
   [[ ${#cloud_url_port} -le 5 && $((10#${cloud_url_port})) -le 65535 ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
 fi
 [[ "${cloud_public_r2_base_url}" != *'..'* ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
+[[ "${steward_live_snapshot_url}" == "https://live.coquic.minhuw.dev/api/steward/live" ]] || cloud_config_error "COQUIC_STEWARD_LIVE_SNAPSHOT_URL"
 
 # app.env is the protected operator handoff. Keep its cloud values out of all
 # helper processes and pass them explicitly only to the standalone Next server.
 for cloud_field in "${cloud_fields[@]}"; do
   export -n "${cloud_field}"
 done
-export -n COQUIC_V2_PREVIEW_PASSWORD
+export -n COQUIC_STEWARD_LIVE_SNAPSHOT_URL COQUIC_V2_PREVIEW_PASSWORD
 
 if [[ ! -x "${h3_server}" ]]; then
   echo "missing h3-server: ${h3_server}" >&2
@@ -215,6 +218,7 @@ fi
   COQUIC_STEWARD_D1_DATABASE_ID="${cloud_database_id}" \
   COQUIC_STEWARD_D1_READ_TOKEN="${cloud_read_token}" \
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL="${cloud_public_r2_base_url}" \
+  COQUIC_STEWARD_LIVE_SNAPSHOT_URL="${steward_live_snapshot_url}" \
   COQUIC_V2_PREVIEW_PASSWORD="${preview_password}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \

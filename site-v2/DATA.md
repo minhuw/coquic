@@ -107,9 +107,10 @@ The browser-local Workbench command/event protocol is defined by
 `workbench.schema.json` and [WORKBENCH.md](WORKBENCH.md); it is not an HTTP API.
 
 Stable evidence, QA, transcript, and dataset paths retain their documented
-contracts. The Steward cloud publication is the sole reader input. Global
-Signals, Planning, and revision remain explicit unavailable product states until
-a current public contract publishes them.
+contracts. Steward has two independent reader inputs: the public Durable Object
+live snapshot for aggregate control-loop state and the existing D1/R2
+publication for archive history and detail. Revision remains unavailable; live
+state is never inferred from archive rows or used as an archive fallback.
 
 ## Steward cloud publication
 
@@ -120,10 +121,13 @@ superseded, hidden, malformed, dangling, or private-shaped rows fail closed.
 The account-scoped D1 Read token is server-only because Cloudflare cannot scope it
 to one database; all rows reachable through it must therefore be public-safe.
 
-The four server values are Cloudflare account ID, D1 database ID, D1 Read token,
-and anonymous public R2 base URL. The reader has no Worker, D1 write, local
-SQLite/cache, sidecar, raw fallback, or alternate publication input. Builds and
-tests do not require live cloud credentials.
+The archive reader keeps its four server values: Cloudflare account ID, D1
+database ID, D1 Read token, and anonymous public R2 base URL. The independent
+live reader has one server-only non-secret value,
+`COQUIC_STEWARD_LIVE_SNAPSHOT_URL`. Site deploys no Worker and has no D1 write,
+local SQLite/cache, sidecar, raw fallback, or fallback between live and archive
+sources. Builds and tests do not require live cloud credentials or an upstream
+endpoint.
 
 ### Public identity and relationships
 
@@ -204,6 +208,12 @@ translate an earlier shape or infer omitted evidence.
 
 ### Steward
 
+- The public live snapshot is the closed `schemaVersion: "1.0"` object in
+  `steward-live.schema.json`. It publishes availability, observation time,
+  stale threshold, daemon production/dry-run mode, pending Signals, Planning
+  active/idle/paused state, and active/queued Tasks and Integration counts.
+  Counts are nonnegative safe integers; unknown fields and unsupported values
+  fail the live boundary without affecting archive reads.
 - Cloud task status is `available`, `empty`, or `unavailable`; a valid empty
   publication is not an error or synthesized zero evidence.
 - Visible D1 relationships are validated before rendering. A task page is
@@ -254,16 +264,17 @@ translate an earlier shape or infer omitted evidence.
 
 ## Cloud reader failure states and non-goals
 
-The reader fails closed on invalid configuration, D1 transport/provider errors,
-oversized or malformed responses, invalid public rows, dangling relationships,
-unsafe object keys, and unavailable artifacts. It never returns a partial graph
-or repairs publication data in the presentation layer. There is no local
-SQLite/cache, sidecar, Worker, D1 mutation, filesystem archive input, or
-alternate publication fallback.
+Each reader fails closed independently. Live timeout, HTTP, media-type, size,
+configuration, or schema failure makes live state explicitly unavailable while
+archive history remains readable. Archive failures retain the existing D1/R2
+all-or-nothing behavior. Site never repairs publication data, substitutes one
+source for the other, or stores a local cache; it deploys no Worker, sidecar, D1
+mutation, filesystem archive input, or compatibility reader.
 
-Global Signals, Planning, and revision are not published by the initial cloud
-contract. They remain explicit unavailable product states; Site does not create
-cloud payloads for them, infer them from task data, or read another source.
+Signals, Planning, Tasks, and Integration aggregate state comes only from the
+public live snapshot. Revision remains unavailable. Site does not infer live
+counts or state from task history and does not expose task IDs or details from
+the live source.
 
 ## Content catalogs
 

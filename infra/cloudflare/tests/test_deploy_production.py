@@ -56,6 +56,8 @@ if args[:1] == ["preview"]:
         ("cloudflare:index/r2BucketLifecycle:R2BucketLifecycle", "privateOriginalsLifecycle"),
         ("cloudflare:index/accountToken:AccountToken", "stewardPublicationToken"),
         ("cloudflare:index/accountToken:AccountToken", "siteReaderToken"),
+        ("cloudflare:index/workersScript:WorkersScript", "stewardLiveGateway"),
+        ("cloudflare:index/workersCustomDomain:WorkersCustomDomain", "stewardLiveDomain"),
     ]
     if case == "malformed-preview":
         print("not structured JSON fixture-secret")
@@ -86,6 +88,10 @@ if args[:1] == ["preview"]:
             steps[0]["urn"] = steps[0]["urn"].replace("coquic-production", "other-stack")
         elif case == "summary-stack-update":
             steps[0]["op"] = "update"
+        elif case == "summary-worker-update":
+            steps[8]["op"] = "update"
+        elif case == "summary-database-update":
+            steps[1]["op"] = "update"
         elif case == "summary-stack-delete":
             steps[0]["op"] = "delete"
         elif case == "summary-stack-replace":
@@ -313,6 +319,7 @@ def _outputs() -> tuple[dict[str, Any], dict[str, str]]:
         "s3_access_key_id": "access-" + "y" * 20,
         "s3_secret_access_key": "e" * 64,
         "d1_read_token": "site-" + "q" * 20,
+        "live_write_token": "live-" + "w" * 32,
     }
     steward = {
         "account_id": account,
@@ -322,22 +329,27 @@ def _outputs() -> tuple[dict[str, Any], dict[str, str]]:
         "private_bucket_name": "coquic-private-originals",
         "s3_access_key_id": values["s3_access_key_id"],
         "s3_secret_access_key": values["s3_secret_access_key"],
+        "live_url": "https://live.coquic.minhuw.dev/api/steward/live",
+        "live_write_token": values["live_write_token"],
     }
     site = {
         "account_id": account,
         "d1_database_id": database,
         "d1_read_token": values["d1_read_token"],
         "public_base_url": "https://artifacts.coquic.minhuw.dev",
+        "live_url": "https://live.coquic.minhuw.dev/api/steward/live",
     }
     payload = {
         "d1_database_id": database,
         "public_bucket_name": steward["public_bucket_name"],
         "public_base_url": site["public_base_url"],
+        "live_url": site["live_url"],
         "steward_config": steward,
         "site_config": site,
         "steward_d1_token": values["d1_token"],
         "steward_s3_access_key_id": values["s3_access_key_id"],
         "steward_s3_secret_access_key": values["s3_secret_access_key"],
+        "steward_live_write_token": values["live_write_token"],
         "site_d1_read_token": values["d1_read_token"],
     }
     return payload, values
@@ -526,8 +538,8 @@ def test_preview_accepts_pulumi_summary_with_root_stack(harness: dict[str, Any])
     harness["env"]["PULUMI_CASE"] = "summary"
     result = _run(harness)
     assert result.returncode == 0, result.stderr
-    assert "create=8" in result.stdout
-    assert "resources=8" in result.stdout
+    assert "create=10" in result.stdout
+    assert "resources=10" in result.stdout
     assert not harness["applied"].exists()
     assert _argv(_logs(harness), "wrangler") == []
     assert not any(harness["credentials"].iterdir())
@@ -538,6 +550,7 @@ def test_preview_accepts_pulumi_summary_with_root_stack(harness: dict[str, Any])
     [
         ("summary-wrong-stack", "resource allowlist mismatch"),
         ("summary-stack-update", "update, delete, replacement, or unsupported operation"),
+        ("summary-database-update", "update, delete, replacement, or unsupported operation"),
         ("summary-stack-delete", "update, delete, replacement, or unsupported operation"),
         ("summary-stack-replace", "update, delete, replacement, or unsupported operation"),
         ("summary-extra-resource", "resource allowlist mismatch"),
@@ -566,6 +579,16 @@ def test_preview_checks_root_stack_without_bypassing_safety(
     assert _argv(_logs(harness), "wrangler") == []
 
 
+def test_preview_allows_in_place_live_worker_update(
+    harness: dict[str, Any],
+) -> None:
+    harness["env"]["PULUMI_CASE"] = "summary-worker-update"
+    result = _run(harness)
+    assert result.returncode == 0, result.stderr
+    assert "create=9 update=1 delete=0" in result.stdout
+    assert not harness["applied"].exists()
+
+
 def test_retry_reviews_unchanged_resources_and_redacted_outputs(
     harness: dict[str, Any],
 ) -> None:
@@ -577,7 +600,7 @@ def test_retry_reviews_unchanged_resources_and_redacted_outputs(
     harness["env"].update(PULUMI_CASE="summary-retry", WRANGLER_CASE="exact")
     preview = _run(harness)
     assert preview.returncode == 0, preview.stderr
-    assert "create=0 update=0 delete=0 same=8" in preview.stdout
+    assert "create=0 update=0 delete=0 same=10" in preview.stdout
     result = _run(harness, apply=True)
     assert result.returncode == 0, result.stderr
     assert harness["site_input"].exists()
@@ -786,6 +809,7 @@ def test_apply_bootstraps_schema_installs_credentials_and_hands_site(
         "d1-read-token": values["d1_token"],
         "r2-access-key-id": values["s3_access_key_id"],
         "r2-secret-access-key": values["s3_secret_access_key"],
+        "live-write-token": values["live_write_token"],
     }
     assert stat.S_IMODE(harness["credentials"].stat().st_mode) == 0o700
     for name, value in expected_files.items():
@@ -799,8 +823,12 @@ def test_apply_bootstraps_schema_installs_credentials_and_hands_site(
         "COQUIC_STEWARD_D1_DATABASE_ID",
         "COQUIC_STEWARD_D1_READ_TOKEN",
         "COQUIC_STEWARD_PUBLIC_R2_BASE_URL",
+        "COQUIC_STEWARD_LIVE_SNAPSHOT_URL",
     ]
     assert harness["values"]["d1_read_token"] in site_lines[2]
+    assert site_lines[4] == (
+        "COQUIC_STEWARD_LIVE_SNAPSHOT_URL=https://live.coquic.minhuw.dev/api/steward/live"
+    )
     wrangler = _argv(_logs(harness), "wrangler")
     assert any("--file" in argv for argv in wrangler)
     assert len([argv for argv in wrangler if "--command" in argv]) == 2
@@ -902,6 +930,21 @@ def test_output_allowlist_rejects_extra_value_without_leaking_it(
     assert _argv(_logs(harness), "wrangler") == []
 
 
+def test_output_rejects_reused_live_credential_without_leaking_it(
+    harness: dict[str, Any],
+) -> None:
+    payload = json.loads(harness["outputs_path"].read_text(encoding="utf-8"))
+    reused = payload["steward_config"]["d1_token"]
+    payload["steward_config"]["live_write_token"] = reused
+    payload["steward_live_write_token"] = reused
+    harness["outputs_path"].write_text(json.dumps(payload), encoding="utf-8")
+    result = _reviewed_apply(harness)
+    assert result.returncode != 0
+    assert "allowlist" in result.stderr
+    assert reused not in result.stdout + result.stderr
+    assert not any(harness["credentials"].iterdir())
+
+
 def test_site_failure_leaves_installed_credentials_for_retry(
     harness: dict[str, Any],
 ) -> None:
@@ -912,6 +955,7 @@ def test_site_failure_leaves_installed_credentials_for_retry(
     assert (harness["credentials"] / "d1-read-token").exists()
     assert (harness["credentials"] / "r2-access-key-id").exists()
     assert (harness["credentials"] / "r2-secret-access-key").exists()
+    assert (harness["credentials"] / "live-write-token").exists()
     assert "handoff output" not in result.stdout + result.stderr
 
 
@@ -978,6 +1022,7 @@ def test_partial_credential_install_restores_prior_files(
         "d1-read-token": "old-d1-token\n",
         "r2-access-key-id": "old-r2-access\n",
         "r2-secret-access-key": "old-r2-secret\n",
+        "live-write-token": "old-live-token\n",
     }
     for name, value in old_values.items():
         path = harness["credentials"] / name

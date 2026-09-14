@@ -69,6 +69,7 @@ from ..execution.session import (
 from ..execution.task_archive import TaskArchive, TaskArchiveWriter
 from ..publication.atif import AtifSource
 from ..publication.models import RunIdentity, RunLineage, RunMetadata, UsageSummary
+from ..publication.live import LiveSnapshotClient, LiveSnapshotWorker
 from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
     _publication_compose_kwargs,
@@ -442,6 +443,20 @@ class StewardDaemon:
         self._publication_backfill_cursor: str | None = None
         self._publication_backfill_catalog_digest: str | None = None
         self._publication_backfill_blocked = False
+        self._live_snapshot_worker: LiveSnapshotWorker | None = None
+        live_config = config.publication
+        if live_config.live_snapshot_enabled:
+            assert live_config.live_snapshot_token_path is not None
+            self._live_snapshot_worker = LiveSnapshotWorker(
+                config,
+                store,
+                LiveSnapshotClient(
+                    live_config.live_snapshot_url,
+                    live_config.live_snapshot_token_path,
+                ),
+                interval_seconds=live_config.live_snapshot_interval_seconds,
+                logger=self._log,
+            )
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
@@ -950,6 +965,7 @@ class StewardDaemon:
                     )
                 self._enqueue_materialized_publications()
                 self._start_publication_worker()
+                self._start_live_snapshot_worker()
                 self._startup_complete = True
                 return tuple(outcomes)
             except BaseException:
@@ -1899,6 +1915,31 @@ class StewardDaemon:
 
     start_publication_worker = _start_publication_worker
     stop_publication_worker = _stop_publication_worker
+
+    def _start_live_snapshot_worker(self) -> None:
+        if self._live_snapshot_worker is None:
+            return
+        try:
+            self._live_snapshot_worker.start()
+        except Exception as exc:
+            self._log(
+                "live snapshot worker start failed "
+                f"error={exc.__class__.__name__}"
+            )
+
+    def _request_live_snapshot_worker_stop(self) -> None:
+        if self._live_snapshot_worker is not None:
+            self._live_snapshot_worker.request_stop()
+
+    def _join_live_snapshot_worker(self, *, deadline: float | None = None) -> bool:
+        if self._live_snapshot_worker is None:
+            return True
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        return self._live_snapshot_worker.join(timeout)
+
+    def _stop_live_snapshot_worker(self, *, deadline: float | None = None) -> bool:
+        self._request_live_snapshot_worker_stop()
+        return self._join_live_snapshot_worker(deadline=deadline)
 
     def _enqueue_materialized_publications(self) -> None:
         """Compose completion evidence without crossing the publication boundary."""
@@ -4476,6 +4517,7 @@ class StewardDaemon:
         # Cancel provider I/O before the lifecycle transition waits on the same
         # Store admission boundary held by an in-flight aggregate operation.
         self._publication_authority = None
+        self._request_live_snapshot_worker_stop()
         cancellation = self._request_publication_worker_stop(deadline=deadline)
         # Durable authority may be revoked only after every admitted D1
         # handoff operation has quiesced.  A timeout leaves the durable claim
@@ -4498,6 +4540,9 @@ class StewardDaemon:
             publication_worker_stopped = self._join_publication_worker(
                 deadline=deadline
             )
+        live_snapshot_worker_stopped = self._join_live_snapshot_worker(
+            deadline=deadline
+        )
         control_loop_writer_stopped = self._stop_control_loop_writer(deadline=deadline)
         # A completed writer owns its final drain.  A live writer may still be
         # inside unbounded archive or ledger work, so leave its durable outbox
@@ -4638,6 +4683,7 @@ class StewardDaemon:
                 not quiescence_proven
                 or container_stop_failures
                 or not publication_worker_stopped
+                or not live_snapshot_worker_stopped
                 or not control_loop_writer_stopped
                 or getattr(initial_revocation, "deadline_exhausted", False)
             )
@@ -4658,6 +4704,7 @@ class StewardDaemon:
                         "interrupted_runs": interrupted_runs,
                         "container_stop_failures": len(container_stop_failures),
                         "publication_worker_stopped": publication_worker_stopped,
+                        "live_snapshot_worker_stopped": live_snapshot_worker_stopped,
                         "control_loop_writer_stopped": control_loop_writer_stopped,
                     },
                 )

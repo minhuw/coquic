@@ -381,3 +381,20 @@ selection, an accent label and bottom indicator, and quiet hover/visible focus
 keep navigation distinct without a dominant black or inverted bright band.
 This is a presentation-only change; live/archive semantics, routes, and the
 responsive grid remain unchanged. The shared palette is unchanged.
+
+
+## D-030: Steward production line is an educational workflow instrument
+
+On 2026-09-14, the user requested an enjoyable, explorable production pipeline
+rather than a simple status strip. One ordered, connected figure now explains
+Signals intake, Planning triage, parallel Tasks execution/validation, and
+Integration of reviewed output. Static schematics and native Input → Work →
+Output disclosures make the relationship inspectable, including Integration
+without a new view. Descriptions are explicitly conceptual, not telemetry.
+
+This purpose-built workflow instrument does not relax the ban on decorative
+factory chrome or change other routes’ visual language. Existing semantic
+surface/canvas, line, and soft-blue selection tokens remain authoritative.
+Exact aggregate snapshot values and explicit freshness remain distinct from
+archive history; no live job IDs, moving jobs, inferred health, client state,
+polling, backend changes, or dependencies are introduced.

@@ -716,11 +716,29 @@ Use a quiet operational monitor with explicit freshness, conclusion, queues,
 signals, audit, and publication evidence. Do not imitate a command center or
 expose mutation controls. Metadata never occupies a balancing column.
 
-The control-loop status navigation stays theme-native: surface background, ink
+The control-loop production-line figure stays theme-native: surface background, ink
 values, line separators, and muted supporting text. Routine counters do not use
 an inverse contrast plane. Selection uses accent-soft, an accent label, and the
 2px bottom indicator; hover uses canvas and keyboard focus uses accent-soft with
 the shared visible accent outline. Preserve the same grid in both themes.
+
+At the user’s request, Steward uses one connected, explorable production line:
+observation intake → triage and plan selection → parallel task workbench →
+reviewed output convergence. This is a literal workflow instrument, not
+permission for decorative factory chrome, dashboard cards, or a black band.
+Restrained static schematics and directional connectors explain the stages;
+the semantic ordered list runs horizontally on desktop, wraps with an explicit
+return connector on tablet, and runs vertically on narrow screens.
+
+Each station pairs its schematic with labeled exact snapshot counts/state.
+Archive history is separate. Native keyboard-operable disclosures explain
+Input → Work → Output, explicitly as conceptual workflow rather than telemetry.
+Integration has its own disclosure even though its navigation links to Tasks.
+The legend states aggregate snapshot, not individual job tracking; freshness,
+stale values, unavailable values, idle, and numeric zero remain explicit.
+No moving jobs, invented health, looping animation, or new client state is
+introduced. These Steward-specific workflow semantics do not change the
+cross-route visual language or shared tokens.
 
 #### Complete task trajectory
 

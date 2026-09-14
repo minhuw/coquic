@@ -1114,6 +1114,38 @@ async function main() {
     assert.match(html, />Stale<\/dd>/);
   });
 
+  for (const availability of ["live", "stale", "unavailable"] as const) {
+    await runCase(`production line honest idle/zero/${availability}`, {
+      ...scenario(activeRows, historyRows),
+      live: {
+        ...liveSnapshotFixture,
+        availability: availability === "stale" ? "stale" : "live",
+        signals: { pending: 0 }, planning: { state: "idle" },
+        tasks: { active: 0, queued: 0 }, integration: { active: 0, queued: 0 },
+      },
+    }, async () => {
+      const html = await renderOverview({ view: "tasks" });
+      const line = html.match(/<section aria-label="Steward task channels"[\s\S]*?<\/section>/)?.[0];
+      assert(line);
+      assert.match(line, /<ol aria-label="Production line in workflow order"/);
+      assert.equal((line.match(/<details /g) ?? []).length, 4);
+      assert.equal((line.match(/Conceptual workflow, not live telemetry/g) ?? []).length, 4);
+      for (const connection of ["Signals → Planning", "Planning → Tasks", "Tasks → Integration"]) {
+        assert(line.replace(/<!--.*?-->/g, "").includes(connection));
+      }
+      if (availability === "unavailable") {
+        assert.equal((line.match(/>Unavailable<\/span>/g) ?? []).length, 4);
+        assert(!line.includes(">Idle"));
+      } else {
+        const suffix = availability === "stale" ? " (stale)" : "";
+        assert(line.includes(`>Idle${suffix}</span>`));
+        assert.equal((line.match(new RegExp(`>0 / 0${availability === "stale" ? " \\(stale\\)" : ""}<`, "g")) ?? []).length, 2);
+      }
+      assert.match(html, /Archive history<\/dt><dd[^>]*>1/);
+      assert.match(html, /Redacted publication fixture/);
+    }, availability === "unavailable" ? { ...VALID_ENV, COQUIC_STEWARD_LIVE_SNAPSHOT_URL: undefined } : VALID_ENV);
+  }
+
   function assertTaskHasNoLegacyOutput(html: string) {
     const output = html.toLowerCase();
     for (const forbidden of ["load more", "revision", "raw archive", "lazytranscript", "filesystem fallback"]) assert(!output.includes(forbidden), forbidden);

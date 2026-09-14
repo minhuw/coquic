@@ -193,10 +193,20 @@ announced without replacing retained valid evidence with an error message.
   Integration`. Signals, Planning, Tasks, and Integration aggregate state comes
   only from the validated public live snapshot; the control loop is an
   instrument and navigation device, not an aggregate health score.
+- The production line MUST use an ordered semantic list with visible directional
+  connections and distinct intake, planning, parallel execution/validation, and
+  reviewed-output integration schematics. It is an educational workflow
+  instrument, not decorative factory chrome or individual live job tracking.
+- Every stage MUST expose native keyboard-operable Input → Work → Output
+  disclosures labeled conceptual workflow, including Integration without a
+  standalone view. The first three links retain URL selection and aria-current;
+  Integration links to Tasks. Exact labeled snapshot values appear below each
+  schematic; archive history remains separate. No animation, polling, fabricated
+  jobs, or inferred health is permitted.
 - Views are exactly Signals, Planning, and Tasks. Tasks is the default because
   execution evidence is the primary public value. Signals shows pending count,
   Planning shows active/idle/paused, and Integration remains visible in the
-  control-loop card.
+  connected production-line figure.
 - Show live Tasks active/queued counts independently from D1/R2 archive history
   count and detail. A live failure MUST say unavailable rather than zero and
   MUST NOT prevent archive history from rendering.

@@ -210,7 +210,7 @@ test("Steward task navigation exposes the public task channels", async ({ page }
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
-  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 768, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
     test(`Steward channels stay theme-native: ${colorScheme} ${viewport.width}`, async ({ page }, testInfo) => {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize(viewport);
@@ -237,10 +237,12 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(selected.locator("span").filter({ hasText: /^Tasks$/ })).toHaveCSS("color", colors.accent!);
       await expect(selected.locator(".bottom-0")).toHaveCSS("height", "2px");
       await expect(selected.locator(".bottom-0")).toHaveCSS("background-color", colors.accent!);
-      await expect(signals.locator(".text-xs")).toHaveCSS("color", colors["text-muted"]!);
+      await expect(signals.locator(".text-xs").last()).toHaveCSS("color", colors["text-muted"]!);
       await signals.hover();
       await expect(signals).toHaveCSS("background-color", colors.canvas!);
       await signals.focus();
+      await page.keyboard.press("Tab");
+      await expect(channels.locator("summary").first()).toBeFocused();
       await page.keyboard.press("Tab");
       const planning = channels.getByRole("link", { name: /^Planning/ });
       await expect(planning).toBeFocused();
@@ -259,6 +261,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
       await page.mouse.move(0, 0);
+      await page.evaluate(async () => {
+        window.scrollTo({ top: 0, behavior: "instant" });
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
       const screenshot = await page.screenshot({ path: testInfo.outputPath(`channels-${colorScheme}-${viewport.width}.png`), fullPage: true });
       expect(screenshot.byteLength).toBeGreaterThan(1_000);
       await page.keyboard.press("Enter");
@@ -267,6 +273,75 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
   }
 }
+
+test("production line explains all ordered stages with native keyboard disclosures and selection", async ({ page }, testInfo) => {
+  await page.goto("/steward?view=signals");
+  const channels = page.getByRole("region", { name: "Steward task channels" });
+  const stations = channels.getByRole("list", { name: "Production line in workflow order" }).getByRole("listitem");
+  await expect(stations).toHaveCount(4);
+  const labels = ["Signals", "Planning", "Tasks", "Integration"];
+  for (const [index, label] of labels.entries()) {
+    const station = stations.nth(index);
+    await expect(station.getByRole("link")).toContainText(label);
+    if (index < 3) await expect(station).toContainText(`${label} → ${labels[index + 1]}`);
+    const summary = station.locator("summary");
+    await station.getByRole("link").focus();
+    await page.keyboard.press("Tab");
+    await expect(summary).toBeFocused();
+    await expect(summary).toHaveCSS("outline-width", "2px");
+    await page.keyboard.press("Enter");
+    await expect(station.locator("details")).toHaveAttribute("open", "");
+    for (const term of ["Input", "Work", "Output"]) await expect(station.getByRole("term").filter({ hasText: new RegExp(`^${term}$`) })).toBeVisible();
+    await expect(station.getByText("Conceptual workflow, not live telemetry.")).toBeVisible();
+    await page.keyboard.press("Space");
+    await expect(station.locator("details")).not.toHaveAttribute("open", "");
+    await station.getByRole("link").focus();
+    await page.keyboard.press("Enter");
+    const view = label === "Integration" ? "tasks" : label.toLowerCase();
+    await expect(page).toHaveURL(new RegExp(`view=${view}$`));
+    await expect(channels.locator('[aria-current="page"]')).toHaveAttribute("href", `/steward?view=${view}`);
+    await expect(channels.locator('[aria-current="page"]')).toHaveCount(1);
+  }
+  await channels.locator("summary").last().focus();
+  await page.keyboard.press("Enter");
+  await page.evaluate(async () => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+  await page.screenshot({ path: testInfo.outputPath("production-line-integration-open.png"), fullPage: true });
+  const findings = (await new AxeBuilder({ page }).include('[aria-label="Steward task channels"]').analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");
+  expect(findings).toEqual([]);
+});
+
+test("production line retains open explanations at 200% zoom and forced colors", async ({ browser, baseURL }, testInfo) => {
+  // A 1280px display at 200% browser zoom has a 640 CSS-pixel layout viewport.
+  // DPR 2 preserves the doubled raster size; CSS zoom alone does not reflow media queries.
+  const context = await browser.newContext({
+    baseURL, viewport: { width: 640, height: 500 }, deviceScaleFactor: 2,
+    forcedColors: "active", reducedMotion: "reduce",
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("/steward?view=tasks");
+    const channels = page.getByRole("region", { name: "Steward task channels" });
+    for (const summary of await channels.locator("summary").all()) {
+      await summary.focus();
+      await page.keyboard.press("Enter");
+    }
+    await expect(channels.locator("details[open]")).toHaveCount(4);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+    await expect(channels.locator("summary").last()).toBeFocused();
+    await expect(channels.locator("summary").last()).toHaveCSS("outline-style", "solid");
+    await expect(channels.locator('[aria-current="page"] .bottom-0')).toHaveCSS("border-bottom-width", "2px");
+    await page.evaluate(async () => {
+      window.scrollTo({ top: 0, behavior: "instant" });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await page.screenshot({ path: testInfo.outputPath("production-line-zoom-forced-colors.png"), fullPage: true });
+  } finally {
+    await context.close();
+  }
+});
 
 test("Steward cached usage keeps exact totals, coverage, and task links", async ({ page }) => {
   await page.goto("/steward?view=tasks");
@@ -343,8 +418,9 @@ test("Steward live channels expose validated signals, planning, tasks, integrati
   await expect(page.getByRole("definition").filter({ hasText: "Active" }).first()).toBeVisible();
 
   const channels = page.getByRole("region", { name: "Steward task channels" });
-  await expect(channels.getByRole("link", { name: /Tasks.*2 \/ 4.*active \/ queued.*3 archive history/ })).toBeVisible();
-  await expect(channels.getByRole("link", { name: /Integration.*1 \/ 2.*active \/ queued/ })).toBeVisible();
+  await expect(channels.getByRole("link", { name: /Tasks.*active \/ queued.*2 \/ 4/ })).toBeVisible();
+  await expect(channels).toContainText("Archive history: 3 · independent of live counts.");
+  await expect(channels.getByRole("link", { name: /Integration.*active \/ queued.*1 \/ 2/ })).toBeVisible();
 });
 
 test("complete trajectory renders every record in source order with stable anchors", async ({ page }) => {

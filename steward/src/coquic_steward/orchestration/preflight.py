@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.github_auth import git_remote_environment, validate_ssh_remote
+from ..core.github_auth import git_remote_environment, validate_https_remote
 from ..core.subprocesses import CommandResult, run_command
 from ..control_loop import ArchiveError, ControlLoopArchive
 
@@ -25,7 +25,7 @@ _COMMIT_ENV = {
     "GIT_COMMITTER_EMAIL": "steward@example.invalid",
     "GIT_COMMITTER_NAME": "CoQUIC Steward",
 }
-_REMOTE_REWRITE_PATTERN = r"^url\..*\.(insteadOf|pushInsteadOf)$"
+_REMOTE_TRANSPORT_PATTERN = r"^(http\.|credential\.|url\..*\.(insteadOf|pushInsteadOf)$)"
 
 
 class StewardPreflightError(RuntimeError):
@@ -63,12 +63,19 @@ def run_preflight(
         raise StewardPreflightError(
             "preflight failed: configure [steward.authentication] with proxy_url and api_key"
         )
+    if config.deployment.enabled and config.authentication.github_token is None:
+        raise StewardPreflightError(
+            "preflight failed: configure [steward.authentication] with github_token"
+        )
     config.ensure_dirs()
     checks: list[str] = ["directories"]
     warnings: list[str] = []
     if config.deployment.enabled:
         _validate_deployment_boundary(config)
         checks.append("deployment")
+    elif config.authentication.github_token is not None:
+        validate_remote_operation(config, config.repo_root)
+        checks.append("remote-policy")
     ledger = getattr(store, "control_loop_ledger", None)
     try:
         task_epoch = config.ensure_epoch()
@@ -159,16 +166,6 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
         raise StewardPreflightError("preflight failed: daemon GID does not match configured host GID")
     if deployment.docker_gid is not None and deployment.docker_gid not in os.getgroups() and os.getgid() != deployment.docker_gid:
         raise StewardPreflightError("preflight failed: daemon lacks configured Docker socket group")
-    credentials = (
-        (deployment.github_token_path, "GitHub API token"),
-        (deployment.git_ssh_key_path, "Git SSH key"),
-        (deployment.git_known_hosts_path, "Git known-hosts"),
-    )
-    for path, label in credentials:
-        _check_secret_file(path, label)
-        assert path is not None
-        if deployment.host_uid is not None and path.lstat().st_uid != deployment.host_uid:
-            raise StewardPreflightError(f"preflight failed: {label} owner is mismatched")
     _validate_remote_policy(config, repository)
     branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repository)
     if not branch.ok or branch.stdout.strip() != deployment.expected_branch:
@@ -182,9 +179,9 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
 
 
 def validate_remote_operation(config: StewardConfig, repository: Path) -> None:
-    """Validate the Git context immediately before a production remote call."""
+    """Validate every explicitly authenticated remote call, including local mode."""
 
-    if config.deployment.enabled:
+    if config.deployment.enabled or config.authentication.github_token is not None:
         _validate_remote_policy(config, repository)
 
 
@@ -273,14 +270,14 @@ def _validate_remote_policy_context(
         )
         for remote_url in (*fetch_urls, *(push_urls or fetch_urls)):
             try:
-                validate_ssh_remote(remote_url)
+                validate_https_remote(remote_url)
             except ValueError as exc:
                 raise StewardPreflightError(
-                    f"preflight failed: {label} must be credential-free SSH"
+                    f"preflight failed: {label} must be credential-free GitHub HTTPS"
                 ) from exc
 
     environment = git_remote_environment(config)
-    _reject_repository_url_rewrites(repository, environment)
+    _reject_repository_transport_overrides(repository, environment)
     for remote_name in remote_names:
         label = (
             "expected Git remote"
@@ -303,10 +300,10 @@ def _validate_remote_policy_context(
                     f"{direction} URL"
                 )
             try:
-                validate_ssh_remote(remote_urls[0])
+                validate_https_remote(remote_urls[0])
             except ValueError as exc:
                 raise StewardPreflightError(
-                    f"preflight failed: {label} must be credential-free SSH"
+                    f"preflight failed: {label} must be credential-free GitHub HTTPS"
                 ) from exc
 
 
@@ -315,6 +312,7 @@ def _git_remote_config_values(repository: Path, key: str) -> tuple[str, ...]:
         [
             "git",
             "config",
+            "--no-file",
             "--local",
             "--includes",
             "--null",
@@ -335,31 +333,40 @@ def _git_remote_config_values(repository: Path, key: str) -> tuple[str, ...]:
     )
 
 
-def _reject_repository_url_rewrites(
-    repository: Path, environment: dict[str, str]
+def _reject_repository_transport_overrides(
+    repository: Path, environment: dict[str, str | None]
 ) -> None:
+    # URL-specific settings can outrank broad command-scope overrides. Git's
+    # scope labels cover active worktree config and includes without requiring
+    # extensions.worktreeConfig on repositories which do not use it.
     result = run_command(
         [
-            "git",
-            "config",
-            "--includes",
-            "--null",
-            "--name-only",
-            "--get-regexp",
-            _REMOTE_REWRITE_PATTERN,
+            "git", "config", "--no-file", "--includes", "--null",
+            "--show-scope", "--name-only", "--get-regexp", _REMOTE_TRANSPORT_PATTERN,
         ],
         cwd=repository,
         env=environment,
     )
-    if result.ok and not result.stdout:
+    if (result.ok or result.returncode == 1) and not result.stdout:
         return
-    if result.ok and result.stdout:
-        raise StewardPreflightError(
-            "preflight failed: repository-local Git URL rewriting "
-            "(insteadOf/pushInsteadOf) is not allowed"
-        )
-    if result.returncode == 1 and not result.stdout:
-        return
+    if result.ok:
+        fields = result.stdout.split("\0")
+        if fields[-1] == "" and len(fields) % 2 == 1:
+            keys = [
+                key for scope, key in zip(fields[::2], fields[1::2])
+                if scope in {"local", "worktree"}
+            ]
+            if not keys:
+                return
+            if any(key.startswith("url.") for key in keys):
+                raise StewardPreflightError(
+                    "preflight failed: repository-local Git URL rewriting "
+                    "(insteadOf/pushInsteadOf) is not allowed"
+                )
+            raise StewardPreflightError(
+                "preflight failed: repository-local HTTP and credential "
+                "configuration is not allowed"
+            )
     raise StewardPreflightError(
         "preflight failed: Git remote configuration is unavailable"
     )
@@ -369,7 +376,7 @@ def _effective_remote_urls(
     repository: Path,
     remote: str,
     *,
-    environment: dict[str, str],
+    environment: dict[str, str | None],
     push: bool = False,
 ) -> tuple[str, ...]:
     command = ["git", "remote", "get-url"]
@@ -457,19 +464,6 @@ def _validate_task_image_identity(stdout: str, runtime_protocol: str) -> None:
     optional_architecture = labels.get("org.opencontainers.image.architecture") if isinstance(labels, dict) else None
     if optional_architecture is not None and optional_architecture != "x86_64-linux":
         raise StewardPreflightError("preflight failed: locked task image architecture is invalid")
-
-
-def _check_secret_file(path: Path | None, label: str) -> None:
-    if path is None:
-        raise StewardPreflightError(f"preflight failed: {label} path is missing")
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise StewardPreflightError(f"preflight failed: {label} file is unavailable") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise StewardPreflightError(f"preflight failed: {label} file is not regular")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise StewardPreflightError(f"preflight failed: {label} file permissions are unsafe")
 
 
 def _validate_container_host_mapping(config: StewardConfig) -> None:
@@ -596,6 +590,11 @@ def _remote_branch_ref(branch: str) -> str:
 def _preflight_error(
     config: StewardConfig, step: str, result: CommandResult
 ) -> StewardPreflightError:
+    if config.deployment.enabled or config.authentication.github_token is not None:
+        # Credential-bearing subprocesses must not publish raw diagnostics.
+        return StewardPreflightError(
+            f"remote push preflight failed: {step}; exit code: {result.returncode}"
+        )
     return StewardPreflightError(
         "\n".join(
             part

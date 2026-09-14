@@ -30,6 +30,7 @@ def main() -> None:
         authentication=StewardAuthenticationConfig(
             proxy_url="https://proxy.example.test/v1",
             api_key="fake-production-canary-client-key",
+            github_token="fake-production-canary-github-token",
         ),
         task_image_digest=os.environ["STEWARD_TASK_IMAGE"],
         validation_image_digest=os.environ["STEWARD_VALIDATION_IMAGE"],
@@ -47,6 +48,7 @@ def main() -> None:
     daemon_config.write_text(
         '[steward.authentication]\nproxy_url = "https://proxy.example.test/v1"\n'
         'api_key = "fake-production-canary-client-key"\n'
+        'github_token = "fake-production-canary-github-token"\n'
     )
     daemon_config.chmod(0o600)
     for command in (["init", "-b", "main"], ["config", "user.email", "canary@example.test"],
@@ -204,6 +206,7 @@ print('durable Nix exec inherited fixed paths and offline sandbox policy')
             for mount in inspection.raw["Mounts"]
         )
         assert "fake-production-canary-client-key" not in json.dumps(inspection.raw)
+        assert "fake-production-canary-github-token" not in json.dumps(inspection.raw)
         implementation, reviewer = sessions
 
         def execute(session, command):

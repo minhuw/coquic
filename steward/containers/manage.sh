@@ -8,6 +8,7 @@ compose_file="${COMPOSE_FILE:-$script_dir/compose.yml}"
 project="${STEWARD_COMPOSE_PROJECT:-coquic-steward}"
 home="${COQUIC_HOME:-}"
 repository="${COQUIC_REPOSITORY:-}"
+COQUIC_REMOTE_URL="${COQUIC_REMOTE_URL:-https://github.com/minhuw/coquic.git}"
 socket_path="${DOCKER_SOCKET:-/var/run/docker.sock}"
 deployment=""
 lock_fd=""
@@ -41,7 +42,17 @@ validate_socket() {
   [[ -S "$socket_path" ]] || die 'Docker endpoint must be an available local Unix socket'
 }
 
+require_identity_ids() {
+  local name value
+  for name in STEWARD_UID STEWARD_GID STEWARD_DOCKER_GID; do
+    value="${!name:-}"
+    [[ "$value" =~ ^[1-9][0-9]{0,9}$ ]] || die "$name must be a canonical non-root ID (1..4294967294)"
+    (( value <= 4294967294 )) || die "$name must be a canonical non-root ID (1..4294967294)"
+  done
+}
+
 require_numeric_config() {
+  require_identity_ids
   local name value
   for name in STEWARD_UID STEWARD_GID STEWARD_DOCKER_GID STEWARD_STOP_GRACE STEWARD_MAX_PIDS STEWARD_MAX_MEMORY STEWARD_MAX_LOG_BYTES STEWARD_MAX_SCRATCH_BYTES STEWARD_MIN_FREE_BYTES STEWARD_MAX_OWNED_DOCKER_BYTES STEWARD_RECOVERY_FREE_BYTES STEWARD_RECOVERY_OWNED_DOCKER_BYTES; do
     value="${!name:-}"
@@ -67,12 +78,6 @@ check_private_file() {
   fi
 }
 
-check_host_credential() {
-  local path="$1" name="$2" label="$3"
-  [[ "$path" == "$home/private/credentials/$name" ]] || die "$label path must use the canonical host source"
-  check_private_file "$path" "$label"
-}
-
 validate_config_file() {
   local path="${STEWARD_CONFIG_PATH:-}" mode
   [[ "${STEWARD_UID:-}" =~ ^[0-9]+$ ]] || die 'STEWARD_UID must be numeric'
@@ -83,74 +88,20 @@ validate_config_file() {
 
 validate_credentials() {
   validate_config_file
-  check_host_credential "${GITHUB_TOKEN_PATH:-$home/private/credentials/github-token}" github-token 'GitHub API token'
-  check_host_credential "${GIT_SSH_KEY_PATH:-$home/private/credentials/git-ssh-key}" git-ssh-key 'Git SSH key'
+  python "$script_dir/../src/coquic_steward/core/github_auth.py" validate-config \
+    --config "$STEWARD_CONFIG_PATH" >/dev/null \
+    || die 'Steward configuration must contain a valid inline GitHub token'
   check_private_file "${D1_TOKEN_PATH:-$home/private/credentials/d1-read-token}" 'D1 publication token'
   check_private_file "${R2_ACCESS_KEY_ID_PATH:-$home/private/credentials/r2-access-key-id}" 'R2 access-key ID'
   check_private_file "${R2_SECRET_ACCESS_KEY_PATH:-$home/private/credentials/r2-secret-access-key}" 'R2 secret access key'
-  check_host_credential "${GIT_KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}" known_hosts 'Git known-hosts'
 }
 
-git_ssh_command() {
-  local key_path="${GIT_SSH_KEY_PATH:-$home/private/credentials/git-ssh-key}"
-  local known_hosts_path="${GIT_KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}"
-  local escaped_key escaped_known_hosts
-  printf -v escaped_key '%q' "$key_path"
-  printf -v escaped_known_hosts '%q' "$known_hosts_path"
-  printf 'ssh -F /dev/null -o IdentityFile=none -i %s -o IdentityFile=%s -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=%s -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes' \
-    "$escaped_key" "$escaped_key" "$escaped_known_hosts"
-}
-
-validate_ssh_remote() {
+validate_https_remote() {
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 && "$1" == /* ]]; then
     return 0
   fi
-  python - "$1" <<'PY' || die 'configured Git remote must be credential-free SSH'
-import re
-import sys
-from urllib.parse import urlsplit
-
-value = sys.argv[1]
-if not value or any(character.isspace() or ord(character) < 0x20 for character in value):
-    raise SystemExit(1)
-if "://" in value:
-    try:
-        parsed = urlsplit(value)
-        hostname = parsed.hostname
-        parsed.port
-    except ValueError:
-        raise SystemExit(1)
-    user = parsed.username
-    if (
-        parsed.scheme.lower() != "ssh"
-        or not hostname
-        or hostname.startswith("-")
-        or re.fullmatch(r"^(?:[A-Za-z0-9.-]+|[0-9A-Fa-f:.]+)$", hostname) is None
-        or (user is not None and (re.fullmatch(r"[A-Za-z0-9._-]+", user) is None or user.startswith("-")))
-        or not parsed.path
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or "%" in parsed.netloc
-    ):
-        raise SystemExit(1)
-else:
-    scp = re.compile(
-        r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[^\s\x00-\x1f]+)$"
-    )
-    credentials = re.compile(
-        r"@(?:localhost|(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+):"
-    )
-    match = scp.fullmatch(value)
-    if (
-        match is None
-        or match.group("host").startswith("-")
-        or (match.group("user") is not None and match.group("user").startswith("-"))
-        or "::" in value.replace(match.group("host"), "", 1)
-        or credentials.search(match.group("path")) is not None
-    ):
-        raise SystemExit(1)
-PY
+  python "$script_dir/../src/coquic_steward/core/github_auth.py" validate-remote "$1" \
+    || die 'configured Git remote must be credential-free GitHub HTTPS; migrate SSH remotes explicitly'
 }
 
 validate_compose_static() {
@@ -600,7 +551,7 @@ validate_repository() {
   )
   ((${#remote_urls[@]} > 0)) || die 'expected Git remote is missing'
   for actual_url in "${remote_urls[@]}"; do
-    validate_ssh_remote "$actual_url"
+    validate_https_remote "$actual_url"
   done
   mapfile -d '' -t push_urls < <(
     git -C "$repository_path" config --null --get-all "remote.$remote.pushurl" || true
@@ -609,13 +560,12 @@ validate_repository() {
     push_urls=("${remote_urls[@]}")
   fi
   for actual_url in "${push_urls[@]}"; do
-    validate_ssh_remote "$actual_url"
+    validate_https_remote "$actual_url"
   done
-  actual_url="${remote_urls[0]}"
-  expected_url="${COQUIC_REMOTE_URL:-}"
-  if [[ -n "$expected_url" && "$actual_url" != "$expected_url" ]]; then
-    die 'canonical repository remote does not match the configured remote'
-  fi
+  expected_url="$COQUIC_REMOTE_URL"
+  for actual_url in "${remote_urls[@]}" "${push_urls[@]}"; do
+    [[ "$actual_url" == "$expected_url" ]] || die 'canonical repository remote does not match the configured remote'
+  done
   [[ "$(git -C "$repository_path" symbolic-ref --quiet --short HEAD)" == "$branch" ]] || die 'repository is detached or on wrong branch'
   [[ -z "$(git -C "$repository_path" status --porcelain)" ]] || die 'canonical repository is dirty'
   mapfile -t worktree_paths < <(
@@ -651,24 +601,25 @@ bootstrap() {
   fi
   journal layout
   mkdir -p -m 700 "$home" "$home/private" "$home/private/runtime" "$home/private/codex-sessions" "$home/private/credentials" "$home/private/deployment" "$home/worktrees" "$home/tasks" "$home/control-loop"
+  prepare_daemon_identity
   [[ ! -e "$repository" ]] && {
-    [[ -n "${COQUIC_REMOTE_URL:-}" ]] || die 'COQUIC_REMOTE_URL is required for a fresh clone'
-    validate_ssh_remote "$COQUIC_REMOTE_URL"
+    validate_https_remote "$COQUIC_REMOTE_URL"
     [[ -d "$(dirname "$repository")" ]] || die 'repository parent is missing'
     local unexpected
     unexpected="$(find "$home" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | while read -r entry; do case "$entry" in private|worktrees|tasks|control-loop) ;; *) printf '%s\n' "$entry" ;; esac; done | head -n 1)"
     [[ -z "$unexpected" ]] || die 'repository parent contains unexpected state'
     local clone_tmp="$deployment/bootstrap-repository.tmp"
     journal clone pending '' bootstrap-repository.tmp
-    env -i \
-      PATH="$PATH" \
-      GIT_CONFIG_NOSYSTEM=1 \
-      GIT_CONFIG_GLOBAL=/dev/null \
-      GIT_CONFIG_COUNT=0 \
-      GIT_CONFIG_PARAMETERS= \
-      GIT_SSH_COMMAND="$(git_ssh_command)" \
-      GIT_SSH_VARIANT=ssh \
-      git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
+    if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 && "$COQUIC_REMOTE_URL" == /* ]]; then
+      env -i PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_COUNT=0 GIT_CONFIG_PARAMETERS= \
+        git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
+    else
+      python "$script_dir/../src/coquic_steward/core/github_auth.py" clone \
+        --config "$STEWARD_CONFIG_PATH" \
+        --branch "${STEWARD_EXPECTED_BRANCH:-main}" --remote "$COQUIC_REMOTE_URL" \
+        --destination "$clone_tmp" >/dev/null
+    fi
     validate_repository "$clone_tmp"
     [[ ! -e "$repository" ]] || die 'repository appeared while bootstrap was cloning'
     mv -- "$clone_tmp" "$repository"
@@ -679,6 +630,90 @@ bootstrap() {
   [[ -f "$deployment/current" ]] || write_selector current "$release"
   journal complete success; record_outcome bootstrap success
   printf 'bootstrap complete release=%s repository=verified\n' "$release"
+}
+
+# Only locked lifecycle writers call this; status/config and live health reads do not.
+prepare_daemon_identity() {
+  [[ -n "$lock_fd" ]] || die 'daemon identity requires the lifecycle lock'
+  require_identity_ids
+  python - "$home" "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY_IDENTITY' || die 'daemon identity paths or ownership are unsafe'
+import os
+import secrets
+import stat
+import sys
+
+home = sys.argv[1]
+uid, gid, docker_gid = map(int, sys.argv[2:])
+# /bin/bash is provided by stewardDaemonToolClosure in flake.nix.
+contents = {
+    "daemon-passwd": f"root:x:0:0:root:/root:/bin/bash\nsteward:x:{uid}:{gid}:Steward:/tmp:/bin/bash\n",
+    "daemon-group": f"root:x:0:\nsteward:x:{gid}:steward\n",
+}
+if docker_gid != gid:
+    contents["daemon-group"] += f"docker:x:{docker_gid}:steward\n"
+
+# Walk from / using directory descriptors: no symlink in any path component.
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+fd = os.open("/", flags)
+try:
+    components = home.split("/")[1:] + ["private", "runtime"]
+    for index, component in enumerate(components):
+        created = False
+        if not component or component in {".", ".."}:
+            raise ValueError("invalid identity directory")
+        if index == len(components) - 1:
+            try:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                created = True
+            except FileExistsError:
+                pass
+        child = os.open(component, flags, dir_fd=fd)
+        os.close(fd)
+        fd = child
+        if created:
+            os.fchown(fd, uid, gid)
+        if index >= len(components) - 2:
+            metadata = os.fstat(fd)
+            if metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise ValueError("unsafe identity directory")
+
+    changed = {}
+    for name, text in contents.items():
+        data = text.encode("ascii")
+        try:
+            source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        except FileNotFoundError:
+            changed[name] = data
+            continue
+        with os.fdopen(source, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != uid
+                    or stat.S_IMODE(metadata.st_mode) not in {0o400, 0o600}):
+                raise ValueError("unsafe identity file")
+            if stream.read(len(data) + 1) != data:
+                changed[name] = data
+
+    for name, data in changed.items():
+        temporary = f".{name}-{secrets.token_hex(8)}"
+        target = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            with os.fdopen(target, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                os.fchown(stream.fileno(), uid, gid)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+finally:
+    os.close(fd)
+PY_IDENTITY
 }
 
 config_check() {
@@ -712,6 +747,7 @@ init_service() {
   local release marker="$deployment/store.initialized"
   release="$(tr -d '\n' <"$deployment/current")"
   select_release "$release"
+  prepare_daemon_identity
   journal init
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
     [[ ! -e "$deployment/service.running" ]] || die 'daemon is running'
@@ -731,7 +767,7 @@ init_service() {
   printf 'init complete release=%s store=verified\n' "$release"
 }
 
-start_service() { require_paths; validate_credentials; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; validate_store; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
+start_service() { require_paths; validate_credentials; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; prepare_daemon_identity; validate_store; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
 stop_service() { require_paths; validate_socket; with_lock; journal stop; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then rm -f "$deployment/service.running"; else compose_run stop --timeout "${STEWARD_STOP_GRACE:-45}" steward >/dev/null; fi; journal complete success; record_outcome stop success; }
 
 status_service() {
@@ -786,6 +822,7 @@ raise SystemExit(0 if value.get("runtimeHealthy") is True and value.get("release
 
 recreate_release() {
   local release="$1"
+  prepare_daemon_identity
   select_release "$release"
   if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
     : >"$deployment/service.running"
@@ -797,6 +834,7 @@ recreate_release() {
 
 restore_release() {
   local release="$1"
+  prepare_daemon_identity
   require_runtime_health_contract "$release"
   journal restore failure
   recreate_release "$release" && verify_release_health "$release" || die 'candidate failed and the previous release could not be restored'
@@ -821,6 +859,7 @@ upgrade_service() {
   [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'
   local old candidate before_previous='__NONE__'
   old="$(selector_value current)"
+  prepare_daemon_identity
   require_runtime_health_contract "$old"
   verify_release_health "$old" || die 'upgrade fallback runtime health is unverified'
   if (( force == 0 )); then
@@ -860,6 +899,7 @@ rollback_service() {
   previous="$(selector_value previous)"
   current="$(selector_value current)"
   before_previous="$previous"
+  prepare_daemon_identity
   require_runtime_health_contract "$previous"
   require_runtime_health_contract "$current"
   verify_release_health "$current" || die 'rollback fallback runtime health is unverified'

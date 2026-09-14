@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from typer.testing import CliRunner
 import coquic_steward.cli as cli_module
 from coquic_steward.cli import app, daemon as daemon_cli_command, run as run_cli_command
 from coquic_steward.core.config import (
+    StewardAuthenticationConfig,
     StewardConfig,
     StewardDeploymentConfig,
     load_config,
@@ -68,20 +70,24 @@ def _production_config(repo: Path, tmp_path: Path) -> StewardConfig:
         enabled=True,
         home=home,
         repository=home / "repository",
-        github_token_path=tmp_path / "github-token",
-        git_ssh_key_path=tmp_path / "git-key",
-        git_known_hosts_path=tmp_path / "known-hosts",
         min_free_bytes=1,
         max_owned_docker_bytes=2,
         recovery_free_bytes=2,
         recovery_owned_docker_bytes=1,
     )
-    return StewardConfig(repo_root=repo, dry_run=False, deployment=deployment)
+    return StewardConfig(repo_root=repo, dry_run=False, deployment=deployment,
+                         authentication=StewardAuthenticationConfig(github_token="synthetic-test-token"))
+
+
+@pytest.fixture(params=(True, False), ids=("production", "local-inline"))
+def authenticated_config(repo, tmp_path, request):
+    config = _production_config(repo, tmp_path)
+    return replace(config, deployment=replace(config.deployment, enabled=request.param))
 
 
 def _add_canonical_remote(repo: Path) -> None:
     subprocess.run(
-        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+        ["git", "remote", "add", "origin", "https://github.com/org/repo.git"],
         cwd=repo,
         check=True,
     )
@@ -415,13 +421,14 @@ def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
 
 @pytest.mark.parametrize("rewrite_name", ["insteadOf", "pushInsteadOf"])
 def test_production_remote_policy_rejects_repository_url_rewrites(
+    authenticated_config,
     repo: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     rewrite_name: str,
 ) -> None:
     _add_canonical_remote(repo)
-    canonical = "git@github.com:org/repo.git"
+    canonical = "https://github.com/org/repo.git"
     subprocess.run(
         [
             "git",
@@ -456,7 +463,7 @@ def test_production_remote_policy_rejects_repository_url_rewrites(
         check=True,
     )
     assert effective.stdout.strip() == "file:///tmp/attacker"
-    config = _production_config(repo, tmp_path)
+    config = authenticated_config
     commands: list[list[str]] = []
     original_run_command = preflight_module.run_command
 
@@ -466,7 +473,7 @@ def test_production_remote_policy_rejects_repository_url_rewrites(
 
     monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
     with pytest.raises(StewardPreflightError, match="URL rewriting"):
-        preflight_module._validate_remote_policy(config, repo)
+        preflight_module.validate_remote_operation(config, repo)
 
     assert not any(
         command[:3] == ["git", "remote", "get-url"] for command in commands
@@ -478,10 +485,11 @@ def test_production_remote_policy_rejects_repository_url_rewrites(
 
 
 def test_production_remote_policy_neutralizes_inherited_url_rewrites(
+    authenticated_config,
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _add_canonical_remote(repo)
-    canonical = "git@github.com:org/repo.git"
+    canonical = "https://github.com/org/repo.git"
     rewrite = tmp_path / "rewrite.gitconfig"
     rewrite.write_text(
         f'[url "file:///tmp/attacker"]\n    insteadOf = {canonical}\n'
@@ -489,6 +497,7 @@ def test_production_remote_policy_neutralizes_inherited_url_rewrites(
         encoding="utf-8",
     )
     monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+    monkeypatch.setenv("GIT_CONFIG", str(rewrite))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(rewrite))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(rewrite))
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
@@ -499,19 +508,20 @@ def test_production_remote_policy_neutralizes_inherited_url_rewrites(
         f"'url.file:///tmp/attacker-push.pushInsteadOf={canonical}'",
     )
 
-    preflight_module._validate_remote_policy(
-        _production_config(repo, tmp_path), repo
+    preflight_module.validate_remote_operation(
+        authenticated_config, repo
     )
 
 
 @pytest.mark.parametrize("rewrite_name", ["insteadOf", "pushInsteadOf"])
 def test_production_remote_policy_covers_linked_worktree_context(
+    authenticated_config,
     repo: Path,
     tmp_path: Path,
     rewrite_name: str,
 ) -> None:
     _add_canonical_remote(repo)
-    canonical = "git@github.com:org/repo.git"
+    canonical = "https://github.com/org/repo.git"
     attacker = "ssh://git@attacker.example/evil.git"
     worktree = tmp_path / "task-worktree"
     subprocess.run(
@@ -536,8 +546,8 @@ def test_production_remote_policy_covers_linked_worktree_context(
         check=True,
     )
 
-    config = _production_config(repo, tmp_path)
-    protected = {**os.environ, **preflight_module.git_remote_environment(config)}
+    config = authenticated_config
+    protected = {key: value for key, value in {**os.environ, **preflight_module.git_remote_environment(config)}.items() if value is not None}
     command = ["git", "remote", "get-url"]
     if rewrite_name == "pushInsteadOf":
         command.append("--push")
@@ -564,10 +574,11 @@ def test_production_remote_policy_covers_linked_worktree_context(
     )
 
     with pytest.raises(StewardPreflightError, match="URL rewriting"):
-        preflight_module._validate_remote_policy(config, repo)
+        preflight_module.validate_remote_operation(config, repo)
 
 
 def test_production_remote_policy_ignores_stale_prunable_worktree(
+    authenticated_config,
     repo: Path, tmp_path: Path
 ) -> None:
     _add_canonical_remote(repo)
@@ -589,8 +600,8 @@ def test_production_remote_policy_ignores_stale_prunable_worktree(
     assert "prunable gitdir file points to non-existent location" in listing.stdout
     assert preflight_module._linked_worktree_paths(repo) == ()
 
-    preflight_module._validate_remote_policy(
-        _production_config(repo, tmp_path), repo
+    preflight_module.validate_remote_operation(
+        authenticated_config, repo
     )
 
 
@@ -602,20 +613,21 @@ def test_production_remote_policy_ignores_stale_prunable_worktree(
     ],
 )
 def test_production_remote_policy_rejects_multiple_effective_targets(
+    authenticated_config,
     repo: Path, tmp_path: Path, push: bool, expected_error: str
 ) -> None:
     _add_canonical_remote(repo)
     command = ["git", "remote", "set-url", "--add"]
     if push:
         command.append("--push")
-    command.extend(("origin", "git@github.com:org/second.git"))
+    command.extend(("origin", "https://github.com/org/second.git"))
     subprocess.run(command, cwd=repo, check=True)
     if push:
         subprocess.run(command, cwd=repo, check=True)
 
     with pytest.raises(StewardPreflightError, match=expected_error):
-        preflight_module._validate_remote_policy(
-            _production_config(repo, tmp_path), repo
+        preflight_module.validate_remote_operation(
+            authenticated_config, repo
         )
 
 
@@ -643,7 +655,7 @@ def test_daemon_preflights_push_main_remote(
     logs: list[str] = []
     commands: list[tuple[list[str], dict[str, str] | None]] = []
     original_run_command = preflight_module.run_command
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def recording_run_command(command, cwd, **kwargs):
         commands.append((command, kwargs.get("env")))
@@ -653,7 +665,7 @@ def test_daemon_preflights_push_main_remote(
         preflight_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -663,7 +675,7 @@ def test_daemon_preflights_push_main_remote(
     daemon.startup_reconcile()
 
     expected_remote_env = {
-        "GIT_SSH_COMMAND": ssh_command,
+        "GH_TOKEN": github_token,
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -682,7 +694,7 @@ def test_daemon_preflights_push_main_remote(
         if command[:2] in (["git", "rev-parse"], ["git", "rev-list"])
         or command[1:2] == ["commit-tree"]
     ]
-    assert all("GIT_SSH_COMMAND" not in (env or {}) for _command, env in local_commands)
+    assert all("GH_TOKEN" not in (env or {}) for _command, env in local_commands)
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
 
 def test_daemon_preflight_rejects_divergent_local_main(
@@ -1018,3 +1030,112 @@ def test_cli_daemon_refuses_second_instance(
     assert result.exit_code == 1
     assert "Steward daemon already running" in result.output
     assert str(config.state_dir / "daemon.lock") in result.output
+
+
+def test_production_preflight_does_not_publish_credential_subprocess_output(authenticated_config, repo, tmp_path):
+    result = preflight_module.CommandResult(
+        args=["git", "fetch"], cwd=repo, returncode=128,
+        stdout="synthetic-secret-stdout", stderr="synthetic-secret-stderr",
+    )
+    error = preflight_module._preflight_error(authenticated_config, "fetch remote main", result)
+    assert "synthetic-secret" not in str(error)
+    assert "fetch remote main" in str(error)
+
+
+@pytest.mark.parametrize("location", ("local", "include", "worktree-include"))
+@pytest.mark.parametrize(("key", "value"), (
+    ("http.https://github.com/org/repo.git.sslVerify", "false"),
+    ("http.https://github.com/org/repo.git.followRedirects", "true"),
+    ("http.https://github.com/org/repo.git.extraHeader", "X-Untrusted: true"),
+    ("http.https://github.com/org/repo.git.sslCAInfo", "/untrusted/ca.pem"),
+    ("http.sslVerify", "false"),
+    ("credential.https://github.com/org/repo.git.helper", "!untrusted-helper"),
+    ("credential.https://github.com/org/repo.git.useHttpPath", "true"),
+    ("credential.helper", "!untrusted-helper"),
+))
+def test_production_rejects_repository_transport_overrides_before_network(
+    authenticated_config,
+    repo, tmp_path, monkeypatch, location, key, value,
+):
+    _add_canonical_remote(repo)
+    context = repo
+    if location == "worktree-include":
+        context = tmp_path / "linked-worktree"
+        subprocess.run(["git", "worktree", "add", "--detach", str(context), "HEAD"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "extensions.worktreeConfig", "true"], cwd=repo, check=True)
+    if location == "local":
+        subprocess.run(["git", "config", "--local", key, value], cwd=context, check=True)
+    else:
+        included = tmp_path / "untrusted.gitconfig"
+        subprocess.run(["git", "config", "--file", str(included), key, value], cwd=context, check=True)
+        scope = "--worktree" if location == "worktree-include" else "--local"
+        subprocess.run(["git", "config", scope, "include.path", str(included)], cwd=context, check=True)
+    config = authenticated_config
+    if key.startswith("http.https://"):
+        # Native Git proves why broad command-scope settings aren't sufficient:
+        # the narrower repository URL wins even with our authenticated env.
+        effective = run_command(
+            ["git", "config", "--no-file", "--get-urlmatch", "http." + key.rsplit(".", 1)[-1],
+             "https://github.com/org/repo.git"],
+            cwd=context, env=preflight_module.git_remote_environment(config), check=True,
+        )
+        assert effective.stdout.strip() == value
+    original = preflight_module.run_command
+    commands = []
+
+    def recording(command, cwd, **kwargs):
+        commands.append(command)
+        assert command[:2] not in (["git", "fetch"], ["git", "push"])
+        return original(command, cwd, **kwargs)
+
+    monkeypatch.setattr(preflight_module, "run_command", recording)
+    with pytest.raises(StewardPreflightError, match="HTTP and credential configuration is not allowed"):
+        preflight_module.preflight_remote_push(config)
+    assert commands
+
+
+@pytest.mark.parametrize("dry_run", (False, True))
+def test_local_inline_preflight_checks_policy_without_remote_push(repo, tmp_path, monkeypatch, dry_run):
+    _add_canonical_remote(repo)
+    subprocess.run(
+        ["git", "config", "http.https://github.com/org/repo.git.sslVerify", "false"],
+        cwd=repo, check=True,
+    )
+    config = replace(
+        _production_config(repo, tmp_path), dry_run=dry_run,
+        deployment=StewardDeploymentConfig(),
+    )
+    original = preflight_module.run_command
+
+    def local_only(command, **kwargs):
+        assert command[:2] not in (["git", "fetch"], ["git", "push"])
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(preflight_module, "run_command", local_only)
+    with pytest.raises(StewardPreflightError, match="HTTP and credential"):
+        preflight_module.run_preflight(config, check_remote_push=False)
+
+
+def test_tokenless_local_remote_operation_keeps_ambient_policy(repo, monkeypatch):
+    monkeypatch.setattr(
+        preflight_module, "_validate_remote_policy",
+        lambda *_: pytest.fail("tokenless local mode must retain ambient authentication"),
+    )
+    preflight_module.validate_remote_operation(StewardConfig(repo_root=repo), repo)
+
+
+@pytest.mark.parametrize("remote", (
+    "https://synthetic-private-token@github.com/org/repo.git",
+    "http://github.com/org/repo.git", "git@github.com:org/repo.git",
+    "https://example.invalid/org/repo.git",
+))
+@pytest.mark.parametrize("direction", ("url", "pushurl"))
+def test_authenticated_remote_policy_rejects_unsafe_urls_redacted(
+    repo, authenticated_config, remote, direction,
+):
+    _add_canonical_remote(repo)
+    subprocess.run(["git", "config", f"remote.origin.{direction}", remote], cwd=repo, check=True)
+    with pytest.raises(StewardPreflightError, match="credential-free GitHub HTTPS") as error:
+        preflight_module.validate_remote_operation(authenticated_config, repo)
+    assert "synthetic-private-token" not in str(error.value)
+    assert len(str(error.value)) < 200

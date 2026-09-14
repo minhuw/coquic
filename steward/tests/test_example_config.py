@@ -74,7 +74,7 @@ def test_production_remote_push_rejects_pushurl_before_network(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     subprocess.run(
-        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+        ["git", "remote", "add", "origin", "https://github.com/org/repo.git"],
         cwd=repo,
         check=True,
     )
@@ -111,7 +111,7 @@ def test_production_remote_push_rejects_pushurl_before_network(
         return original_run_command(command, cwd, **kwargs)
 
     monkeypatch.setattr(preflight_module, "run_command", recording_run_command)
-    with pytest.raises(StewardPreflightError, match="credential-free SSH"):
+    with pytest.raises(StewardPreflightError, match="credential-free GitHub HTTPS"):
         preflight_module.preflight_remote_push(config)
     assert not any(command[:2] == ["git", "fetch"] for command in commands)
 
@@ -414,30 +414,11 @@ def test_config_rejects_removed_deployment_keys(
         load_config(repo_root=repo, config_path=config_path)
 
 
-@pytest.mark.parametrize(
-    "missing_path",
-    ("github_token_path", "git_ssh_key_path", "git_known_hosts_path"),
-)
-def test_enabled_deployment_requires_split_credential_paths(
-    repo: Path, tmp_path: Path, missing_path: str
-) -> None:
-    paths = {
-        "github_token_path": "/run/secrets/github-token",
-        "git_ssh_key_path": "/run/secrets/git-ssh-key",
-        "git_known_hosts_path": "/etc/coquic-steward/known_hosts",
-    }
-    paths.pop(missing_path)
-    config_path = tmp_path / "missing-deployment-credential.toml"
-    config_path.write_text(
-        "[steward.deployment]\n"
-        "enabled = true\n"
-        + "\n".join(f'{key} = "{value}"' for key, value in paths.items())
-        + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match=missing_path):
-        load_config(repo_root=repo, config_path=config_path)
+def test_deployment_rejects_legacy_github_token_path(repo, tmp_path):
+    path = tmp_path / "legacy.toml"
+    path.write_text('[steward.deployment]\ngithub_token_path = "/private/token"\n')
+    with pytest.raises(ValueError, match=r"authentication.*github_token"):
+        load_config(repo_root=repo, config_path=path)
 
 
 def test_config_rejects_unknown_limits_keys(repo: Path, tmp_path: Path) -> None:
@@ -484,6 +465,7 @@ local_codex_test_harness = {str(local_codex_test_harness).lower()}
 [steward.authentication]
 proxy_url = "http://proxy.test:8080/v1"
 api_key = "compose-test-key"
+github_token = "compose-github-token"
 
 [steward.container]
 enabled = {str(container_enabled).lower()}
@@ -494,9 +476,6 @@ state_host_path = {str(home)!r}
 enabled = {str(deployment_enabled).lower()}
 home = {str(home)!r}
 repository = {str(canonical)!r}
-github_token_path = "/run/secrets/github-token"
-git_ssh_key_path = "/run/secrets/git-ssh-key"
-git_known_hosts_path = "/etc/coquic-steward/known_hosts"
 min_free_bytes = 100
 recovery_free_bytes = 200
 max_owned_docker_bytes = 1000
@@ -850,3 +829,16 @@ github_repository = "minhuw/coquic"
     assert config.codex_sandbox == "read-only"
     assert config.github_repository == "minhuw/global"
     assert config.enabled_signals == ("codacy",)
+
+
+@pytest.mark.parametrize("legacy_key", ("git_ssh_key_path", "git_known_hosts_path"))
+def test_legacy_git_credentials_have_bounded_migration_guidance(repo, tmp_path, legacy_key):
+    path = tmp_path / "legacy.toml"
+    path.write_text(f'[steward.deployment]\n{legacy_key} = "private-value-not-for-errors"\n')
+    with pytest.raises(ValueError) as error:
+        load_config(repo_root=repo, config_path=path)
+    message = str(error.value)
+    assert "[steward.authentication].github_token" in message
+    assert "https://github.com/OWNER/REPO" in message
+    assert "private-value-not-for-errors" not in message
+    assert len(message) < 300

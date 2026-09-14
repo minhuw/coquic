@@ -11,8 +11,9 @@ credentials, initializes SQLite, or contacts a receiver.
 
 Set one absolute `COQUIC_HOME` on the host and in the daemon. The only clone is
 `$COQUIC_HOME/repository/`. Production remotes must be credential-free
-SCP-style or `ssh://` URLs; HTTPS, other transports, and embedded passwords are
-refused. Bootstrap refuses a dirty, detached, wrong-remote, wrong-branch,
+`https://github.com/OWNER/REPO` URLs; SSH, other transports, userinfo,
+query strings, fragments, and non-GitHub hosts are refused. Bootstrap refuses a
+dirty, detached, wrong-remote, wrong-branch,
 non-fast-forward, interactive, or ambiguous checkout and never resets an
 existing clone or uses a human checkout. Local-path remotes are retained only
 by `STEWARD_MANAGE_FAKE=1` test fixtures.
@@ -23,21 +24,18 @@ individual read-only files:
 
 | Host path | Compose target | Purpose |
 | --- | --- | --- |
-| `$STEWARD_CONFIG_PATH` (normally `$COQUIC_HOME/private/runtime/steward.toml`) | `/etc/coquic-steward/steward.toml` | private daemon config with inline CLIProxyAPI client key |
-| `$COQUIC_HOME/private/credentials/github-token` | `/run/secrets/github-token` | GitHub API token |
-| `$COQUIC_HOME/private/credentials/git-ssh-key` | `/run/secrets/git-ssh-key` | Git SSH key |
+| `$STEWARD_CONFIG_PATH` (normally `$COQUIC_HOME/private/runtime/steward.toml`) | `/etc/coquic-steward/steward.toml` | private daemon config with inline GitHub token and CLIProxyAPI client key |
 | `$COQUIC_HOME/private/credentials/d1-read-token` | `/run/secrets/d1-read-token` | Steward D1 publication token |
 | `$COQUIC_HOME/private/credentials/r2-access-key-id` | `/run/secrets/r2-access-key-id` | public R2 access-key ID |
 | `$COQUIC_HOME/private/credentials/r2-secret-access-key` | `/run/secrets/r2-secret-access-key` | public R2 secret access key |
-| `$COQUIC_HOME/private/credentials/known_hosts` | `/etc/coquic-steward/known_hosts` | SSH host verification |
 
 The three publication files are produced by
 `infra/cloudflare/scripts/deploy-production.sh`. All credential files are
 regular, non-symlink files with mode `0600`, owned by `STEWARD_UID`; the
 credential directory is mode `0700`. The daemon TOML and its backups are also
 secrets: use regular non-symlink files owned by the daemon UID, mode `0600`
-(`0400` is also accepted). Only `[steward.authentication].api_key` is inline;
-GitHub, SSH, D1, and R2 credentials remain separate files. Secret values never
+(`0400` is also accepted). `[steward.authentication].github_token` and `api_key` are inline in the same
+private TOML; D1 and R2 credentials remain separate files. Secret values never
 enter Compose YAML, `.env`, image labels, process arguments, SQLite, logs, or
 public objects. Never print the private TOML or dump a real rendered Compose
 configuration.
@@ -52,7 +50,14 @@ a read-only worktree plus bounded output and store mounts. The planner has only
 sealed history, one private session, and output staging.
 
 The daemon runs as the configured numeric host UID/GID and receives the local
-Docker socket group. Its container uses a read-only root with bounded `/tmp`
+Docker socket group. Locked lifecycle operations provision private, daemon-owned
+`private/runtime/daemon-passwd` and `daemon-group` files beneath `$COQUIC_HOME`,
+bound read-only at `/etc/passwd` and `/etc/group` for OpenSSH numeric-UID lookup.
+IDs must be canonical decimal integers in `1..4294967294`; the Docker group is
+listed only once when it matches the primary group. Existing stopped deployments
+receive these files on `init`/`start`; unchanged files retain their inodes, and
+`config`, `status`, and live health reads never generate them. These mounts do
+not apply to task or validation workers. Its container uses a read-only root with bounded `/tmp`
 and `/run` tmpfs. Only container invocations use Codex's externally sandboxed
 execution flag: Docker mounts, per-role UIDs/groups, dropped capabilities, and
 resource limits provide isolation without nested user namespaces. Local Codex
@@ -109,19 +114,41 @@ Set these exact, non-secret source-identity values in that private environment
 before bootstrap:
 
 ```sh
-COQUIC_REMOTE_URL=git@github.com:minhuw/coquic.git
+COQUIC_REMOTE_URL=https://github.com/minhuw/coquic.git
 STEWARD_EXPECTED_REMOTE=origin
 STEWARD_EXPECTED_BRANCH=main
 ```
 
-The SSH URL contains no password, token, or other credential; host-side
-bootstrap Git authenticates with the canonical `GIT_SSH_KEY_PATH` and verifies
-hosts with `GIT_KNOWN_HOSTS_PATH`, while the same key is mounted for the daemon.
+This is also the default remote when `COQUIC_REMOTE_URL` is unset. The HTTPS
+URL contains no userinfo, password, or token. Host bootstrap and daemon Git/API
+calls use `[steward.authentication].github_token` from the same private TOML
+selected by `STEWARD_CONFIG_PATH`. There is no GitHub token-file fallback. Git
+uses the native `gh auth git-credential` helper with that call's token in its
+process environment, never in argv or persisted Git configuration. Do not run
+`gh auth setup-git`, install host/global credential helpers, or embed tokens in
+remote URLs. No Git SSH key or known-hosts file is required.
+
+Use an expiring, repository-selected fine-grained PAT for `minhuw/coquic` with
+Contents **read and write** for fetch/push. Grant API permissions only for
+enabled features: Issues read/write for issue updates, Pull requests read/write
+for PR workflows, and Actions read for workflow/run inspection (write only if
+enabling workflow dispatch). Review the enabled workers against GitHub's API
+permission requirements. Rotate the inline token before expiry, preserving
+the TOML owner and private mode (including backups), then restart the daemon. GitHub App
+installation tokens are a future option, not implemented provisioning.
+
+Existing SSH deployments fail explicitly; operators must review and migrate
+both the private environment/TOML (remove legacy SSH path fields) and the
+checkout's fetch/push URLs to HTTPS. Management never rewrites private config or
+an existing remote automatically. Remove any local URL rewrite/credential
+configuration before preflight. The numeric-UID NSS identity mounts remain
+required independently of the Git transport.
+
 Fresh bootstrap runs Git in a clean configuration environment, so system,
 global, and environment-injected URL rewrites cannot substitute the configured
 canonical source. An existing `$COQUIC_HOME/repository/` checkout must use
-`origin` at this exact URL and branch `main`; any remote string mismatch is
-refused.
+`origin` at this exact URL and branch `main`; every fetch and push URL must
+match the configured URL exactly. Any remote string mismatch is refused.
 
 The Cloudflare operator reviews the read-only preview, which retains the
 accepted plan privately, and then runs
@@ -158,6 +185,7 @@ or applies an unreviewed provider change.
    [steward.authentication]
    proxy_url = "https://proxy.example.test/v1"
    api_key = "fake-cliproxyapi-client-key-replace-me"
+   github_token = "fake-github-token-replace-me"
 
    [steward.container]
    enabled = true
@@ -178,9 +206,6 @@ or applies an unreviewed provider change.
    expected_remote = "origin"
    expected_branch = "main"
    compose_project = "coquic-steward"
-   github_token_path = "/run/secrets/github-token"
-   git_ssh_key_path = "/run/secrets/git-ssh-key"
-   git_known_hosts_path = "/etc/coquic-steward/known_hosts"
    # Compose supplies release_id, daemon_image_id, task_image_id, and
    # validation_image_id from STEWARD_RELEASE_ID and the three immutable
    # STEWARD_*_IMAGE values; do not replace them with mutable image tags.
@@ -211,8 +236,8 @@ or applies an unreviewed provider change.
    The checked-in example is intentionally local-safe: authentication is
    commented out, container and deployment sections are disabled, and the test
    harness is enabled. Missing authentication is allowed for credential-free
-   inspection and idle fixtures, but production preflight requires both
-   `proxy_url` and `api_key`. Copying the example without this production
+   inspection and idle fixtures, but production preflight requires
+   `github_token` plus both `proxy_url` and `api_key`. Copying the example without this production
    override is intentionally rejected when Compose supplies `STEWARD_RELEASE_ID`.
 
    The API key is a **CLIProxyAPI client key**, not the proxy management key,
@@ -231,12 +256,21 @@ or applies an unreviewed provider change.
    source/mount. Configure the inline authentication pair instead; no separate
    Codex credential file is required.
 
+   GitHub migration: remove `deployment.github_token_path`, the old
+   `GITHUB_TOKEN_PATH` deployment variable, and the GitHub secret source/mount.
+   Set `[steward.authentication].github_token` in the same private TOML as the
+   model proxy `api_key`; the GitHub token is independent of the model
+   `proxy_url`/`api_key` pair. No file or ambient-login fallback is supported.
+   Retire the old token file and protect any backups as secrets. Restart the
+   daemon after changing the token (recreate the container if an atomic file
+   replacement leaves its bind mount pointing at the old inode).
+
    Replace the example host prefix in `staging_root` when `COQUIC_HOME` is
    different, and create that real, non-symlink directory with mode `0700`
    before config validation. The credential paths in this override are
    daemon-container targets, not host paths; their host sources remain the
-   individual files listed in the credential table. Keep those GitHub/cloud/SSH
-   values out of TOML; only the CLIProxyAPI client key belongs inline.
+   individual D1/R2 files listed in the credential table. Keep cloud credential
+   values out of TOML; GitHub and CLIProxyAPI credentials belong inline.
 3. Load the non-secret environment in the operator shell and validate the
    production-shaped Compose file:
 
@@ -244,10 +278,11 @@ or applies an unreviewed provider change.
    bash steward/containers/manage.sh config
    ```
 
-4. Run bootstrap. It validates config/credential file metadata without reading
-   or printing values, takes the deployment lock, creates the private directory
+4. Run bootstrap. It validates config/credential file metadata without printing
+   values, takes the deployment lock, creates the private directory
    skeleton, clones the configured remote only when the canonical clone is
-   absent, builds and verifies images, and records the first release:
+   absent (reading inline GitHub authentication through the shared safe TOML
+   parser), builds and verifies images, and records the first release:
 
    ```sh
    bash steward/containers/manage.sh bootstrap

@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 import stat
-import tomllib
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +14,8 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
+from .github_auth import validate_authentication_section, validate_github_token
+from .private_config import _read_toml
 from .models import CodexStage
 DEFAULT_ENABLED_SIGNALS = (
     "github-actions:ci",
@@ -134,9 +135,6 @@ _DEPLOYMENT_ALLOWED_KEYS = frozenset(
         "expected_remote",
         "expected_branch",
         "compose_project",
-        "github_token_path",
-        "git_ssh_key_path",
-        "git_known_hosts_path",
         "release_id",
         "daemon_image",
         "daemon_image_id",
@@ -167,11 +165,6 @@ _LIMITS_ALLOWED_KEYS = frozenset(
     }
 )
 _TELEMETRY_ALLOWED_KEYS = frozenset({"billing_mode"})
-_DEPLOYMENT_CREDENTIAL_TARGETS = {
-    "github_token_path": Path("/run/secrets/github-token"),
-    "git_ssh_key_path": Path("/run/secrets/git-ssh-key"),
-    "git_known_hosts_path": Path("/etc/coquic-steward/known_hosts"),
-}
 
 
 def _require_allowed_keys(
@@ -236,12 +229,18 @@ def _authentication_text(value: object, *, maximum: int) -> str:
 
 @dataclass(frozen=True)
 class StewardAuthenticationConfig:
-    """Inline proxy authentication; secret access must always be deliberate."""
+    """Inline model and GitHub authentication; secret access must always be deliberate."""
 
     proxy_url: str | None = None
     api_key: SecretStr | None = field(default=None, repr=False)
+    github_token: SecretStr | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.github_token is not None:
+            token = self.github_token
+            if isinstance(token, SecretStr):
+                token = token.get_secret_value()
+            object.__setattr__(self, "github_token", SecretStr(validate_github_token(token)))
         if self.proxy_url is None and self.api_key is None:
             return
         proxy_url = _authentication_text(self.proxy_url, maximum=2048)
@@ -283,15 +282,7 @@ class StewardAuthenticationConfig:
 
 
 def _authentication_config(raw: object) -> StewardAuthenticationConfig:
-    if (
-        not isinstance(raw, dict)
-        or set(raw) != {"proxy_url", "api_key"}
-        or raw["proxy_url"] is None
-        or raw["api_key"] is None
-    ):
-        raise ValueError(
-            "steward.authentication requires exactly proxy_url and api_key"
-        )
+    validate_authentication_section(raw)
     return StewardAuthenticationConfig(**raw)
 
 
@@ -612,9 +603,6 @@ class StewardDeploymentConfig:
     expected_remote: str = "origin"
     expected_branch: str = "main"
     compose_project: str = "coquic-steward"
-    github_token_path: Path | None = None
-    git_ssh_key_path: Path | None = None
-    git_known_hosts_path: Path | None = None
     release_id: str | None = None
     daemon_image: str = "coquic-steward-daemon"
     daemon_image_id: str | None = None
@@ -639,9 +627,6 @@ class StewardDeploymentConfig:
         for name in (
             "home",
             "repository",
-            "github_token_path",
-            "git_ssh_key_path",
-            "git_known_hosts_path",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -945,18 +930,6 @@ class StewardConfig:
         return self.repository_path
 
     @property
-    def github_token_path(self) -> Path | None:
-        return self.deployment.github_token_path
-
-    @property
-    def git_ssh_key_path(self) -> Path | None:
-        return self.deployment.git_ssh_key_path
-
-    @property
-    def git_known_hosts_path(self) -> Path | None:
-        return self.deployment.git_known_hosts_path
-
-    @property
     def host_uid(self) -> int | None:
         return self.deployment.host_uid
 
@@ -1116,6 +1089,7 @@ def load_config(
         "steward.container", steward.get("container", {}), _CONTAINER_ALLOWED_KEYS
     )
     publication_data = steward.get("publication", {})
+    _reject_legacy_git_credentials(steward.get("deployment", {}))
     deployment_data = _require_allowed_keys(
         "steward.deployment", steward.get("deployment", {}), _DEPLOYMENT_ALLOWED_KEYS
     )
@@ -1250,7 +1224,8 @@ def _reject_embedded_secrets(
             child_path = (*path, str(key))
             normalized = str(key).lower().replace("-", "_")
             if (
-                child_path != ("steward", "authentication", "api_key")
+                child_path not in {("steward", "authentication", "api_key"),
+                                   ("steward", "authentication", "github_token")}
                 and any(part in normalized for part in _SECRET_KEY_PARTS)
                 and not normalized.endswith(("_path", "_file", "_identity"))
             ):
@@ -1285,20 +1260,19 @@ def _container_config(raw: object, root: Path) -> StewardContainerConfig:
     )
 
 
+def _reject_legacy_git_credentials(raw: object) -> None:
+    if isinstance(raw, dict) and {"github_token_path", "git_ssh_key_path", "git_known_hosts_path"} & raw.keys():
+        raise ValueError(
+            "deployment credential paths are no longer supported; use "
+            "[steward.authentication].github_token in private TOML "
+            "and use a credential-free https://github.com/OWNER/REPO remote"
+        )
+
+
 def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
+    _reject_legacy_git_credentials(raw)
     data = _require_allowed_keys("steward.deployment", raw, _DEPLOYMENT_ALLOWED_KEYS)
     enabled = _strict_bool(data.get("enabled", False), "deployment.enabled")
-    if enabled:
-        missing = [
-            name for name in _DEPLOYMENT_CREDENTIAL_TARGETS
-            if data.get(name) in (None, "")
-        ]
-        if missing:
-            raise ValueError("enabled deployment requires " + ", ".join(missing))
-        for name, target in _DEPLOYMENT_CREDENTIAL_TARGETS.items():
-            configured = Path(str(data[name])).expanduser()
-            if configured != target:
-                raise ValueError(f"deployment.{name} must use {target}")
     home_value = data.get("home")
     if home_value is None and enabled:
         home_value = os.getenv("COQUIC_HOME")
@@ -1317,21 +1291,6 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
         expected_remote=str(data.get("expected_remote", "origin")),
         expected_branch=str(data.get("expected_branch", "main")),
         compose_project=str(data.get("compose_project", "coquic-steward")),
-        github_token_path=(
-            Path(data["github_token_path"]).expanduser()
-            if data.get("github_token_path") is not None
-            else None
-        ),
-        git_ssh_key_path=(
-            Path(data["git_ssh_key_path"]).expanduser()
-            if data.get("git_ssh_key_path") is not None
-            else None
-        ),
-        git_known_hosts_path=(
-            Path(data["git_known_hosts_path"]).expanduser()
-            if data.get("git_known_hosts_path") is not None
-            else None
-        ),
         release_id=(
             os.getenv("STEWARD_RELEASE_ID")
             if enabled and os.getenv("STEWARD_RELEASE_ID")
@@ -1476,39 +1435,6 @@ def _global_config_path() -> Path:
         Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser()
         / "steward.toml"
     )
-
-
-def _read_toml(path: Path, *, required: bool) -> dict[str, Any]:
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        if required:
-            raise FileNotFoundError("Steward configuration file is unavailable") from None
-        return {}
-    except OSError:
-        raise ValueError("Steward configuration must be a readable non-symlink regular file") from None
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("Steward configuration must be a non-symlink regular file")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            try:
-                data = tomllib.load(handle)
-            except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-                raise ValueError("invalid Steward TOML configuration") from None
-        steward = data.get("steward", data)
-        if isinstance(steward, dict) and "authentication" in steward:
-            metadata = os.fstat(descriptor)
-            if (
-                metadata.st_uid != os.geteuid()
-                or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o400}
-            ):
-                raise ValueError(
-                    "steward.authentication requires a configuration file owned by "
-                    "the current user with mode 0600 or 0400"
-                )
-        return data
-    finally:
-        os.close(descriptor)
 
 
 def _resolve_executable(value: str) -> str:

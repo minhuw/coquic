@@ -204,13 +204,16 @@ startup default; changing mode requires a restart, and local commits remain
 local until live mode is explicitly selected. The trusted daemon alone
 receives the D1 and R2 credential files; task, planner, and validation
 containers receive none of those files or the daemon's private TOML. Model
-authentication is separate: `[steward.authentication]` holds a proxy URL and
-inline CLIProxyAPI client key in that private, daemon-owned `0600`/`0400` TOML
+authentication is separate from publication: `[steward.authentication]` holds
+a proxy URL, inline CLIProxyAPI client key, and independent inline `github_token` in that private, daemon-owned `0600`/`0400` TOML
 (and equally protected backups). The existing stdin wrapper supplies the key
 for planner, task, and resume invocations without Codex auth files. Restart the
-daemon after authentication changes; GitHub/SSH/cloud keys remain separate
-files. Credential creation, Cloudflare bootstrap, Site
-configuration, bootstrap, start, upgrades, and rollback belong to the
+daemon after authentication changes, including GitHub token rotation. Only cloud
+keys remain separate files. Remove legacy `deployment.github_token_path`,
+`GITHUB_TOKEN_PATH`, and the GitHub secret source/mount; no token-file fallback
+is supported. HTTPS Git uses the same inline GitHub token as API operations; no SSH
+key or host/global Git credential setup is required. Credential creation,
+Cloudflare bootstrap, Site configuration, bootstrap, start, upgrades, and rollback belong to the
 [container operations runbook](CONTAINER_OPERATIONS.md) and the infrastructure
 runbooks. This document intentionally contains no credentials, host paths, or
 live deployment commands. Historical raw archives remain private.

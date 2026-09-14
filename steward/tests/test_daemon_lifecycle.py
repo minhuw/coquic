@@ -4402,7 +4402,7 @@ def test_persisted_push_reconciliation_authenticates_fetch_only(
         store, "task_execution_mode", lambda _task_id: ExecutionMode.live
     )
     commands: list[tuple[list[str], dict[str, str] | None]] = []
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def fake_run_command(command, cwd, *, env=None, **_kwargs):
         commands.append((command, env))
@@ -4413,7 +4413,7 @@ def test_persisted_push_reconciliation_authenticates_fetch_only(
         daemon_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -4426,7 +4426,7 @@ def test_persisted_push_reconciliation_authenticates_fetch_only(
         env for command, env in commands if command[:2] == ["git", "fetch"]
     )
     assert fetch_env == {
-        "GIT_SSH_COMMAND": ssh_command,
+        "GH_TOKEN": github_token,
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
     }

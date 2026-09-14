@@ -12,6 +12,13 @@ and local proof belong to the canonical [container operations runbook](CONTAINER
 This README is a product overview and navigation entry point; it does not
 repeat the operational contract.
 
+Production Git uses credential-free HTTPS (default
+`https://github.com/minhuw/coquic.git`) and private inline `[steward.authentication].github_token` for
+both Git and API calls. Use a repository-selected, expiring fine-grained PAT
+with Contents read/write plus API permissions for enabled features; see the
+[operations runbook](CONTAINER_OPERATIONS.md#ordered-launch). Tokens are never embedded in remote URLs or persisted in host/global Git config.
+Legacy SSH remotes/configuration require an explicit operator migration.
+
 ## Quick start
 
 Steward reads `$COQUIC_HOME/steward.toml` (`~/.coquic` by default). For local
@@ -32,10 +39,13 @@ inspection and idle fixtures. Model execution uses an explicitly configured
 `proxy_url` and inline `api_key` (a CLIProxyAPI **client** key, not its management
 key or an upstream login). Keep this TOML and backups owned by the daemon UID,
 regular/non-symlink and mode `0600` (`0400` also accepted). Never commit or print
-them. Production requires both values; see the [private config and network
+them. Production requires the GitHub token and both model values; see the [private config and network
 setup](CONTAINER_OPERATIONS.md#ordered-launch). They apply to planner, task, and
 resume invocations, with no separate Codex credential/auth file. Restart the
-daemon after changes.
+daemon after changes, including GitHub token rotation. The GitHub token is
+independent of the model `proxy_url`/`api_key` pair and lives in the same private
+TOML. Remove legacy `deployment.github_token_path`, `GITHUB_TOKEN_PATH`, and
+the GitHub secret source/mount; no token-file fallback is supported.
 
 Migration: nonempty `codex_profile` and `COQUIC_STEWARD_CODEX_PROFILE` are no
 longer supported. Steward's private Codex homes never import global profiles,
@@ -140,7 +150,7 @@ the output schema, and read-only sealed prior run history.
 The locked Docker bridge provides the outbound provider transport required by
 `codex exec`. The planner has no host networking, network-administration
 capability, repository, worktree, SQLite/WAL, Docker socket, daemon
-configuration, or GitHub/SSH credential. Failed or invalid output seals a
+configuration, or GitHub credential. Failed or invalid output seals a
 failed run, leaves inputs pending, and uses bounded persistent backoff.
 Accepted, duplicate, rejected, and capacity-skipped proposals remain ordinal
 evidence.

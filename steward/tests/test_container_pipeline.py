@@ -1441,7 +1441,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     )
     commands: list[tuple[list[str], dict[str, str] | None]] = []
     original_run_command = worktree_module.run_command
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def recording_run_command(command, cwd, *, env=None, **kwargs):
         commands.append((command, env))
@@ -1451,7 +1451,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
         worktree_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -1463,7 +1463,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
         env for command, env in commands if command[:2] == ["git", "fetch"]
     )
     assert fetch_env == {
-        "GIT_SSH_COMMAND": ssh_command,
+        "GH_TOKEN": github_token,
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -1486,7 +1486,7 @@ def test_worktree_reset_authenticates_fetch_but_not_local_reset(
     config: StewardConfig, monkeypatch
 ) -> None:
     commands: list[tuple[list[str], dict[str, str] | None]] = []
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def fake_run_command(command, cwd, *, env=None, **_kwargs):
         commands.append((command, env))
@@ -1496,7 +1496,7 @@ def test_worktree_reset_authenticates_fetch_but_not_local_reset(
         worktree_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -1506,7 +1506,7 @@ def test_worktree_reset_authenticates_fetch_but_not_local_reset(
     Worktrees(config).reset_to_main(config.repo_root)
 
     assert commands[0][1] == {
-        "GIT_SSH_COMMAND": ssh_command,
+        "GH_TOKEN": github_token,
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -1520,7 +1520,7 @@ def test_executor_remote_fetch_authenticates_but_local_checks_do_not(
     store = TaskStore.create(config.db_path)
     executor = StewardExecutor(config, store, runner=FakeRunner(config))
     commands: list[tuple[list[str], dict[str, str] | None]] = []
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def fake_run_command(command, cwd, *, env=None, **_kwargs):
         commands.append((command, env))
@@ -1531,7 +1531,7 @@ def test_executor_remote_fetch_authenticates_but_local_checks_do_not(
         executor_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -1546,7 +1546,7 @@ def test_executor_remote_fetch_authenticates_but_local_checks_do_not(
     ]
     assert fetch_envs == [
         {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         }
@@ -2854,7 +2854,7 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
     real_command = run_command
     daemon_commands: list[tuple[list[str], dict[str, str] | None]] = []
     real_daemon_command = daemon_module.run_command
-    ssh_command = "ssh -i /tmp/strict-ssh"
+    github_token = "synthetic-git-token"
 
     def command(argv, cwd, *, timeout=None, **_kwargs):
         if argv and argv[0] == "gh":
@@ -2871,7 +2871,7 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
         daemon_module,
         "git_remote_environment",
         lambda _config: {
-            "GIT_SSH_COMMAND": ssh_command,
+            "GH_TOKEN": github_token,
             "GCM_INTERACTIVE": "never",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -2899,7 +2899,7 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
         ["gh", "issue", "close"],
     ]
     expected_remote_env = {
-        "GIT_SSH_COMMAND": ssh_command,
+        "GH_TOKEN": github_token,
         "GCM_INTERACTIVE": "never",
         "GIT_TERMINAL_PROMPT": "0",
     }

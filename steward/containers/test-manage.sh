@@ -28,13 +28,14 @@ git -C "$seed" commit -qm seed
 git -C "$seed" remote add origin "$remote"
 git -C "$seed" push -q origin main
 
-for file in github-token git-ssh-key d1-read-token r2-access-key-id r2-secret-access-key known_hosts; do
+for file in d1-read-token r2-access-key-id r2-secret-access-key; do
   printf 'synthetic-%s-credential-value\n' "$file" >"$home/private/credentials/$file"
   chmod 600 "$home/private/credentials/$file"
 done
 touch "$tmp/docker.sock"
 cat >"$tmp/steward.toml" <<'TOML'
 [steward.authentication]
+github_token = "synthetic-github-token-credential-value"
 proxy_url = "https://localhost.invalid/v1"
 api_key = "synthetic-inline-credential-value"
 TOML
@@ -46,12 +47,9 @@ export COQUIC_REMOTE_URL="$remote"
 export STEWARD_EXPECTED_REMOTE=origin
 export STEWARD_EXPECTED_BRANCH=main
 export DOCKER_SOCKET="$tmp/docker.sock"
-export GITHUB_TOKEN_PATH="$home/private/credentials/github-token"
-export GIT_SSH_KEY_PATH="$home/private/credentials/git-ssh-key"
 export D1_TOKEN_PATH="$home/private/credentials/d1-read-token"
 export R2_ACCESS_KEY_ID_PATH="$home/private/credentials/r2-access-key-id"
 export R2_SECRET_ACCESS_KEY_PATH="$home/private/credentials/r2-secret-access-key"
-export GIT_KNOWN_HOSTS_PATH="$home/private/credentials/known_hosts"
 export STEWARD_UID="$(id -u)"
 export STEWARD_GID="$(id -g)"
 export STEWARD_DOCKER_GID="$(id -g)"
@@ -104,15 +102,18 @@ for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     assignments[name] = value
 
 expected = {
-    "COQUIC_REMOTE_URL": "git@github.com:minhuw/coquic.git",
+    "COQUIC_REMOTE_URL": "https://github.com/minhuw/coquic.git",
     "STEWARD_EXPECTED_REMOTE": "origin",
     "STEWARD_EXPECTED_BRANCH": "main",
 }
 assert all(assignments.get(name) == value for name, value in expected.items())
+assert "GITHUB_TOKEN_PATH" not in assignments
 assert "CODEX_API_KEY_PATH" not in assignments
 assert not any("api_key" in name.lower() for name in assignments)
 remote = assignments["COQUIC_REMOTE_URL"]
-assert re.fullmatch(r"git@[A-Za-z0-9.-]+:[^?#\s]+", remote)
+assert remote == "https://github.com/minhuw/coquic.git"
+assert "GIT_SSH_KEY_PATH" not in assignments
+assert "GIT_KNOWN_HOSTS_PATH" not in assignments
 assert not re.search(r"://[^/?#]*:[^/?#@]+@", remote)
 assert not any(marker in remote for marker in ("?", "#"))
 PY
@@ -203,7 +204,7 @@ check_credential_refusals() {
     restore_credential "$path"
 
     unlink "$path"
-    ln -s "$GITHUB_TOKEN_PATH" "$path"
+    ln -s "$STEWARD_CONFIG_PATH" "$path"
     expect_bootstrap_refusal "symlink ${path##*/}" 'regular file' || return 1
     restore_credential "$path"
 
@@ -260,43 +261,104 @@ expect_bootstrap_refusal_without_release_mutation() {
   [[ "$before" == "$after" ]]
 }
 
-check_clone_ssh_contract() (
-  local ssh_dir="$tmp/ssh-bin" ssh_log="$tmp/ssh.args"
-  mkdir -p "$ssh_dir"
-  cat >"$ssh_dir/ssh" <<SH
-#!/usr/bin/env bash
-printf '%s\\n' "\$@" >"$ssh_log"
-exit 42
+expect_inline_auth_refusal() (
+  local command="$1" invalid output before after variant
+  invalid="$tmp/$command-invalid-auth.toml"
+  before="$(release_snapshot)"
+  for variant in missing empty; do
+    cat >"$invalid" <<'TOML'
+[steward.authentication]
+proxy_url = "https://localhost.invalid/v1"
+api_key = "synthetic-inline-credential-value"
+TOML
+    [[ "$variant" == empty ]] && printf 'github_token = ""\n' >>"$invalid"
+    chmod 600 "$invalid"
+    export STEWARD_CONFIG_PATH="$invalid"
+    if output="$($manage "$command" 2>&1)"; then
+      printf 'expected inline GitHub authentication refusal for %s (%s)\n' "$command" "$variant" >&2
+      return 1
+    fi
+    [[ "$output" == *'valid inline GitHub token'* ]]
+    [[ "$output" != *"$credential_canary"* ]]
+    after="$(release_snapshot)"
+    [[ "$before" == "$after" ]]
+  done
+)
+
+check_inline_auth_contract() (
+  python - "$script_dir/../src/coquic_steward/core" "$STEWARD_CONFIG_PATH" <<'PY_AUTH'
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+from github_auth import read_config_github_token, github_cli_environment, token_git_environment
+
+token = read_config_github_token(Path(sys.argv[2]))
+assert token == "synthetic-github-token-credential-value"
+config = SimpleNamespace(authentication=SimpleNamespace(
+    github_token=SimpleNamespace(get_secret_value=lambda: token)))
+assert github_cli_environment(config)["GH_TOKEN"] == token_git_environment(token)["GH_TOKEN"]
+PY_AUTH
+  local original="$STEWARD_CONFIG_PATH" output
+  export COQUIC_REMOTE_URL='https://github.com/minhuw/coquic.git'
+  export STEWARD_CONFIG_PATH="$tmp/invalid-auth.toml"
+  # Duplicate keys/tables and malformed TOML must fail without echoing either secret.
+  for suffix in 'github_token = "duplicate-credential-value"' '[steward.authentication]' 'bad = "unterminated-credential-value'; do
+    cat "$original" >"$STEWARD_CONFIG_PATH"
+    printf '%s\n' "$suffix" >>"$STEWARD_CONFIG_PATH"
+    chmod 600 "$STEWARD_CONFIG_PATH"
+    if output="$("$manage" bootstrap 2>&1)"; then return 1; fi
+    [[ "$output" == *'invalid Steward TOML configuration'* ]]
+    [[ "$output" != *"$credential_canary"* ]]
+    [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" ]]
+  done
+)
+
+check_clone_https_contract() (
+  # Copied management fixtures retain the shared standalone auth module layout.
+  local fixture="$tmp/https-checkout"
+  mkdir -p "$fixture/containers" "$fixture/src/coquic_steward/core"
+  cp "$manage" "$script_dir/compose.yml" "$fixture/containers/"
+  cp "$script_dir/../src/coquic_steward/core/"{github_auth,private_config}.py "$fixture/src/coquic_steward/core/"
+  local manage="$fixture/containers/manage.sh"
+  local git_dir="$tmp/https-bin" git_log="$tmp/https.args" real_git
+  real_git="$(command -v git)"
+  mkdir -p "$git_dir"
+  cat >"$git_dir/git" <<SH
+#!/usr/bin/env python
+import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert "clone" in args
+assert "https://github.com/minhuw/coquic.git" in args
+assert "main" in args
+assert os.environ["GH_TOKEN"] == "synthetic-github-token-credential-value"
+assert all(os.environ["GH_TOKEN"] not in arg for arg in args)
+assert any(value.endswith("gh auth git-credential") for key, value in os.environ.items() if key.startswith("GIT_CONFIG_VALUE_"))
+assert "GIT_SSH_COMMAND" not in os.environ
+assert not os.environ.get("GITHUB_TOKEN")
+rewrites = subprocess.run(["$real_git", "config", "--get-regexp", r"^url\..*\.insteadof$"], capture_output=True)
+assert rewrites.returncode == 1 and not rewrites.stdout
+Path("$git_log").write_text(json.dumps(args))
+sys.exit(42)
 SH
-  chmod 755 "$ssh_dir/ssh"
-  export PATH="$ssh_dir:$PATH"
-  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-  export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'
-  export GIT_SSH_COMMAND='ssh -i /ambient-key -o UserKnownHostsFile=/ambient-known-hosts'
-  export SSH_AUTH_SOCK="$tmp/ambient-agent"
-  unset GIT_SSH
+  chmod 755 "$git_dir/git"
+  export PATH="$git_dir:$PATH"
+  if [[ "${1:-}" == default ]]; then
+    unset COQUIC_REMOTE_URL
+  else
+    export COQUIC_REMOTE_URL='https://github.com/minhuw/coquic.git'
+  fi
+  export GIT_SSH_COMMAND='ssh -i /ambient-key'
+  export SSH_AUTH_SOCK="$tmp/ambient-agent" GITHUB_TOKEN=ambient-token
+  rm -f "$git_log"
   if "$manage" bootstrap >"$tmp/clone.output" 2>&1; then
-    cat "$tmp/clone.output" >&2
     printf 'expected intercepted clone to fail\n' >&2
     exit 1
   fi
-  [[ -s "$ssh_log" ]]
+  [[ -s "$git_log" ]]
+  ! grep -Fq "$credential_canary" "$tmp/clone.output"
   [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
-  for argument in \
-    -F /dev/null \
-    IdentityFile=none \
-    -i "$GIT_SSH_KEY_PATH" \
-    "IdentityFile=$GIT_SSH_KEY_PATH" \
-    IdentitiesOnly=yes \
-    IdentityAgent=none \
-    "UserKnownHostsFile=$GIT_KNOWN_HOSTS_PATH" \
-    GlobalKnownHostsFile=/dev/null \
-    StrictHostKeyChecking=yes \
-    BatchMode=yes; do
-    grep -Fqx -- "$argument" "$ssh_log"
-  done
-  ! grep -Fqx -- /ambient-key "$ssh_log"
-  ! grep -Fqx -- UserKnownHostsFile=/ambient-known-hosts "$ssh_log"
   rm -rf "$home/private/deployment/bootstrap-repository.tmp"
   printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
   chmod 600 "$home/private/deployment/operation.journal"
@@ -305,7 +367,7 @@ SH
 check_clone_rewrite_contract() (
   local attacker_remote="$tmp/attacker.git" attacker_seed="$tmp/attacker-seed"
   local rewrite_config="$tmp/rewrite.gitconfig" vulnerable="$tmp/vulnerable-repository"
-  local canonical_remote='git@github.com:minhuw/coquic.git'
+  local canonical_remote='https://github.com/minhuw/coquic.git'
   git init -q --bare "$attacker_remote"
   git init -q -b main "$attacker_seed"
   git -C "$attacker_seed" config user.email test@example.invalid
@@ -327,30 +389,7 @@ check_clone_rewrite_contract() (
   [[ "$(git -C "$vulnerable" config --local --get remote.origin.url)" == "$canonical_remote" ]]
   rm -rf "$vulnerable"
 
-  local ssh_dir="$tmp/rewrite-ssh-bin" ssh_log="$tmp/rewrite-ssh.args"
-  mkdir -p "$ssh_dir"
-  cat >"$ssh_dir/ssh" <<SH
-#!/usr/bin/env bash
-printf '%s\\n' "\$@" >"$ssh_log"
-exit 42
-SH
-  chmod 755 "$ssh_dir/ssh"
-  export PATH="$ssh_dir:$PATH"
-  export COQUIC_REMOTE_URL="$canonical_remote"
-  export GIT_SSH_COMMAND='ssh -i /ambient-key -o UserKnownHostsFile=/ambient-known-hosts'
-  export SSH_AUTH_SOCK="$tmp/ambient-agent"
-  unset GIT_SSH STEWARD_MANAGE_FAKE
-  if "$manage" bootstrap >"$tmp/rewrite.output" 2>&1; then
-    cat "$tmp/rewrite.output" >&2
-    printf 'expected rewritten bootstrap to fail closed\n' >&2
-    exit 1
-  fi
-  [[ -s "$ssh_log" ]]
-  [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
-  [[ ! -e "$home/private/deployment/bootstrap-repository.tmp/README.md" ]]
-  rm -rf "$home/private/deployment/bootstrap-repository.tmp"
-  printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
-  chmod 600 "$home/private/deployment/operation.journal"
+  check_clone_https_contract
 )
 
 expect_build_source_refusal() {
@@ -610,6 +649,7 @@ check_health_contract() (
 # and Docker. Legacy replies deliberately fabricate the old DB-only liveness.
 check_mixed_version_lifecycle() (
   source <(sed '/^command="${1:-}"/,$d' "$manage")
+  script_dir="$(dirname "$manage")"
   deployment="$home/private/deployment"
   unset STEWARD_MANAGE_FAKE
   local legacy_release='' failed_release='' probe_format=runtime probe_status=1
@@ -626,6 +666,9 @@ check_mixed_version_lifecycle() (
   )
   compose_run() {
     local release
+    if [[ "$1" == run || "$1" == up ]]; then
+      [[ -f "$home/private/runtime/daemon-passwd" && -f "$home/private/runtime/daemon-group" ]] || return 1
+    fi
     case "$*" in
       'run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health')
         release="$STEWARD_RELEASE_ID"
@@ -704,8 +747,9 @@ check_mixed_version_lifecycle() (
   legacy_release="$original" failed_release=''
   journal recreate pending "$candidate"
   printf '%s\n' "$target" >"$deployment/service.release"
-  refuse_unchanged 'lacks the runtime health contract' restore_release "$original"
-  refuse_unchanged 'lacks the runtime health contract' restore_release "$original"
+  restore_fixture_release() ( with_lock; restore_release "$@"; )
+  refuse_unchanged 'lacks the runtime health contract' restore_fixture_release "$original"
+  refuse_unchanged 'lacks the runtime health contract' restore_fixture_release "$original"
   printf '%s\n' "$original" >"$deployment/service.release"
   # Recovery validates both records before it checks the old daemon response.
   (export STEWARD_MANAGE_FAKE=1; build_fixture_release >/dev/null)
@@ -751,11 +795,10 @@ case "$mode" in
     config_output="$("$manage" --config)"
     [[ "$config_output" != *"$credential_canary"* ]]
     printf '%s\n' "$config_output"
+    [[ ! -e "$home/private/runtime/daemon-passwd" && ! -e "$home/private/runtime/daemon-group" ]]
     rendered="$(docker compose --project-name "$STEWARD_COMPOSE_PROJECT" --file "$script_dir/compose.yml" config --format json)"
     RENDERED_COMPOSE="$rendered" D1_SOURCE="$D1_TOKEN_PATH" R2_ID_SOURCE="$R2_ACCESS_KEY_ID_PATH" \
-      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" \
-      GITHUB_SOURCE="$GITHUB_TOKEN_PATH" SSH_KEY_SOURCE="$GIT_SSH_KEY_PATH" \
-      KNOWN_HOSTS_SOURCE="$GIT_KNOWN_HOSTS_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
+      R2_SECRET_SOURCE="$R2_SECRET_ACCESS_KEY_PATH" python - "$STEWARD_UID" "$STEWARD_GID" "$STEWARD_DOCKER_GID" <<'PY'
 import json, os, sys
 value = json.loads(os.environ["RENDERED_COMPOSE"])
 service = value["services"]["steward"]
@@ -768,23 +811,30 @@ assert service["user"] == f"{sys.argv[1]}:{sys.argv[2]}"
 assert {
     (item["source"], item["target"]) for item in service["secrets"]
 } == {
-    ("github_token", "/run/secrets/github-token"),
-    ("git_ssh_key", "/run/secrets/git-ssh-key"),
     ("d1_token", "/run/secrets/d1-read-token"),
     ("r2_access_key_id", "/run/secrets/r2-access-key-id"),
     ("r2_secret_access_key", "/run/secrets/r2-secret-access-key"),
 }
 sources = value["secrets"]
 assert "codex_api_key" not in sources
+assert "git_ssh_key" not in sources
+assert not any(item["target"] == "/etc/coquic-steward/known_hosts" for item in service["volumes"])
 config_mounts = [item for item in service["volumes"] if item["target"] == "/etc/coquic-steward/steward.toml"]
 assert len(config_mounts) == 1
 assert config_mounts[0]["type"] == "bind"
 assert config_mounts[0]["source"] == os.environ["STEWARD_CONFIG_PATH"]
 assert config_mounts[0]["read_only"] is True
-assert sources["github_token"]["file"] == os.environ["GITHUB_SOURCE"]
-assert sources["git_ssh_key"]["file"] == os.environ["SSH_KEY_SOURCE"]
-assert service["volumes"][-1]["source"] == os.environ["KNOWN_HOSTS_SOURCE"]
-assert service["volumes"][-1]["target"] == "/etc/coquic-steward/known_hosts"
+for name in ("passwd", "group"):
+    mounts = [item for item in service["volumes"] if item["target"] == f"/etc/{name}"]
+    assert len(mounts) == 1
+    assert mounts[0]["type"] == "bind"
+    assert mounts[0]["source"] == f"{os.environ['COQUIC_HOME']}/private/runtime/daemon-{name}"
+    assert mounts[0]["read_only"] is True
+    # Compose versions that omit false-valued fields render bind as {}.
+    assert mounts[0]["bind"].get("create_host_path", False) is False
+assert "github_token" not in sources
+assert not any("github" in name.lower() or name == "GH_TOKEN" for name in environment)
+assert "github-token" not in json.dumps(value)
 assert sources["d1_token"]["file"] == os.environ["D1_SOURCE"]
 assert sources["r2_access_key_id"]["file"] == os.environ["R2_ID_SOURCE"]
 assert sources["r2_secret_access_key"]["file"] == os.environ["R2_SECRET_SOURCE"]
@@ -800,13 +850,13 @@ PY
   --bootstrap)
     check_build_source_contract
     unset STEWARD_MANAGE_FAKE
-    expect_bootstrap_refusal 'local production remote' 'credential-free SSH'
-    check_clone_ssh_contract
+    expect_bootstrap_refusal 'local production remote' 'credential-free GitHub HTTPS'
+    check_inline_auth_contract
+    check_clone_https_contract
+    check_clone_https_contract default
     check_clone_rewrite_contract
     export STEWARD_MANAGE_FAKE=1
     check_credential_refusals
-    unset COQUIC_REMOTE_URL
-    expect_bootstrap_refusal_without_release_mutation 'missing fresh-clone remote' 'COQUIC_REMOTE_URL is required for a fresh clone'
     [[ ! -e "$home/repository" && ! -e "$home/private/deployment/current" && ! -d "$home/private/deployment/releases" ]]
     export COQUIC_REMOTE_URL="$remote"
     mkdir -p "$home/private/deployment/bootstrap-repository.tmp"
@@ -817,6 +867,7 @@ PY
     printf '%s\n' '{"phase":"clone","outcome":"pending","cloneTemporary":"bootstrap-repository.tmp"}' >"$home/private/deployment/operation.journal"
     "$manage" bootstrap >/dev/null
     first="$(cat "$home/private/deployment/current")"
+    expect_inline_auth_refusal bootstrap
     python - "$home/private/deployment/releases/$first.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -826,35 +877,38 @@ assert value["validationImage"] == value["validationImageId"]
 assert value["daemonImage"].startswith("sha256:")
 assert value["taskImage"].startswith("sha256:")
 PY
-    export COQUIC_REMOTE_URL='git@github.com:minhuw/other.git'
+    export COQUIC_REMOTE_URL='https://github.com/minhuw/other.git'
     expect_bootstrap_refusal_without_release_mutation 'existing clone remote mismatch' 'canonical repository remote does not match the configured remote'
     export COQUIC_REMOTE_URL="$remote"
     "$manage" bootstrap >/dev/null
     for remote_url in \
-      'https://github.com/minhuw/coquic.git' \
+      'git@github.com:minhuw/coquic.git' \
+      'https://token@github.com/minhuw/coquic.git' \
+      'https://github.com.evil.invalid/minhuw/coquic.git' \
+      'ssh://git@github.com/minhuw/coquic.git' \
+      'git@[::1]:org/repo.git' \
       'ssh://git:password@github.com/minhuw/coquic.git' \
       'git:password@github.com:minhuw/coquic.git' \
       'ext::/bin/sh'; do
       git -C "$home/repository" remote set-url origin "$remote_url"
       unset STEWARD_MANAGE_FAKE
-      expect_bootstrap_refusal "remote $remote_url" 'credential-free SSH'
+      expect_bootstrap_refusal "remote $remote_url" 'credential-free GitHub HTTPS'
       export STEWARD_MANAGE_FAKE=1
       git -C "$home/repository" remote set-url origin "$remote"
     done
-    ipv6_remote='git@[::1]:org/repo.git'
-    git -C "$home/repository" remote set-url origin "$ipv6_remote"
-    export COQUIC_REMOTE_URL="$ipv6_remote"
-    "$manage" bootstrap >/dev/null
-    git -C "$home/repository" remote set-url origin "$remote"
-    export COQUIC_REMOTE_URL="$remote"
-    git -C "$home/repository" remote set-url origin 'git@github.com:minhuw/coquic.git'
+    git -C "$home/repository" remote set-url origin 'https://github.com/minhuw/coquic.git'
     git -C "$home/repository" config --local remote.origin.pushurl 'file:///tmp/forbidden.git'
-    export COQUIC_REMOTE_URL='git@github.com:minhuw/coquic.git'
+    export COQUIC_REMOTE_URL='https://github.com/minhuw/coquic.git'
     unset STEWARD_MANAGE_FAKE
-    expect_bootstrap_refusal 'unsafe production pushurl' 'credential-free SSH'
-    export STEWARD_MANAGE_FAKE=1
+    expect_bootstrap_refusal 'unsafe production pushurl' 'credential-free GitHub HTTPS'
+    git -C "$home/repository" config --local remote.origin.pushurl 'https://github.com/minhuw/other.git'
+    expect_bootstrap_refusal_without_release_mutation 'mismatched HTTPS pushurl' 'canonical repository remote does not match the configured remote'
     git -C "$home/repository" config --local --unset-all remote.origin.pushurl
-    git -C "$home/repository" remote set-url origin "$remote"
+    git -C "$home/repository" config --local --add remote.origin.url 'https://github.com/minhuw/other.git'
+    expect_bootstrap_refusal_without_release_mutation 'mismatched second HTTPS remote' 'canonical repository remote does not match the configured remote'
+    git -C "$home/repository" config --local --unset-all remote.origin.url
+    git -C "$home/repository" config --local remote.origin.url "$remote"
+    export STEWARD_MANAGE_FAKE=1
     export COQUIC_REMOTE_URL="$remote"
     second="$(cat "$home/private/deployment/current")"
     [[ "$first" == "$second" && -d "$home/repository/.git" && ! -e "$home/steward.sqlite" ]]
@@ -870,8 +924,12 @@ PY
     check_health_contract
     "$manage" bootstrap >/dev/null
     [[ ! -e "$home/steward.sqlite" ]]
+    expect_inline_auth_refusal init
     expect_manage_refusal start
+    # Existing deployments predate these files; init must provision them too.
+    rm "$home/private/runtime/daemon-passwd" "$home/private/runtime/daemon-group"
     "$manage" init
+    [[ -f "$home/private/runtime/daemon-passwd" && -f "$home/private/runtime/daemon-group" ]]
     marker="$home/private/deployment/store.initialized"
     [[ "$(cat "$marker")" == initialized ]]
     before="$(stat -c '%s:%Y:%i' "$marker")"
@@ -890,7 +948,15 @@ PY
     old="$(cat "$home/private/deployment/current")"
     expect_manage_refusal start
     "$manage" init >/dev/null
+    expect_inline_auth_refusal start
+    [[ ! -e "$home/private/deployment/service.running" ]]
+    rm "$home/private/runtime/daemon-passwd" "$home/private/runtime/daemon-group"
     "$manage" start
+    [[ -f "$home/private/runtime/daemon-passwd" && -f "$home/private/runtime/daemon-group" ]]
+    identity_before="$(stat -c '%i:%Y:%Z' "$home/private/runtime/daemon-"*)"
+    "$manage" config >/dev/null
+    "$manage" status >/dev/null
+    [[ "$(stat -c '%i:%Y:%Z' "$home/private/runtime/daemon-"*)" == "$identity_before" ]]
     "$manage" status | rg 'state=running'
     "$manage" stop
     ! "$manage" status | rg 'state=running'

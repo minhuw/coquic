@@ -5,6 +5,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -343,11 +344,13 @@ def run_command(
     check: bool = False,
     input_text: str | None = None,
     timeout: float | None = None,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str | None] | None = None,
     replace_env: bool = False,
     cancellation_owner: ProcessGroupCancellationOwner | None = None,
     max_output_bytes: int | None = None,
 ) -> CommandResult:
+    """Run a trusted command; None-valued env overrides remove inherited keys."""
+
     _validate_argv(args)
     _validate_capture_limit(max_output_bytes)
     proc: subprocess.Popen[str] | None = None
@@ -355,11 +358,12 @@ def run_command(
     try:
         process_env = None
         if env is not None:
-            if replace_env:
-                process_env = env.copy()
-            else:
-                process_env = os.environ.copy()
-                process_env.update(env)
+            process_env = {} if replace_env else os.environ.copy()
+            for key, value in env.items():
+                if value is None:
+                    process_env.pop(key, None)
+                else:
+                    process_env[key] = value
         proc = _TrustedProcess(
             args,
             cwd=cwd,

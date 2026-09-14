@@ -60,20 +60,18 @@ services:
         target: /etc/coquic-steward/steward.toml
         read_only: true
       - type: bind
-        source: ${GIT_KNOWN_HOSTS_PATH:?}
-        target: /etc/coquic-steward/known_hosts
+        source: ${COQUIC_HOME:?}/private/runtime/daemon-passwd
+        target: /etc/passwd
         read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COQUIC_HOME:?}/private/runtime/daemon-group
+        target: /etc/group
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
-      - source: github_token
-        target: /run/secrets/github-token
-        uid: "${STEWARD_UID:?}"
-        gid: "${STEWARD_GID:?}"
-        mode: 0400
-      - source: git_ssh_key
-        target: /run/secrets/git-ssh-key
-        uid: "${STEWARD_UID:?}"
-        gid: "${STEWARD_GID:?}"
-        mode: 0400
       - source: d1_token
         target: /run/secrets/d1-read-token
         uid: "${STEWARD_UID:?}"
@@ -97,10 +95,6 @@ services:
       start_period: 10s
 
 secrets:
-  github_token:
-    file: ${GITHUB_TOKEN_PATH:?}
-  git_ssh_key:
-    file: ${GIT_SSH_KEY_PATH:?}
   d1_token:
     file: ${D1_TOKEN_PATH:?}
   r2_access_key_id:

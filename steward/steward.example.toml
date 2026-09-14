@@ -29,6 +29,10 @@ github_repository = "minhuw/coquic"
 # [steward.authentication]
 # proxy_url = "https://proxy.example.test/v1"
 # api_key = "fake-cliproxyapi-client-key-replace-me"
+# GitHub HTTPS Git/API authentication is independent of the model pair above.
+# Repository-selected expiring fine-grained PAT: Contents RW plus enabled API permissions.
+# No SSH key, global credential setup, or GitHub token-file fallback.
+# github_token = "fake-github-token-replace-me"
 
 # Task containers are disabled by default for local planning fixtures. When
 # enabled, every path is host-local and the image must be locked by digest.
@@ -75,9 +79,7 @@ docker_socket = "/var/run/docker.sock"
 expected_remote = "origin"
 expected_branch = "main"
 compose_project = "coquic-steward"
-# github_token_path = "/run/secrets/github-token"
-# git_ssh_key_path = "/run/secrets/git-ssh-key"
-# git_known_hosts_path = "/etc/coquic-steward/known_hosts"
+# Canonical origin URL: https://github.com/minhuw/coquic.git
 # release_id = "release-example"
 # daemon_image_id = "sha256:<64 lowercase hex characters>"
 # task_image_id = "sha256:<64 lowercase hex characters>"

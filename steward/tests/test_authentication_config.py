@@ -321,8 +321,7 @@ def test_inline_secret_exemption_is_exact(value: object) -> None:
 def test_inline_secret_exemption_preserves_other_secret_path_settings() -> None:
     config_module._reject_embedded_secrets(
         {
-            "authentication": {"proxy_url": PROXY, "api_key": KEY},
-            "deployment": {"github_token_path": "/unused/token"},
+            "authentication": {"proxy_url": PROXY, "api_key": KEY, "github_token": KEY},
             "publication": {"r2_secret_access_key_path": "/unused/key"},
         }
     )
@@ -486,18 +485,12 @@ def test_load_allows_container_without_authentication_for_inspection(repo, tmp_p
     assert config.read_codex_api_key_bytes() is None
 
 
-def test_deployment_preflight_keeps_other_credentials_but_no_codex_file(
+def test_deployment_preflight_requires_inline_github_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
     repository = home / "repository"
     repository.mkdir(parents=True)
-    credential_paths = {}
-    for field in ("github_token_path", "git_ssh_key_path", "git_known_hosts_path"):
-        path = home / field
-        path.write_text("other-credential")
-        path.chmod(0o600)
-        credential_paths[field] = path
     socket_path = tmp_path / "docker.sock"
     with socket.socket(socket.AF_UNIX) as docker_socket:
         docker_socket.bind(str(socket_path))
@@ -505,11 +498,10 @@ def test_deployment_preflight_keeps_other_credentials_but_no_codex_file(
             enabled=True, home=home, repository=repository, docker_socket=socket_path,
             min_free_bytes=1, recovery_free_bytes=2,
             max_owned_docker_bytes=2, recovery_owned_docker_bytes=1,
-            **credential_paths,
         )
         config = StewardConfig(
             repo_root=repository, deployment=deployment,
-            authentication=StewardAuthenticationConfig(PROXY, KEY),
+            authentication=StewardAuthenticationConfig(PROXY, KEY, "github-test-token"),
         )
         monkeypatch.setattr(preflight, "_validate_remote_policy", lambda *_: None)
 
@@ -521,6 +513,54 @@ def test_deployment_preflight_keeps_other_credentials_but_no_codex_file(
 
         monkeypatch.setattr(preflight, "run_command", command)
         preflight.run_preflight(config, check_remote_push=False)
-        credential_paths["github_token_path"].chmod(0o644)
-        with pytest.raises(preflight.StewardPreflightError, match="GitHub API token file permissions"):
+        config = replace(config, authentication=StewardAuthenticationConfig(PROXY, KEY))
+        with pytest.raises(preflight.StewardPreflightError, match="github_token"):
             preflight.run_preflight(config, check_remote_push=False)
+
+
+@pytest.mark.parametrize("with_model", (False, True))
+@pytest.mark.parametrize("mode", (0o400, 0o600))
+def test_inline_github_token_is_independent_private_and_redacted(repo, tmp_path, with_model, mode):
+    contents = _authentication_toml() if with_model else "[steward.authentication]\n"
+    contents += f"github_token = '{KEY}'\n"
+    config = load_config(repo_root=repo, config_path=_write_config(tmp_path, contents, mode=mode))
+    token = config.authentication.github_token
+    assert isinstance(token, SecretStr)
+    assert token.get_secret_value() == KEY
+    assert (config.authentication.api_key is not None) == with_model
+    assert KEY not in repr(config)
+    assert KEY not in repr(asdict(config))
+    assert KEY.encode() not in TypeAdapter(StewardConfig).dump_json(config)
+    assert not hasattr(config, "github_token_path")
+    assert not hasattr(config.deployment, "github_token_path")
+
+
+@pytest.mark.parametrize("raw", (
+    {}, None, {"github_token": None}, {"github_token": ""},
+    {"github_token": KEY, "proxy_url": PROXY},
+    {"github_token": KEY, "api_key": KEY},
+    {"github_token": KEY, "unknown-secret-key": KEY},
+    {"github_token": 123}, {"github_token": [KEY]},
+    {"github_token": KEY + "\n"}, {"github_token": "x" * 4097},
+))
+def test_inline_github_section_rejects_invalid_values_without_echo(raw):
+    with pytest.raises(ValueError) as error:
+        config_module._authentication_config(raw)
+    assert KEY not in str(error.value)
+    assert len(str(error.value)) < 200
+
+
+def test_inline_github_token_does_not_read_files_or_environment(tmp_path, monkeypatch):
+    from coquic_steward.core.github_auth import github_cli_environment
+
+    monkeypatch.setenv("GH_TOKEN", "ambient-ignored")
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-ignored")
+    config = StewardConfig(repo_root=tmp_path)
+    monkeypatch.setattr(os, "open", lambda *_: pytest.fail("no credential file fallback"))
+    assert github_cli_environment(config) == {}
+    config = replace(config, authentication=StewardAuthenticationConfig(github_token=SecretStr(KEY)))
+    environment = github_cli_environment(config)
+    assert environment["GH_TOKEN"] == KEY
+    assert environment["GH_HOST"] == "github.com"
+    assert environment["GH_CONFIG_DIR"] == "/dev"
+    assert environment["GH_ENTERPRISE_TOKEN"] is None

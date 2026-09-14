@@ -388,8 +388,8 @@ if [[ "$mode" == all || "$mode" == isolation ]]; then
   printf 'other-private\n' >"$session_root/session-other/private.txt"
   printf 'shell_environment_policy = { inherit = "none" }\n' \
     >"$session_root/session-owner/config.toml"
-  printf 'fake-github-canary\n' >"$isolation_root/daemon-github"
-  printf 'fake-ssh-canary\n' >"$isolation_root/daemon-ssh"
+  printf '[steward.authentication]\ngithub_token = "fake-github-canary"\nproxy_url = "https://proxy.example.test/v1"\napi_key = "fake-model-canary"\n' >"$isolation_root/daemon-config.toml"
+  chmod 600 "$isolation_root/daemon-config.toml"
   printf 'fake-sync-canary\n' >"$isolation_root/daemon-sync"
   printf 'fake-other-task-canary\n' >"$isolation_root/other-task"
 
@@ -604,7 +604,7 @@ rejected(
     "session-other",
     ["ls", "/task/session"],
 )
-for canary in ("daemon-github", "daemon-ssh", "daemon-sync", "other-task"):
+for canary in ("daemon-config.toml", "daemon-sync", "other-task"):
     rejected(
         TaskRole.reviewer,
         10000,

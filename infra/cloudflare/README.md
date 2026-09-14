@@ -185,7 +185,11 @@ COQUIC_STEWARD_LIVE_SNAPSHOT_URL
 ```
 
 `site/deploy/install-cloud-config.sh` owns remote validation, atomic app-env
-replacement, service configuration, and its local transaction. The rollout
+replacement, service configuration, and its local transaction. When
+`COQUIC_DEMO_REMOTE_SSH_KEY_PATH` is unset or empty, the installer uses normal
+OpenSSH authentication (agent or default SSH configuration). A nonempty value
+must name an existing key file and is passed to both SSH and SCP. Batch mode
+and strict host-key checking remain enabled. The rollout
 explicitly unsets provider credentials for that child, so Site receives only
 the five fields listed above. It installs Site's cloud values but does not
 deploy a Site release or launch Steward.

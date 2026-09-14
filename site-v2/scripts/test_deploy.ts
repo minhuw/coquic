@@ -275,9 +275,33 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
 
     const cloudEnv = { ...deployEnv, FAKE_SSH_REQUIRE_HOST_KEY: "1" };
     const cloudInput = await writeCloudInput(cloudLines);
+    const sshLogBeforeInstall = await readFile(sshLog, "utf8");
+    const missingKey = await run("bash", [installCloudConfig, cloudInput], { ...cloudEnv, COQUIC_DEMO_REMOTE_SSH_KEY_PATH: join(root, "missing.key") });
+    assert.notEqual(missingKey.code, 0);
+    assert.match(missingKey.output, /missing SSH key path:/);
+    assert.equal(await readFile(sshLog, "utf8"), sshLogBeforeInstall, "missing explicit key is rejected before SSH or SCP");
+
     const installed = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
     assert.equal(installed.code, 0, installed.output);
     assert.ok(!new RegExp(cloudSecret).test(installed.output), "successful handoff output is redacted");
+    const explicitKeyCalls = (await readFile(sshLog, "utf8")).slice(sshLogBeforeInstall.length).trim().split("\n");
+    assert.ok(explicitKeyCalls.some((line) => line.startsWith("-p ")), "explicit key uses SSH");
+    assert.ok(explicitKeyCalls.some((line) => line.startsWith("-P ")), "explicit key uses SCP");
+    for (const line of explicitKeyCalls) assert.ok(line.includes(`-i ${sshKey} `), "SSH, SCP, and cleanup use the explicit key");
+
+    for (const keyPath of [undefined, ""]) {
+      const beforeFallback = await readFile(sshLog, "utf8");
+      const fallback = await run("bash", [installCloudConfig, cloudInput], { ...cloudEnv, COQUIC_DEMO_REMOTE_SSH_KEY_PATH: keyPath });
+      assert.equal(fallback.code, 0, fallback.output);
+      const fallbackCalls = (await readFile(sshLog, "utf8")).slice(beforeFallback.length).trim().split("\n");
+      assert.ok(fallbackCalls.some((line) => line.startsWith("-p ")), "default authentication uses SSH");
+      assert.ok(fallbackCalls.some((line) => line.startsWith("-P ")), "default authentication uses SCP");
+      for (const line of fallbackCalls) {
+        assert.doesNotMatch(line, /(?:^| )-i(?: |$)/, "SSH, SCP, and cleanup omit the explicit key");
+        assert.match(line, /BatchMode=yes/);
+        assert.match(line, /StrictHostKeyChecking=yes/);
+      }
+    }
     const handoffAppEnv = await readFile(appEnvPath, "utf8");
     assert.ok(handoffAppEnv.includes(`export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`));
     assert.ok(handoffAppEnv.includes(`export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`));

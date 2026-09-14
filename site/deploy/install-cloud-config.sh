@@ -32,8 +32,8 @@ readonly remote_config_relative="/etc/coquic-demo"
 readonly remote_app_env_relative="${remote_config_relative}/app.env"
 readonly site_service="coquic-demo.service"
 
-ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-${RUNNER_TEMP:-/tmp}/coquic-demo.key}"
-if [[ ! -f "${ssh_key_path}" ]]; then
+ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-}"
+if [[ -n "${ssh_key_path}" && ! -f "${ssh_key_path}" ]]; then
   echo "missing SSH key path: ${ssh_key_path}" >&2
   exit 1
 fi
@@ -52,7 +52,6 @@ remote_tmp_root="${remote_prefix}/tmp"
 
 ssh_opts=(
   -p "${ssh_port}"
-  -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
   -o ConnectionAttempts=3
@@ -63,7 +62,6 @@ ssh_opts=(
 )
 scp_opts=(
   -P "${ssh_port}"
-  -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
   -o ConnectionAttempts=3
@@ -72,6 +70,11 @@ scp_opts=(
   -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
 )
+
+if [[ -n "${ssh_key_path}" ]]; then
+  ssh_opts+=(-i "${ssh_key_path}")
+  scp_opts+=(-i "${ssh_key_path}")
+fi
 
 cloud_fields=(
   CLOUDFLARE_ACCOUNT_ID

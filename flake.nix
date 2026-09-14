@@ -2214,6 +2214,17 @@ EOF
           echo "coquic wasm shell ready. Run: zig build wasm-quic"
         '';
       };
+      siteV2Shell = pkgs.mkShell {
+        packages = [
+          nodejs
+          pkgs.python3
+          pkgs.uv
+        ];
+        shellHook = ''
+          unset PYTHONPATH
+          echo "coquic Site V2 shell ready"
+        '';
+      };
       defaultShell = mkCoquicShell {
         profile = quictlsProfile;
         includePreCommit = true;
@@ -2554,6 +2565,7 @@ EOF
         wasm = wasmShell;
         lint = lintShell;
         tools = toolsShell;
+        site-v2 = siteV2Shell;
       };
     };
 }

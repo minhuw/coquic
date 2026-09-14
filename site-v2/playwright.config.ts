@@ -10,7 +10,7 @@ export default defineConfig({
   reporter: 'list',
   ...(previewBaseURL ? {} : {
     webServer: {
-      command: 'nix develop -c npm run test:steward -- --playwright-fixture',
+      command: 'nix develop .#site-v2 -c npm run test:steward -- --playwright-fixture',
       url: baseURL,
       reuseExistingServer: false,
       timeout: 120_000,

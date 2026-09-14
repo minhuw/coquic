@@ -58,11 +58,11 @@ jobs:
 
       - name: Build Next.js V2 demo
         run: |
-          nix develop -c npm --prefix site-v2 ci
-          nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
-          nix develop -c npm --prefix site-v2 run test:unit
-          nix develop -c npm --prefix site-v2 run typecheck
-          nix develop -c npm --prefix site-v2 run build
+          nix develop .#site-v2 -c npm --prefix site-v2 ci
+          nix develop .#site-v2 -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
+          nix develop .#site-v2 -c npm --prefix site-v2 run test:unit
+          nix develop .#site-v2 -c npm --prefix site-v2 run typecheck
+          nix develop .#site-v2 -c npm --prefix site-v2 run build
 
       - name: Package V2 demo app
         run: |

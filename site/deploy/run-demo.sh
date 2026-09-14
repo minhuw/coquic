@@ -14,6 +14,7 @@ cloud_fields=(
 for cloud_field in "${cloud_fields[@]}"; do
   unset "${cloud_field}"
 done
+unset preview_password preview_access_token steward_status_curl_config
 if [[ -f "${rag_env_file}" ]]; then
   set -a
   # shellcheck source=/dev/null
@@ -63,6 +64,7 @@ cloud_account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
 cloud_database_id="${COQUIC_STEWARD_D1_DATABASE_ID:-}"
 cloud_read_token="${COQUIC_STEWARD_D1_READ_TOKEN:-}"
 cloud_public_r2_base_url="${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}"
+preview_password="${COQUIC_V2_PREVIEW_PASSWORD:-}"
 [[ "${cloud_account_id}" =~ ^[[:xdigit:]]{32}$ ]] || cloud_config_error "CLOUDFLARE_ACCOUNT_ID"
 [[ "${cloud_database_id}" =~ ^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$ ]] || cloud_config_error "COQUIC_STEWARD_D1_DATABASE_ID"
 [[ -n "${cloud_read_token}" && ${#cloud_read_token} -le 4096 && ! "${cloud_read_token}" =~ [[:cntrl:]] ]] || cloud_config_error "COQUIC_STEWARD_D1_READ_TOKEN"
@@ -86,6 +88,7 @@ fi
 for cloud_field in "${cloud_fields[@]}"; do
   export -n "${cloud_field}"
 done
+export -n COQUIC_V2_PREVIEW_PASSWORD
 
 if [[ ! -x "${h3_server}" ]]; then
   echo "missing h3-server: ${h3_server}" >&2
@@ -212,6 +215,7 @@ fi
   COQUIC_STEWARD_D1_DATABASE_ID="${cloud_database_id}" \
   COQUIC_STEWARD_D1_READ_TOKEN="${cloud_read_token}" \
   COQUIC_STEWARD_PUBLIC_R2_BASE_URL="${cloud_public_r2_base_url}" \
+  COQUIC_V2_PREVIEW_PASSWORD="${preview_password}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \
   NODE_ENV=production \
@@ -236,6 +240,20 @@ if [[ "${next_ready}" != "1" ]]; then
   exit 1
 fi
 
+steward_status_curl_config=""
+if [[ -n "${preview_password}" ]]; then
+  preview_access_token="$(
+    printf 'coquic-v2-preview:%s' "${preview_password}" |
+      node -e '
+        const { createHash } = require("node:crypto");
+        const hash = createHash("sha256");
+        process.stdin.on("data", (chunk) => hash.update(chunk));
+        process.stdin.on("end", () => process.stdout.write(hash.digest("hex")));
+      '
+  )"
+  printf -v steward_status_curl_config 'header = "Cookie: coquic-v2-preview=%s"\n' "${preview_access_token}"
+fi
+
 steward_status_ready=0
 for _ in $(seq 1 50); do
   if ! pid_is_alive "${next_pid}"; then
@@ -243,7 +261,10 @@ for _ in $(seq 1 50); do
     echo "Next.js server exited before cloud publication status probe" >&2
     exit 1
   fi
-  steward_status="$(curl -fsS "http://${next_host}:${next_port}/api/steward/status" 2>/dev/null || true)"
+  steward_status="$(
+    printf '%s' "${steward_status_curl_config}" |
+      curl --noproxy '*' -fsS --config - "http://${next_host}:${next_port}/api/steward/status" 2>/dev/null || true
+  )"
   if STEWARD_STATUS_PAYLOAD="${steward_status}" node -e '
     try {
       const payload = JSON.parse(process.env.STEWARD_STATUS_PAYLOAD || "");

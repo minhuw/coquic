@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -65,37 +66,54 @@ void (async () => {
       `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
       `export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
       "export COQUIC_DEMO_QA_ENABLED=false",
+      "export COQUIC_V2_PREVIEW_PASSWORD=preview-fixture",
       "",
     ].join("\n"));
     await chmod(appEnv, 0o600);
-    await executable(join(release, "h3-server"), "#!/usr/bin/env bash\necho h3 >>\"${FAKE_PROCESS_LOG}\"\nsleep 0.2\n");
+    const rejectInternalPreviewEnv = 'for field in preview_password preview_access_token steward_status_curl_config; do [[ ! ${!field+x} ]] || exit 42; done';
+    await executable(join(release, "h3-server"), `#!/usr/bin/env bash
+${rejectInternalPreviewEnv}
+echo h3 >>"\${FAKE_PROCESS_LOG}"
+sleep 0.2
+`);
     await executable(join(fakeBin, "node"), `#!/usr/bin/env bash
+${rejectInternalPreviewEnv}
 if [[ "\${1:-}" == "-e" ]]; then
   exec "\${FAKE_REAL_NODE}" "$@"
 fi
 if [[ "\${1:-}" == "-p" ]]; then printf '%s\\n' 24; exit; fi
 if [[ "\${1:-}" == "--version" ]]; then printf '%s\\n' v24.0.0; exit; fi
 cloud_token_state=missing
+preview_password_state=missing
 if [[ -n "\${COQUIC_STEWARD_D1_READ_TOKEN:-}" ]]; then cloud_token_state=set; fi
-printf 'next:%s:%s:%s:%s\\n' "\${CLOUDFLARE_ACCOUNT_ID:-}" "\${COQUIC_STEWARD_D1_DATABASE_ID:-}" "\${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}" "\${cloud_token_state}" >>"\${FAKE_PROCESS_LOG}"
+if [[ "\${COQUIC_V2_PREVIEW_PASSWORD:-}" == preview-fixture ]]; then preview_password_state=set; fi
+printf 'next:%s:%s:%s:%s:%s\\n' "\${CLOUDFLARE_ACCOUNT_ID:-}" "\${COQUIC_STEWARD_D1_DATABASE_ID:-}" "\${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}" "\${cloud_token_state}" "\${preview_password_state}" >>"\${FAKE_PROCESS_LOG}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `);
     await executable(join(fakeBin, "curl"), `#!/usr/bin/env bash
+${rejectInternalPreviewEnv}
 url="\${!#}"
-echo "\${url}" >>"\${FAKE_CURL_LOG}"
+config=""
+if [[ " $* " == *" --config - "* ]]; then config="$(cat)"; fi
+printf 'args:%s\\nconfig:%s\\nurl:%s\\n' "$*" "\${config}" "\${url}" >>"\${FAKE_CURL_LOG}"
 if [[ "\${url}" == */api/steward/status ]]; then
+  [[ "\${config}" == "header = \\"Cookie: coquic-v2-preview=\${FAKE_PREVIEW_TOKEN}\\"" ]] || exit 22
   if [[ -n "\${FAKE_STEWARD_STATUS:-}" ]]; then printf '%s\\n' "\${FAKE_STEWARD_STATUS}";
   else printf '%s\\n' '{"schemaVersion":"4.0","generatedAt":"2026-07-31T00:00:00Z","data":{"state":"empty","taskCount":0,"latestPublicationAt":null}}'; fi
 else printf '%s\\n' ready; fi
 `);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_APP_ENV_FILE: appEnv, COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_REAL_NODE: process.execPath };
+    const previewToken = createHash("sha256").update("coquic-v2-preview:preview-fixture").digest("hex");
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_APP_ENV_FILE: appEnv, COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_PREVIEW_TOKEN: previewToken, FAKE_REAL_NODE: process.execPath, preview_password: "ambient-password", preview_access_token: "ambient-token", steward_status_curl_config: "ambient-config" };
     const first = await run("bash", [runDemo], env);
     assert.equal(first.code, 0, first.output);
     const processes = await readFile(processLog, "utf8");
     assert.equal(processes.split("\n").filter((line) => line.startsWith("next:")).length, 1, "exactly one Next process receives cloud configuration");
-    assert.match(processes, new RegExp(`next:${cloudAccount}:${cloudDatabase}:${cloudBaseUrl}:set`));
-    assert.match(await readFile(curlLog, "utf8"), /\/api\/steward\/status/);
+    assert.match(processes, new RegExp(`next:${cloudAccount}:${cloudDatabase}:${cloudBaseUrl}:set:set`));
+    const curlCalls = await readFile(curlLog, "utf8");
+    assert.match(curlCalls, /\/api\/steward\/status/);
+    assert.match(curlCalls, new RegExp(`config:header = "Cookie: coquic-v2-preview=${previewToken}"`));
+    assert.match(curlCalls, /args:--noproxy \* -fsS --config -/);
     const repeated = await run("bash", [runDemo], env);
     assert.equal(repeated.code, 0, repeated.output);
     assert.equal((await readFile(processLog, "utf8")).split("\n").filter((line) => line.startsWith("next:")).length, 2);

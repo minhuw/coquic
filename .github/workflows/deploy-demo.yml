@@ -67,9 +67,11 @@ jobs:
       - name: Package V2 demo app
         run: |
           app_dir="${RUNNER_TEMP}/demo-app"
+          standalone_dir="site-v2/.next/standalone/site-v2"
+          test -f "${standalone_dir}/server.js"
           rm -rf -- "${app_dir}"
           install -d -m 755 "${app_dir}/.next"
-          cp -R -- site-v2/.next/standalone/. "${app_dir}/"
+          cp -R -- "${standalone_dir}/." "${app_dir}/"
           cp -R -- site-v2/.next/static "${app_dir}/.next/static"
           if [[ -d site-v2/public ]]; then
             cp -R -- site-v2/public "${app_dir}/public"

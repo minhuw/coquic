@@ -716,6 +716,12 @@ Use a quiet operational monitor with explicit freshness, conclusion, queues,
 signals, audit, and publication evidence. Do not imitate a command center or
 expose mutation controls. Metadata never occupies a balancing column.
 
+The control-loop status navigation stays theme-native: surface background, ink
+values, line separators, and muted supporting text. Routine counters do not use
+an inverse contrast plane. Selection uses accent-soft, an accent label, and the
+2px bottom indicator; hover uses canvas and keyboard focus uses accent-soft with
+the shared visible accent outline. Preserve the same grid in both themes.
+
 #### Complete task trajectory
 
 The task detail makes the complete validated trajectory the primary evidence

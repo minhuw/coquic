@@ -136,7 +136,7 @@ function ControlLoop({
   return (
     <section
       aria-label="Steward task channels"
-      className="mt-9 border-y border-line bg-contrast-field text-contrast-ink"
+      className="mt-9 border-y border-line bg-surface text-ink"
     >
       <div className="grid sm:grid-cols-2 lg:grid-cols-4">
         {steps.map((step, index) => {
@@ -147,18 +147,18 @@ function ControlLoop({
               key={`${step.label}-${index}`}
               href={step.href}
               aria-current={selected ? "page" : undefined}
-              className={`group relative min-w-0 border-contrast-line px-5 py-6 text-contrast-ink no-underline sm:px-6 ${index < 3 ? "border-b lg:border-b-0 lg:border-r" : ""} ${index === 0 ? "sm:border-r" : ""} ${index === 1 ? "lg:border-r" : ""}`}
+              className={`relative min-w-0 border-line px-5 py-6 text-ink no-underline focus-visible:bg-accent-soft sm:px-6 ${selected ? "bg-accent-soft" : "hover:bg-canvas"} ${index < 3 ? "border-b lg:border-b-0 lg:border-r" : ""} ${index === 0 ? "sm:border-r" : ""} ${index === 1 ? "lg:border-r" : ""}`}
             >
               <div className="flex items-center justify-between gap-4">
-                <span className="flex items-center gap-2 text-sm font-medium text-contrast-muted">
+                <span className={`flex items-center gap-2 text-sm font-medium ${selected ? "text-accent" : "text-muted"}`}>
                   <Icon aria-hidden="true" size={15} strokeWidth={1.7} />
                   {step.label}
                 </span>
-                {index < 3 ? <ArrowRight aria-hidden="true" size={14} className="text-contrast-muted" /> : null}
+                {index < 3 ? <ArrowRight aria-hidden="true" size={14} className="text-muted" /> : null}
               </div>
               <p className="mt-5 flex flex-wrap items-baseline gap-2">
                 <span className="text-2xl font-medium data-text">{step.value}</span>
-                <span className="text-xs text-contrast-muted">{step.detail}</span>
+                <span className="text-xs text-muted">{step.detail}</span>
               </p>
               {selected ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-accent" /> : null}
             </Link>

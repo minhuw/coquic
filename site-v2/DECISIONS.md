@@ -372,3 +372,12 @@ The non-secret URL is installed by ordinary Site deployment, while the four
 protected archive values retain their existing operator handoff and rollback
 behavior. Schema and example ownership lives under `site-v2/`; the upstream
 Worker/Durable Object deployment remains a separate operator concern.
+
+## D-029: Steward status navigation stays theme-native
+
+On 2026-09-14, the Steward control-loop strip uses semantic surface, ink, line,
+and muted tokens instead of an inverse plane for routine counters. Soft accent
+selection, an accent label and bottom indicator, and quiet hover/visible focus
+keep navigation distinct without a dominant black or inverted bright band.
+This is a presentation-only change; live/archive semantics, routes, and the
+responsive grid remain unchanged. The shared palette is unchanged.

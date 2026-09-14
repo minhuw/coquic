@@ -209,6 +209,65 @@ test("Steward task navigation exposes the public task channels", async ({ page }
   await expect(page).toHaveURL(/\/steward\/tasks\//);
 });
 
+for (const colorScheme of ["light", "dark"] as const) {
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
+    test(`Steward channels stay theme-native: ${colorScheme} ${viewport.width}`, async ({ page }, testInfo) => {
+      await page.emulateMedia({ colorScheme });
+      await page.setViewportSize(viewport);
+      await page.goto("/steward?view=tasks");
+      const channels = page.getByRole("region", { name: "Steward task channels" });
+      const selected = channels.locator('[aria-current="page"]');
+      const signals = channels.getByRole("link", { name: /^Signals/ });
+      // Resolve semantic tokens in the browser, so this guards rendering without freezing the palette.
+      const colors = await channels.evaluate((node) => {
+        const probe = document.createElement("span");
+        node.append(probe);
+        const values = Object.fromEntries(["surface", "ink", "line", "text-muted", "accent", "accent-soft", "canvas"].map((token) => {
+          probe.style.color = `var(--${token})`;
+          return [token, getComputedStyle(probe).color];
+        }));
+        probe.remove();
+        return values;
+      });
+      await expect(channels).toHaveCSS("background-color", colors.surface!);
+      await expect(channels).toHaveCSS("color", colors.ink!);
+      await expect(channels).toHaveCSS("border-top-color", colors.line!);
+      await expect(selected).toHaveAttribute("href", "/steward?view=tasks");
+      await expect(selected).toHaveCSS("background-color", colors["accent-soft"]!);
+      await expect(selected.locator("span").filter({ hasText: /^Tasks$/ })).toHaveCSS("color", colors.accent!);
+      await expect(selected.locator(".bottom-0")).toHaveCSS("height", "2px");
+      await expect(selected.locator(".bottom-0")).toHaveCSS("background-color", colors.accent!);
+      await expect(signals.locator(".text-xs")).toHaveCSS("color", colors["text-muted"]!);
+      await signals.hover();
+      await expect(signals).toHaveCSS("background-color", colors.canvas!);
+      await signals.focus();
+      await page.keyboard.press("Tab");
+      const planning = channels.getByRole("link", { name: /^Planning/ });
+      await expect(planning).toBeFocused();
+      await expect(planning).toHaveCSS("background-color", colors["accent-soft"]!);
+      await expect(planning).toHaveCSS("outline-style", "solid");
+      await expect(planning).toHaveCSS("outline-width", "2px");
+      await expect(planning).toHaveCSS("outline-color", colors.accent!);
+      const boxes = await channels.getByRole("link").evaluateAll((nodes) => nodes.map((node) => {
+        const box = node.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+      }));
+      for (let index = 1; index < boxes.length; index += 1) {
+        const previous = boxes[index - 1]!;
+        const current = boxes[index]!;
+        expect(current.left >= previous.right || current.top >= previous.bottom).toBeTruthy();
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+      await page.mouse.move(0, 0);
+      const screenshot = await page.screenshot({ path: testInfo.outputPath(`channels-${colorScheme}-${viewport.width}.png`), fullPage: true });
+      expect(screenshot.byteLength).toBeGreaterThan(1_000);
+      await page.keyboard.press("Enter");
+      await expect(page).toHaveURL(/\/steward\?view=planning/);
+      await expect(channels.locator('[aria-current="page"]')).toHaveAttribute("href", "/steward?view=planning");
+    });
+  }
+}
+
 test("Steward cached usage keeps exact totals, coverage, and task links", async ({ page }) => {
   await page.goto("/steward?view=tasks");
   await expect(page.getByRole("heading", { name: "Token and estimated-cost evidence" })).toBeVisible();

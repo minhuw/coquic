@@ -217,7 +217,7 @@ test("Steward empty, zero, stale and independent source failures", async ({ page
     await page.goto("/steward?view=tasks");
     const factory = page.locator(".steward-factory");
     await expect(factory.locator(".factory-readout")).toHaveCount(4);
-    await expect(factory).not.toContainText(/Snapshot live|Daemon|stale after| · observed |Observation intake/);
+    await expect(factory).not.toContainText(/Snapshot live|Daemon|stale after| · observed |Observation intake|Planning sorter/);
     await expect(factory.locator(".factory-freshness details, .factory-freshness summary, .factory-freshness [title], .factory-freshness [role=tooltip]")).toHaveCount(0);
     await expect(page.locator(".factory-explore, .factory-inspector")).toHaveCount(0);
     if (state === "empty") {
@@ -323,7 +323,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(trigger).toBeFocused();
       }
       await factory.locator('.factory-scene:visible [aria-label="Inspect Planning"]').click();
-      await expect(factory.getByRole("heading", { name: "Planning sorter", exact: true })).toBeVisible();
+      await expect(factory.getByRole("heading", { name: "Planning", exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`factory-inspector-${colorScheme}-${viewport.width}.png`) });
       await factory.getByRole("button", { name: "Close", exact: true }).click();
       const findings = (await new AxeBuilder({ page }).include(".steward-factory").analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");

@@ -217,6 +217,7 @@ test("Steward empty, zero, stale and independent source failures", async ({ page
     await page.goto("/steward?view=tasks");
     const factory = page.locator(".steward-factory");
     await expect(factory.locator(".factory-readout")).toHaveCount(4);
+    await expect(factory).not.toContainText("Snapshot live");
     await expect(page.locator(".factory-explore, .factory-inspector")).toHaveCount(0);
     if (state === "empty") {
       await expect(page.getByText("No published tasks yet.", { exact: true })).toBeVisible();
@@ -226,15 +227,19 @@ test("Steward empty, zero, stale and independent source failures", async ({ page
     } else if (state === "archive-unavailable") {
       await expect(page.getByText(/Task archive unavailable/)).toBeVisible();
       await expect(factory.locator(".factory-readout-2")).toContainText("2 / 4");
-      await expect(factory).toContainText("Snapshot live");
+      await expect(factory.locator("summary")).toHaveText("Updated 11:00 UTC");
     } else {
       await expect(page.getByRole("link", { name: "Clean publication fixture", exact: true })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Token and estimated-cost evidence" })).toBeVisible();
       if (state === "live-unavailable") {
-        await expect(factory).toContainText("Live snapshot unavailable");
+        await expect(factory).toContainText("Live data unavailable · Reload to try again.");
         await expect(factory.getByText("Unavailable", { exact: true })).toHaveCount(4);
       } else if (state === "stale") {
-        await expect(factory).toContainText("Snapshot stale");
+        await expect(factory.locator("summary")).toHaveText("Updated 11:00 UTC (stale)");
+        await factory.locator("summary").click();
+        await expect(factory.locator("time")).toBeVisible();
+        await expect(factory.locator("time")).toHaveText("2026-09-14T11:00:00Z");
+        await expect(factory).toContainText("Daemon Production");
         await expect(factory.locator(".factory-readout-2")).toContainText("2 / 4");
       } else {
         await expect(factory.locator(".factory-readout-0 .data-text")).toHaveText("0");
@@ -272,6 +277,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(factory.getByRole("region", { name: "Workflow inspector" })).toHaveCount(0);
       await expect(factory.locator(".factory-explore, .factory-telemetry")).toHaveCount(0);
       await expect(factory.locator(".factory-readout")).toHaveCount(4);
+      await expect(factory).not.toContainText("Snapshot live");
       const item = factory.locator(".factory-scene:visible [data-factory-item]").first();
       const before = await item.boundingBox();
       await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}-moving-a.png`) });
@@ -444,7 +450,13 @@ test("Steward live channels expose validated signals, planning, tasks, integrati
   await page.goto("/steward?view=signals");
   await expect(page.getByRole("heading", { name: "Signals evidence" })).toBeVisible();
   await expect(page.locator(".factory-readout-0")).toContainText("3pending");
-  await page.getByText("Snapshot live", { exact: true }).click();
+  const freshness = page.locator(".factory-freshness summary");
+  await expect(freshness).toHaveText(/^Updated \d{2}:\d{2} UTC$/);
+  await expect(page.locator(".steward-factory")).not.toContainText("Snapshot live");
+  await freshness.click();
+  const observedAt = await page.locator(".factory-freshness time").getAttribute("datetime");
+  expect(observedAt).toBeTruthy();
+  await expect(freshness).toHaveText(`Updated ${observedAt!.slice(11, 16)} UTC`);
   await expect(page.getByText(/Daemon Production · observed .* · stale after 60s/)).toBeVisible();
 
   await page.goto("/steward?view=planning");

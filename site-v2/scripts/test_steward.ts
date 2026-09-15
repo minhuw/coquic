@@ -1108,7 +1108,7 @@ async function main() {
   await runCase("overview outage render", { ...scenario([], []), mode: "outage" }, async () => {
     const html = await renderOverview();
     assert.match(html, /Task archive unavailable/);
-    assert.match(html, /Live snapshot unavailable/);
+    assert.match(html, /Live data unavailable · Reload to try again\./);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
     assertOverviewHasNoLegacyOutput(html);
@@ -1124,16 +1124,18 @@ async function main() {
   await runCase("archive unavailable preserves real live readouts", { ...scenario([], []), mode: "server-error" }, async () => {
     const html = await renderOverview();
     assert.match(html, /Task archive unavailable/);
-    assert.match(html, /Snapshot live/);
+    assert.match(html, /<summary>Updated 11:00 UTC<\/summary>/);
+    assert(!html.includes("Snapshot live"));
     assert.match(html, />2 \/ 4<\/span>/);
     assert.match(html, />1 \/ 2<\/span>/);
   });
 
-  await runCase("stale live snapshot is explicit", { ...scenario(activeRows, historyRows), live: { ...liveSnapshotFixture, availability: "stale" } }, async () => {
+  await runCase("stale live snapshot is explicit", { ...scenario(activeRows, historyRows), live: { ...liveSnapshotFixture, availability: "stale", observedAt: "2026-09-14T03:07:42.123Z" } }, async () => {
     const html = await renderOverview({ view: "signals" });
-    assert.match(html, /Snapshot stale/);
+    assert.match(html, /<summary>Updated 03:07 UTC \(stale\)<\/summary>/);
+    assert.match(html, /Daemon Production/);
     assert.match(html, />3<\/span><span[^>]*>pending/);
-    assert.match(html, /<time dateTime=/);
+    assert.match(html, /<time dateTime="2026-09-14T03:07:42.123Z">2026-09-14T03:07:42.123Z<\/time>/);
   });
 
   for (const availability of ["live", "stale", "unavailable"] as const) {
@@ -1150,6 +1152,7 @@ async function main() {
       const line = html.match(/<section aria-label="Steward task channels"[\s\S]*?<\/section>/)?.[0];
       assert(line);
       assert.match(line, /Demo animation/);
+      assert(!line.includes("Snapshot live"));
       assert(!line.includes("Workflow inspector"));
       assert(!line.includes("factory-explore"));
       assert.equal((line.match(/class="factory-readout factory-readout-/g) ?? []).length, 4);
@@ -1158,9 +1161,10 @@ async function main() {
       if (availability === "unavailable") {
         assert.equal((line.match(/>Unavailable<\/span>/g) ?? []).length, 4);
         assert(!line.includes(">Idle"));
+        assert(line.includes("Live data unavailable · Reload to try again."));
       } else {
         const suffix = "";
-        assert.match(line, new RegExp(`Snapshot ${availability}`));
+        assert(line.includes(`<summary>Updated 11:00 UTC${availability === "stale" ? " (stale)" : ""}</summary>`));
         assert(line.includes(`>Idle${suffix}</span>`));
         assert.equal(line.split(`>0 / 0${suffix}</span>`).length - 1, 2);
       }

@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { StewardLiveSnapshot } from "@/lib/steward-live/schema";
 
 const stations = [
-  { name: "Signals", machine: "Observation intake", description: "Collect repository observations for planning. The public snapshot exposes the pending count, not signal contents." },
+  { name: "Signals", machine: "Signals", description: "Collect repository observations for planning. The public snapshot exposes the pending count, not signal contents." },
   { name: "Planning", machine: "Planning sorter", description: "Triage observations and select work. Only the planner state is public; plans and run details appear only in published tasks." },
   { name: "Tasks", machine: "Parallel workstations", description: "Execute, validate, and review work in parallel. Active and queued counts are live; identities, transcripts, and usage belong to published tasks." },
   { name: "Integration", machine: "Integration assembly", description: "Bring reviewed work together for integration. Active and queued counts do not expose progress or completion events; available evidence is in published tasks." },
@@ -45,7 +45,7 @@ function FactoryScene({ compact, inspect }: { compact: boolean; inspect: (statio
             <path d={station === 0 ? "M-24-20H24L12 8H-12Z M-12 8V22H12V8" : station === 1 ? "M-25-18H25L0 10Z M0 10V28 M-22 28L0 10L22 28" : station === 2 ? "M-25 25H25 M-20 25V-18H20V10H-20 M-10-6L-3 0L-10 6 M3 6H12" : "M-25 24H25 M-22-22V4 M22-22V4 M-22-10H22 M-12 10L0 3L12 10V25H-12Z"} />
             <g className="factory-mechanism"><path d="M-16-30H16" /></g>
           </g>
-          {!compact && <text y="78" textAnchor="middle">{station === 2 ? ["Execute", "Validate", "Review"][index - 2] : stations[station!]!.machine}</text>}
+          {!compact && station !== 0 && <text y="78" textAnchor="middle">{station === 2 ? ["Execute", "Validate", "Review"][index - 2] : stations[station!]!.machine}</text>}
         </g>
       ))}
       {paths.map((d, index) => {

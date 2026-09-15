@@ -217,7 +217,7 @@ test("Steward empty, zero, stale and independent source failures", async ({ page
     await page.goto("/steward?view=tasks");
     const factory = page.locator(".steward-factory");
     await expect(factory.locator(".factory-readout")).toHaveCount(4);
-    await expect(factory).not.toContainText(/Snapshot live|Daemon|stale after| · observed /);
+    await expect(factory).not.toContainText(/Snapshot live|Daemon|stale after| · observed |Observation intake/);
     await expect(factory.locator(".factory-freshness details, .factory-freshness summary, .factory-freshness [title], .factory-freshness [role=tooltip]")).toHaveCount(0);
     await expect(page.locator(".factory-explore, .factory-inspector")).toHaveCount(0);
     if (state === "empty") {

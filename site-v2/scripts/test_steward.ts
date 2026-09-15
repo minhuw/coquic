@@ -1124,7 +1124,7 @@ async function main() {
   await runCase("archive unavailable preserves real live readouts", { ...scenario([], []), mode: "server-error" }, async () => {
     const html = await renderOverview();
     assert.match(html, /Task archive unavailable/);
-    assert.match(html, /<summary>Updated 11:00 UTC<\/summary>/);
+    assert.match(html, /<time dateTime="2026-09-14T11:00:00Z">Updated 11:00 UTC<\/time>/);
     assert(!html.includes("Snapshot live"));
     assert.match(html, />2 \/ 4<\/span>/);
     assert.match(html, />1 \/ 2<\/span>/);
@@ -1132,10 +1132,9 @@ async function main() {
 
   await runCase("stale live snapshot is explicit", { ...scenario(activeRows, historyRows), live: { ...liveSnapshotFixture, availability: "stale", observedAt: "2026-09-14T03:07:42.123Z" } }, async () => {
     const html = await renderOverview({ view: "signals" });
-    assert.match(html, /<summary>Updated 03:07 UTC \(stale\)<\/summary>/);
-    assert.match(html, /Daemon Production/);
+    assert.doesNotMatch(html, /Daemon Production|stale after/);
     assert.match(html, />3<\/span><span[^>]*>pending/);
-    assert.match(html, /<time dateTime="2026-09-14T03:07:42.123Z">2026-09-14T03:07:42.123Z<\/time>/);
+    assert.match(html, /<time dateTime="2026-09-14T03:07:42.123Z">Updated 03:07 UTC \(stale\)<\/time>/);
   });
 
   for (const availability of ["live", "stale", "unavailable"] as const) {
@@ -1153,6 +1152,7 @@ async function main() {
       assert(line);
       assert.match(line, /Demo animation/);
       assert(!line.includes("Snapshot live"));
+      assert.doesNotMatch(line, /<details|<summary|title=|role="tooltip"|Daemon|stale after| · observed /);
       assert(!line.includes("Workflow inspector"));
       assert(!line.includes("factory-explore"));
       assert.equal((line.match(/class="factory-readout factory-readout-/g) ?? []).length, 4);
@@ -1164,7 +1164,7 @@ async function main() {
         assert(line.includes("Live data unavailable · Reload to try again."));
       } else {
         const suffix = "";
-        assert(line.includes(`<summary>Updated 11:00 UTC${availability === "stale" ? " (stale)" : ""}</summary>`));
+        assert(line.includes(`<time dateTime="2026-09-14T11:00:00Z">Updated 11:00 UTC${availability === "stale" ? " (stale)" : ""}</time>`));
         assert(line.includes(`>Idle${suffix}</span>`));
         assert.equal(line.split(`>0 / 0${suffix}</span>`).length - 1, 2);
       }

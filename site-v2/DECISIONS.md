@@ -414,7 +414,7 @@ item positions and frozen pause/reduced-motion frames, not merely CSS declaratio
 
 The user explicitly rejected numbered station controls and the permanent
 Input/Work/Output grid. Superseding that composition, one dominant demo scene
-now carries four nearby real readouts and one freshness disclosure. Station
+now carries four nearby real readouts and one freshness line. Station
 inspection is closed initially, contextual and nonmodal; Close/Escape return
 focus to a stable machine even when a moving item was selected. The compact
 heading has no slogan or explanatory paragraph.
@@ -425,3 +425,10 @@ black banners, duplicate live summaries, and empty scaffolding. Signals and
 Planning keep concise evidence limits and archive navigation. All source
 validation, independent live/archive failures, canonical routes, data contracts,
 and pause/reduced-motion behavior remain unchanged. No backend changes.
+
+## 2026-09-14 — Plain Steward update time
+
+The user rejected the daemon/observation/TTL technical readout, including its
+disclosure. Show only “Updated HH:MM UTC” with “ (stale)” when needed in a
+semantic time element; retain the precise timestamp in datetime, not a tooltip.
+Unavailable copy and the validated backend snapshot contract remain unchanged.

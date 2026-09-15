@@ -725,9 +725,10 @@ represents jobs, progress, or activity inferred from a snapshot. Keep a light
 neutral plane with the existing dark-token remapping.
 
 Place real snapshot values beside all four stations, with Tasks shown once for
-the whole work area. One compact freshness disclosure exposes live/stale or
-unavailable, public daemon mode, and the exact observation timestamp. Zero stays
-zero. Native count links preserve canonical Signals, Planning, and Tasks routing;
+the whole work area. One plain semantic time shows “Updated HH:MM UTC”, adding
+“ (stale)” when stale and retaining the exact observation timestamp in datetime.
+Unavailable keeps its recovery text. No daemon mode, TTL, tooltip, or freshness
+disclosure is shown. Zero stays zero. Native count links preserve canonical Signals, Planning, and Tasks routing;
 Integration links to Tasks. Archive availability cannot change these values.
 
 Stable SVG machine controls support Tab, Enter, and Space with visible focus.

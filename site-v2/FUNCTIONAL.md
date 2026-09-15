@@ -198,8 +198,9 @@ announced without replacing retained valid evidence with an error message.
   “Demo animation”, pause/play, and View evidence; no explanatory grid or slogans.
 - Fixed representative pieces are demonstration only, never jobs or progress
   inferred from counts. Real snapshot values sit beside each station, Tasks once
-  across its benches, with one compact live/stale/unavailable freshness disclosure
-  retaining public daemon mode and an accessible exact observation timestamp.
+  across its benches, with plain semantic time “Updated HH:MM UTC” and an optional
+  “ (stale)” suffix. Retain the exact observation timestamp in datetime and the
+  unavailable recovery text; no freshness disclosure or tooltip.
 - Station controls are keyboard-reachable with stable hit targets and visible
   focus. Moving items are pointer shortcuts, not moving keyboard stops. Selection
   opens a nonmodal contextual inspector, closed initially, with one concise
@@ -233,8 +234,8 @@ announced without replacing retained valid evidence with an error message.
   MUST NOT prevent archive history from rendering.
 - Live, stale, unavailable, incompatible, and malformed snapshot states are
   distinct. Stale values retain their counts/state with an explicit stale label.
-- Render only the public daemon `production`/`dry-run` mode and observed age;
-  all other daemon/operator configuration remains private.
+- Do not render daemon mode or the stale threshold; the public snapshot schema
+  remains unchanged and all private daemon/operator configuration stays private.
 - No live task IDs or details exist. Every task row and detail link continues to
   come only from the archive publication.
 

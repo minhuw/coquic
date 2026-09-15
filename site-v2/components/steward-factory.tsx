@@ -101,7 +101,7 @@ export function StewardFactory({ snapshot, activeView }: { snapshot: StewardLive
       <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted">Demo animation</span><button className="factory-control" type="button" disabled={reduced} aria-label={reduced ? "Play animation (reduced motion)" : paused ? "Play animation" : "Pause animation"} onClick={() => setPaused(!paused)}>{paused || reduced ? "Play" : "Pause"}</button><a className="factory-control text-accent" href="#steward-evidence">View evidence</a></div>
     </header>
     <div className="factory-freshness">
-      {snapshot ? <details><summary>{`Updated ${snapshot.observedAt.slice(11, 16)} UTC${snapshot.availability === "stale" ? " (stale)" : ""}`}</summary><span>Daemon {snapshot.daemon.mode === "production" ? "Production" : "Dry run"} · observed <time dateTime={snapshot.observedAt}>{snapshot.observedAt}</time> · stale after {snapshot.staleAfterSeconds}s</span></details> : <span>Live data unavailable · Reload to try again.</span>}
+      {snapshot ? <time dateTime={snapshot.observedAt}>{`Updated ${snapshot.observedAt.slice(11, 16)} UTC${snapshot.availability === "stale" ? " (stale)" : ""}`}</time> : <span>Live data unavailable · Reload to try again.</span>}
     </div>
     <div className="factory-floor">
       <div className="factory-drawing"><FactoryScene compact={false} inspect={inspect} /><FactoryScene compact inspect={inspect} />

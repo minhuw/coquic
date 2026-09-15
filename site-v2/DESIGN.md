@@ -713,39 +713,40 @@ Generated reports are primary artifacts, not decorative embeds.
 
 ### Steward
 
-Use a quiet operational monitor with explicit freshness, conclusion, queues,
-signals, audit, and publication evidence. Do not imitate a command center or
-expose mutation controls. Metadata never occupies a balancing column.
+Steward opens with one viewport-wide, theme-native animated factory below the
+site header. The compact opening contains only Steward, “Demo animation”, one
+pause/play control, and View evidence. No eyebrow, slogan, caption paragraph,
+numbered station row, permanent explanation grid, or inverse status banner.
 
-The control-loop production-line figure stays theme-native: surface background, ink
-values, line separators, and muted supporting text. Routine counters do not use
-an inverse contrast plane. Selection uses accent-soft, an accent label, and the
-2px bottom indicator; hover uses canvas and keyboard focus uses accent-soft with
-the shared visible accent outline. Preserve the same grid in both themes.
+The connected conveyor carries fixed representative pieces through Signals,
+Planning, parallel Tasks benches, and Integration. This user-requested canvas
+alone is exempt from static-only motion and evidence-width rules. Motion never
+represents jobs, progress, or activity inferred from a snapshot. Keep a light
+neutral plane with the existing dark-token remapping.
 
-At the user’s explicit request, Steward opens with one viewport-wide factory
-canvas below the site header, occupying at least the remaining small viewport
-height. A single connected conveyor carries fixed representative signal pieces
-into a planning sorter, through parallel task benches, and into integration
-assembly/output. Purposeful machine geometry and looping illustrative motion
-are a narrowly scoped exception to the static-only and evidence-width rules;
-this is not permission for independent cards, decorative chrome, or a black band.
-The pale neutral surface, existing tokens, and dark remapping remain mandatory.
+Place real snapshot values beside all four stations, with Tasks shown once for
+the whole work area. One compact freshness disclosure exposes live/stale or
+unavailable, public daemon mode, and the exact observation timestamp. Zero stays
+zero. Native count links preserve canonical Signals, Planning, and Tasks routing;
+Integration links to Tasks. Archive availability cannot change these values.
 
-Label it “Illustrative workflow — not live job tracking.” Never derive piece
-counts, movement, timing, progress, or completion from aggregate snapshots.
-Literal live/stale/unavailable counts, daemon mode and observation time belong
-in a separate evidence strip; idle/zero can coexist with illustrative movement.
-Archive counts and links remain independent. Existing operational evidence below
-retains its maximum width and canonical query routing.
+Stable SVG machine controls support Tab, Enter, and Space with visible focus.
+Moving pieces are pointer shortcuts to the same station information, never Tab
+stops. Selection opens a nonmodal contextual panel adjacent to the scene with
+one concise paragraph, one evidence link, and Close. Nothing is reserved when
+closed. Close and Escape restore focus to the visible stable station trigger,
+including after item selection. One pause stops every piece and mechanism;
+reduced motion and page visibility remain continuously respected. Compact
+screens use the connected vertical scene with unscaled HTML count labels.
 
-One pause/play control stops every piece and machine. Start paused for reduced
-motion, continuously respect that preference, and pause while the page is hidden.
-Stable native station and representative-item controls provide the semantic list
-and keyboard equivalent of pointer inspection. The inspector explains Input,
-Work, Output, and what public evidence does and does not expose. Compact screens
-use a contained vertical factory rather than shrinking labels or overflowing.
-These exceptions apply only to this educational Steward canvas.
+Below the scene, Published tasks has one archive count/latest-publication header,
+actual active/history lists, task links, pagination only when available, and all
+published usage evidence. No automatic selected-task preview, status aside, or
+duplicate live metrics. Empty archives say “No published tasks yet” without empty
+lists, pagination, or usage scaffolding. Unavailable reads offer concise recovery
+text. Signals and Planning retain concise evidence limits and a task-archive link,
+not duplicate overview tables. Backend contracts and source independence remain
+unchanged.
 
 #### Complete task trajectory
 

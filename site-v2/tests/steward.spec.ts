@@ -200,13 +200,65 @@ async function holdTrajectoryResponse(page: Page, taskId: string, runId: string,
 test("Steward task navigation exposes the public task channels", async ({ page }) => {
   await page.goto("/steward?view=tasks");
   await expect(page.getByRole("heading", { level: 1, name: "Steward" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Current task load and visible history" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Published tasks" })).toBeVisible();
   const channels = page.getByRole("region", { name: "Steward task channels" });
   for (const label of ["Signals", "Planning", "Tasks", "Integration"]) await expect(channels.getByRole("link", { name: new RegExp(label) })).toBeVisible();
   const taskLinks = page.locator('a[href^="/steward/tasks/"]');
   await expect(taskLinks.first()).toBeVisible();
   await taskLinks.first().click();
   await expect(page).toHaveURL(/\/steward\/tasks\//);
+});
+
+test("Steward empty, zero, stale and independent source failures", async ({ page }, testInfo) => {
+  test.skip(Boolean(process.env.PLAYWRIGHT_BASE_URL), "State overrides belong to the loopback harness only");
+  await page.setViewportSize({ width: 320, height: 900 });
+  for (const state of ["empty", "zero", "stale", "live-unavailable", "archive-unavailable"]) {
+    await page.setExtraHTTPHeaders({ "x-steward-test-state": state });
+    await page.goto("/steward?view=tasks");
+    const factory = page.locator(".steward-factory");
+    await expect(factory.locator(".factory-readout")).toHaveCount(4);
+    await expect(page.locator(".factory-explore, .factory-inspector")).toHaveCount(0);
+    if (state === "empty") {
+      await expect(page.getByText("No published tasks yet.", { exact: true })).toBeVisible();
+      await expect(page.locator("#steward-evidence ul, #steward-evidence nav, #steward-evidence aside, #steward-evidence table")).toHaveCount(0);
+      await expect(page.locator("#steward-evidence")).not.toContainText("Usage unavailable");
+      await page.screenshot({ path: testInfo.outputPath("factory-empty-320.png"), fullPage: true });
+    } else if (state === "archive-unavailable") {
+      await expect(page.getByText(/Task archive unavailable/)).toBeVisible();
+      await expect(factory.locator(".factory-readout-2")).toContainText("2 / 4");
+      await expect(factory).toContainText("Snapshot live");
+    } else {
+      await expect(page.getByRole("link", { name: "Clean publication fixture", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Token and estimated-cost evidence" })).toBeVisible();
+      if (state === "live-unavailable") {
+        await expect(factory).toContainText("Live snapshot unavailable");
+        await expect(factory.getByText("Unavailable", { exact: true })).toHaveCount(4);
+      } else if (state === "stale") {
+        await expect(factory).toContainText("Snapshot stale");
+        await expect(factory.locator(".factory-readout-2")).toContainText("2 / 4");
+      } else {
+        await expect(factory.locator(".factory-readout-0 .data-text")).toHaveText("0");
+        await expect(factory.locator(".factory-readout-1 .data-text")).toHaveText("Idle");
+        for (const index of [2, 3]) await expect(factory.locator(`.factory-readout-${index} .data-text`)).toHaveText("0 / 0");
+      }
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+  }
+});
+
+test("Steward active and history pagination retain independent cursors", async ({ page }) => {
+  test.skip(Boolean(process.env.PLAYWRIGHT_BASE_URL), "State overrides belong to the loopback harness only");
+  await page.setExtraHTTPHeaders({ "x-steward-test-state": "pages" });
+  await page.goto("/steward?view=tasks");
+  await page.getByRole("link", { name: "Next active tasks", exact: true }).click();
+  await expect(page).toHaveURL(/activeCursor=/);
+  await page.getByRole("link", { name: "Next page", exact: true }).click();
+  await expect(page).toHaveURL(/cursor=.*activeCursor=/);
+  await expect(page.getByRole("link", { name: "Previous active tasks", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Previous page", exact: true }).click();
+  await expect(page).toHaveURL(/activeCursor=/);
+  await page.getByRole("link", { name: "Previous active tasks", exact: true }).click();
+  await expect(page.getByRole("link", { name: "Next active tasks", exact: true })).toBeVisible();
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
@@ -217,6 +269,9 @@ for (const colorScheme of ["light", "dark"] as const) {
       await page.goto("/steward?view=tasks");
       const factory = page.getByRole("region", { name: "Steward task channels" });
       await expect(factory).toHaveAttribute("data-motion", "running");
+      await expect(factory.getByRole("region", { name: "Workflow inspector" })).toHaveCount(0);
+      await expect(factory.locator(".factory-explore, .factory-telemetry")).toHaveCount(0);
+      await expect(factory.locator(".factory-readout")).toHaveCount(4);
       const item = factory.locator(".factory-scene:visible [data-factory-item]").first();
       const before = await item.boundingBox();
       await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}-moving-a.png`) });
@@ -224,9 +279,9 @@ for (const colorScheme of ["light", "dark"] as const) {
       const after = await item.boundingBox();
       expect(Math.hypot(after!.x - before!.x, after!.y - before!.y)).toBeGreaterThan(5);
       await page.screenshot({ path: testInfo.outputPath(`factory-${colorScheme}-${viewport.width}-moving-b.png`) });
-      const pause = factory.getByRole("button", { name: "Pause illustration" });
+      const pause = factory.getByRole("button", { name: "Pause animation" });
       await pause.focus(); await page.keyboard.press("Enter");
-      await expect(factory.getByRole("button", { name: "Play illustration" })).toBeFocused();
+      await expect(factory.getByRole("button", { name: "Play animation" })).toBeFocused();
       const frozen = await item.boundingBox();
       const mechanism = factory.locator(".factory-scene:visible .factory-mechanism").first();
       const mechanismBefore = await mechanism.boundingBox();
@@ -238,18 +293,34 @@ for (const colorScheme of ["light", "dark"] as const) {
       expect(target!.width).toBeGreaterThanOrEqual(44);
       expect(target!.height).toBeGreaterThanOrEqual(44);
       await piece.click();
-      await expect(factory.getByRole("heading", { name: /Illustrative piece/ })).toBeVisible();
-      for (const name of ["Signals", "Planning", "Tasks", "Integration"]) {
-        const control = factory.getByRole("list", { name: "Production line in workflow order" }).getByRole("button", { name: new RegExp(name) });
-        await control.focus(); await page.keyboard.press("Enter");
-        await expect(control).toHaveAttribute("aria-pressed", "true");
-        for (const term of ["Input", "Work", "Output"]) await expect(factory.getByRole("term").filter({ hasText: new RegExp(`^${term}$`) })).toBeVisible();
+      await expect(factory.getByRole("heading", { name: /Demo piece/ })).toBeVisible();
+      await factory.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(factory.locator('.factory-scene:visible [data-station="0"][tabindex="0"]')).toBeFocused();
+      const machines = factory.locator('.factory-scene:visible [data-station][tabindex="0"]');
+      await expect(machines).toHaveCount(6);
+      for (let index = 0; index < 6; index++) {
+        const trigger = machines.nth(index);
+        if (index === 0) await trigger.focus(); else await page.keyboard.press("Tab");
+        await expect(trigger).toBeFocused();
+        const hit = await trigger.boundingBox();
+        expect(hit!.width).toBeGreaterThanOrEqual(44);
+        expect(hit!.height).toBeGreaterThanOrEqual(44);
+        await page.keyboard.press("Enter");
+        const inspector = factory.getByRole("region", { name: "Workflow inspector" });
+        await expect(inspector).toBeFocused();
+        await expect(inspector.locator("p")).toHaveCount(1);
+        await expect(inspector.getByRole("link")).toHaveCount(1);
+        await page.keyboard.press("Escape");
+        await expect(inspector).toHaveCount(0);
+        await expect(trigger).toBeFocused();
+        await page.keyboard.press("Space");
+        await inspector.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(trigger).toBeFocused();
       }
-      const representative = factory.getByRole("button", { name: "Inspect representative item" });
-      await representative.focus(); await page.keyboard.press("Enter");
-      await expect(factory.getByRole("heading", { name: /Illustrative piece/ })).toBeVisible();
-      await factory.locator('.factory-scene:visible [aria-label="Inspect Planning sorter"]').click();
+      await factory.locator('.factory-scene:visible [aria-label="Inspect Planning"]').click();
       await expect(factory.getByRole("heading", { name: "Planning sorter", exact: true })).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`factory-inspector-${colorScheme}-${viewport.width}.png`) });
+      await factory.getByRole("button", { name: "Close", exact: true }).click();
       const findings = (await new AxeBuilder({ page }).include(".steward-factory").analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");
       expect(findings).toEqual([]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
@@ -273,18 +344,27 @@ test("factory reduced motion, preference changes, forced colors and 200% zoom", 
     await expect(factory).toHaveAttribute("data-motion", "paused");
     const items = factory.locator(".factory-scene:visible [data-factory-item]");
     const positions = () => items.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [r.x, r.y]; }));
-    await expect(factory.getByRole("button", { name: "Play illustration" })).toBeDisabled();
+    await expect(factory.getByRole("button", { name: "Play animation" })).toBeDisabled();
     await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(300);
     const before = await positions(); await page.waitForTimeout(500); expect(await positions()).toEqual(before);
-    await expect(factory.getByRole("button", { name: "Play illustration" })).toBeDisabled();
+    await expect(factory.getByRole("button", { name: "Play animation" })).toBeDisabled();
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await factory.getByRole("button", { name: "Play illustration" }).click();
+    await factory.getByRole("button", { name: "Play animation" }).click();
     await expect(factory).toHaveAttribute("data-motion", "running");
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(factory).toHaveAttribute("data-motion", "paused");
-    const station = factory.getByRole("button", { name: "4. Integration" });
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await factory.getByRole("button", { name: "Play animation", exact: true }).click();
+    await page.evaluate(() => { Object.defineProperty(document, "hidden", { configurable: true, value: true }); document.dispatchEvent(new Event("visibilitychange")); });
+    await expect(factory).toHaveAttribute("data-motion", "paused");
+    const hiddenPositions = await positions(); await page.waitForTimeout(250); expect(await positions()).toEqual(hiddenPositions);
+    await page.evaluate(() => { Reflect.deleteProperty(document, "hidden"); document.dispatchEvent(new Event("visibilitychange")); });
+    await expect(factory).toHaveAttribute("data-motion", "running");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const station = factory.locator('.factory-scene:visible [tabindex="0"][aria-label="Inspect Integration"]');
     await station.focus(); await page.keyboard.press("Enter");
+    await page.keyboard.press("Escape");
     await expect(station).toBeFocused();
     await expect(station).toHaveCSS("outline-style", "solid");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
@@ -362,18 +442,19 @@ test("Steward usage tables keep horizontal scrolling inside their containers at 
 
 test("Steward live channels expose validated signals, planning, tasks, integration, mode, and age", async ({ page }) => {
   await page.goto("/steward?view=signals");
-  await expect(page.getByRole("heading", { name: "Signals live state" })).toBeVisible();
-  await expect(page.getByText("3 pending", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Signals evidence" })).toBeVisible();
+  await expect(page.locator(".factory-readout-0")).toContainText("3pending");
+  await page.getByText("Snapshot live", { exact: true }).click();
   await expect(page.getByText(/Daemon Production · observed .* · stale after 60s/)).toBeVisible();
 
   await page.goto("/steward?view=planning");
-  await expect(page.getByRole("heading", { name: "Planning live state" })).toBeVisible();
-  await expect(page.getByRole("definition").filter({ hasText: "Active" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Planning evidence" })).toBeVisible();
+  await expect(page.locator(".factory-readout-1")).toContainText("Active");
 
   const channels = page.getByRole("region", { name: "Steward task channels" });
-  await expect(channels.getByRole("link", { name: /Tasks.*active \/ queued.*2 \/ 4/ })).toBeVisible();
-  await expect(channels).toContainText("Archive history: 3 · independent of live counts.");
-  await expect(channels.getByRole("link", { name: /Integration.*active \/ queued.*1 \/ 2/ })).toBeVisible();
+  await expect(channels.getByRole("link", { name: /Tasks.*2 \/ 4.*active \/ queued/ })).toBeVisible();
+  await expect(channels.locator("time")).toHaveAttribute("datetime", /Z$/);
+  await expect(channels.getByRole("link", { name: /Integration.*1 \/ 2.*active \/ queued/ })).toBeVisible();
 });
 
 test("complete trajectory renders every record in source order with stable anchors", async ({ page }) => {

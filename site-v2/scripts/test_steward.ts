@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -809,7 +810,19 @@ async function startPlaywrightFixtureServer(): Promise<void> {
   process.env.__NEXT_DEV_INDICATOR = "false";
   cloudRepository = loadCloudRepository();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = fakeFetch(browserScenario, calls) as typeof fetch;
+  const requestScenario = new AsyncLocalStorage<Scenario>();
+  const browserStates: Record<string, Scenario> = {
+    empty: { ...scenario([], []), usage: { contextRows: [], summaryRows: [], invocationRows: [], turnRows: [], globalRows: [] } },
+    stale: { ...browserScenario, live: { ...liveSnapshotFixture, availability: "stale" } },
+    zero: { ...browserScenario, live: { ...liveSnapshotFixture, signals: { pending: 0 }, planning: { state: "idle" }, tasks: { active: 0, queued: 0 }, integration: { active: 0, queued: 0 } } },
+    "live-unavailable": { ...browserScenario, live: {} },
+    "archive-unavailable": { ...browserScenario, mode: "server-error" },
+    pages: scenario(
+      Array.from({ length: 51 }, (_, index) => browserTaskRow({ ...activeFixture.data.task, taskId: `task-active-${index}`, title: `Active task ${index}` }, "2026-07-28T00:00:03Z")),
+      Array.from({ length: 51 }, (_, index) => browserTaskRow({ ...cleanTask, taskId: `task-history-${index}`, title: `History task ${index}` }, "2026-07-28T00:00:03Z")),
+    ),
+  };
+  globalThis.fetch = ((input, init) => fakeFetch(requestScenario.getStore() ?? browserScenario, calls)(input, init)) as typeof fetch;
   const app = createNext({ dev: true, hostname: host, port });
   const handle = app.getRequestHandler();
   let server: ReturnType<typeof createServer> | null = null;
@@ -833,7 +846,10 @@ async function startPlaywrightFixtureServer(): Promise<void> {
   process.once("SIGTERM", () => { void close(0); });
   try {
     await app.prepare();
-    server = createServer((request, response) => { void handle(request, response); });
+    server = createServer((request, response) => {
+      const state = String(request.headers["x-steward-test-state"] ?? "");
+      requestScenario.run(browserStates[state] ?? browserScenario, () => { void handle(request, response); });
+    });
     await new Promise<void>((resolveListen, rejectListen) => {
       server!.once("error", rejectListen);
       server!.listen(port, host, () => resolveListen());
@@ -956,20 +972,18 @@ async function main() {
 
   await runCase("overview empty archive with live state", scenario([], []), async () => {
     const html = await renderOverview();
-    assert.match(html, /No visible tasks are published yet/);
-    assert.match(html, /Live active/);
-    assert.match(html, />2<\/dd>/);
-    assert.match(html, /Live queued/);
-    assert.match(html, />4<\/dd>/);
+    assert.match(html, /No published tasks yet/);
+    assert.match(html, />2 \/ 4<\/span>/);
+    for (const absent of ["factory-explore", "Workflow inspector", "Active tasks", "Task history pages", "Cloud publication status", "Selected task", "<ul></ul>"]) assert(!html.includes(absent), absent);
     assert.match(html, /Archive history/);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
     const signalsHtml = await renderOverview({ view: "signals" });
-    assert.match(signalsHtml, /Signals live state/);
-    assert.match(signalsHtml, /3 pending/);
+    assert.match(signalsHtml, /Signals evidence/);
+    assert.match(signalsHtml, />3<\/span><span[^>]*>pending/);
     const planningHtml = await renderOverview({ view: "planning" });
-    assert.match(planningHtml, /Planning live state/);
-    assert.match(planningHtml, />Active<\/dd>/);
+    assert.match(planningHtml, /Planning evidence/);
+    assert.match(planningHtml, />Active<\/span>/);
     assertOverviewHasNoLegacyOutput(html);
     assertOverviewHasNoLegacyOutput(signalsHtml);
     assertOverviewHasNoLegacyOutput(planningHtml);
@@ -977,7 +991,7 @@ async function main() {
 
   await runCase("overview active after planning render", scenario(activeRows, historyRows), async () => {
     const html = await renderOverview({ view: "tasks" });
-    assert.match(html, /Current task load and visible history/);
+    assert.match(html, /Published tasks/);
     assert.match(html, /Active publication fixture/);
     assert.match(html, /Redacted publication fixture/);
     assert.match(html, /href="\/steward\/tasks\/task-active"/);
@@ -1093,7 +1107,7 @@ async function main() {
 
   await runCase("overview outage render", { ...scenario([], []), mode: "outage" }, async () => {
     const html = await renderOverview();
-    assert.match(html, /Cloud task archive unavailable/);
+    assert.match(html, /Task archive unavailable/);
     assert.match(html, /Live snapshot unavailable/);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
@@ -1102,16 +1116,24 @@ async function main() {
 
   await runCase("live unavailable preserves archive history", scenario(activeRows, historyRows), async () => {
     const html = await renderOverview({ view: "tasks" });
-    assert.match(html, /Live active<\/dt><dd[^>]*>Unavailable/);
-    assert.match(html, /Archive history<\/dt><dd[^>]*>1/);
+    assert.match(html, /factory-readout-2[\s\S]*?>Unavailable<\/span>/);
+    assert.match(html, /Archive history: 1/);
     assert.match(html, /Redacted publication fixture/);
   }, { ...VALID_ENV, COQUIC_STEWARD_LIVE_SNAPSHOT_URL: undefined });
 
+  await runCase("archive unavailable preserves real live readouts", { ...scenario([], []), mode: "server-error" }, async () => {
+    const html = await renderOverview();
+    assert.match(html, /Task archive unavailable/);
+    assert.match(html, /Snapshot live/);
+    assert.match(html, />2 \/ 4<\/span>/);
+    assert.match(html, />1 \/ 2<\/span>/);
+  });
+
   await runCase("stale live snapshot is explicit", { ...scenario(activeRows, historyRows), live: { ...liveSnapshotFixture, availability: "stale" } }, async () => {
     const html = await renderOverview({ view: "signals" });
-    assert.match(html, /Signals snapshot stale/);
-    assert.match(html, /3 pending/);
-    assert.match(html, />Stale<\/dd>/);
+    assert.match(html, /Snapshot stale/);
+    assert.match(html, />3<\/span><span[^>]*>pending/);
+    assert.match(html, /<time dateTime=/);
   });
 
   for (const availability of ["live", "stale", "unavailable"] as const) {
@@ -1127,21 +1149,22 @@ async function main() {
       const html = await renderOverview({ view: "tasks" });
       const line = html.match(/<section aria-label="Steward task channels"[\s\S]*?<\/section>/)?.[0];
       assert(line);
-      assert.match(line, /<ol aria-label="Production line in workflow order"/);
-      assert.match(line, /Illustrative workflow — not live job tracking/);
-      assert.match(line, /Zero counts and an idle planner/);
-      assert.match(line, /Workflow inspector/);
-      for (const term of ["Input", "Work", "Output"]) assert(line.includes(`>${term}</dt>`));
+      assert.match(line, /Demo animation/);
+      assert(!line.includes("Workflow inspector"));
+      assert(!line.includes("factory-explore"));
+      assert.equal((line.match(/class="factory-readout factory-readout-/g) ?? []).length, 4);
+      assert.equal((line.match(/data-station="[0-3]"/g) ?? []).length, 12);
       assert.equal((line.match(/data-factory-item/g) ?? []).length, 18);
       if (availability === "unavailable") {
         assert.equal((line.match(/>Unavailable<\/span>/g) ?? []).length, 4);
         assert(!line.includes(">Idle"));
       } else {
-        const suffix = availability === "stale" ? " (stale)" : "";
+        const suffix = "";
+        assert.match(line, new RegExp(`Snapshot ${availability}`));
         assert(line.includes(`>Idle${suffix}</span>`));
         assert.equal(line.split(`>0 / 0${suffix}</span>`).length - 1, 2);
       }
-      assert.match(html, /Archive history<\/dt><dd[^>]*>1/);
+      assert.match(html, /Archive history: 1/);
       assert.match(html, /Redacted publication fixture/);
     }, availability === "unavailable" ? { ...VALID_ENV, COQUIC_STEWARD_LIVE_SNAPSHOT_URL: undefined } : VALID_ENV);
   }

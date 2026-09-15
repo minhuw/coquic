@@ -409,3 +409,19 @@ separate, no synthetic jobs, no browser acquisition, mandatory all-motion pause 
 continuous reduced-motion respect, stable keyboard inspection, compact reflow, and
 unchanged canonical evidence/archive routing. Browser gates must measure changing
 item positions and frozen pause/reduced-motion frames, not merely CSS declarations.
+
+## 2026-09-14 — Steward scene-first simplification
+
+The user explicitly rejected numbered station controls and the permanent
+Input/Work/Output grid. Superseding that composition, one dominant demo scene
+now carries four nearby real readouts and one freshness disclosure. Station
+inspection is closed initially, contextual and nonmodal; Close/Escape return
+focus to a stable machine even when a moving item was selected. The compact
+heading has no slogan or explanatory paragraph.
+
+Evidence below contains actual task lists, available pagination and usage, with
+one archive publication header. Remove automatic previews, status asides,
+black banners, duplicate live summaries, and empty scaffolding. Signals and
+Planning keep concise evidence limits and archive navigation. All source
+validation, independent live/archive failures, canonical routes, data contracts,
+and pause/reduced-motion behavior remain unchanged. No backend changes.

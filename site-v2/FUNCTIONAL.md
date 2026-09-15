@@ -193,18 +193,30 @@ announced without replacing retained valid evidence with an error message.
   Integration`. Signals, Planning, Tasks, and Integration aggregate state comes
   only from the validated public live snapshot; the control loop is an
   instrument and navigation device, not an aggregate health score.
-- “Explore factory” is the main experience: one screen-filling continuous animated
-  conveyor, signals converging on a planning sorter, parallel task workstations,
-  and integration assembly/output. The viewport-wide canvas sits below the site
-  header; a jump reaches the existing maximum-width detailed evidence below.
-- Use a fixed small number of representative items labeled “Illustrative workflow
-  — not live job tracking”; never synthesize jobs, IDs, titles, progress, durations,
-  or completions from counts. Motion is illustrative even with idle/zero telemetry.
-  Live/stale/unavailable aggregate values and archive history remain separate.
-- Click stations/items to inspect Input → Work → Output and public evidence limits.
-  An ordered semantic list of stable native buttons and a representative-item
-  control provides the full keyboard/non-SVG equivalent. Moving targets are at
-  least 44 CSS pixels. Integration inspection is independent of its Tasks link.
+- One dominant viewport-wide animated factory connects Signals, Planning, parallel
+  Tasks workstations, and Integration. The compact heading contains Steward,
+  “Demo animation”, pause/play, and View evidence; no explanatory grid or slogans.
+- Fixed representative pieces are demonstration only, never jobs or progress
+  inferred from counts. Real snapshot values sit beside each station, Tasks once
+  across its benches, with one compact live/stale/unavailable freshness disclosure
+  retaining public daemon mode and an accessible exact observation timestamp.
+- Station controls are keyboard-reachable with stable hit targets and visible
+  focus. Moving items are pointer shortcuts, not moving keyboard stops. Selection
+  opens a nonmodal contextual inspector, closed initially, with one concise
+  paragraph, an evidence link, and Close. Close/Escape return focus to the visible
+  stationary station trigger. Closed inspectors reserve no blank region.
+- No permanent station navigation/metric grid or Input/Work/Output template.
+  Count links and inspector links retain the canonical evidence destinations.
+- Task evidence has one archive count/latest-publication header, actual task
+  lists and full-detail links, history/active pagination, and published task/global
+  usage. Render an active section only with records or a nonzero total. Empty
+  pages with a nonzero total retain honest counts and available pagination.
+  A totally empty archive says “No published tasks yet”, without empty columns,
+  lists, usage boxes, or pagination placeholders. No automatic selected preview,
+  publication-status aside, black banner, or duplicate live metrics.
+- Signals/Planning evidence retains concise public evidence limitations and
+  published-task navigation, not duplicate live overview tables. Unavailable
+  sources offer concise recovery text without implementation jargon.
 - A pause/play control stops ALL factory motion. Reduced motion starts paused and
   remains respected as the preference changes; page-hidden motion pauses too.
   No polling, automatic fetches, streams, inferred health, or backend changes.

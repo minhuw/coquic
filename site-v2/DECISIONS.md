@@ -387,7 +387,7 @@ responsive grid remain unchanged. The shared palette is unchanged.
 
 On 2026-09-14, the user requested an enjoyable, explorable production pipeline
 rather than a simple status strip. One ordered, connected figure now explains
-Signals intake, Planning triage, parallel Tasks execution/validation, and
+Signals intake, Planning triage, sequential Tasks execution/validation/review, and
 Integration of reviewed output. Static schematics and native Input → Work →
 Output disclosures make the relationship inspectable, including Integration
 without a new view. Descriptions are explicitly conceptual, not telemetry.
@@ -402,7 +402,7 @@ polling, backend changes, or dependencies are introduced.
 ## 2026-09-10 — Illustrative Steward factory, explicitly requested
 
 The user rejected the static four-station diagram. Replace it with one viewport-wide,
-continuous animated factory: moving representative pieces, sorter, parallel benches,
+continuous animated factory: moving representative pieces, sorter, sequential task stages,
 and assembly. This narrowly overrides static-only motion and evidence-width rules
 for the canvas only. Keep theme-native surfaces, aggregate telemetry literally
 separate, no synthetic jobs, no browser acquisition, mandatory all-motion pause and
@@ -432,3 +432,12 @@ The user rejected the daemon/observation/TTL technical readout, including its
 disclosure. Show only “Updated HH:MM UTC” with “ (stale)” when needed in a
 semantic time element; retain the precise timestamp in datetime, not a tooltip.
 Unavailable copy and the validated backend snapshot contract remain unchanged.
+
+## 2026-09-14 — Task stages are sequential
+
+Correct the factory’s split/rejoin metaphor: Execute, Validate, and Review are
+consecutive stages of one task, not parallel lanes. One continuous task animation
+passes all three stations before Integration. Six ordered, visibly labeled
+stations reflow vertically on compact screens; a subtle bracket and one Tasks
+readout group the three stages. Concurrency belongs to different tasks using
+the same workflow. Live/archive contracts and motion controls are unchanged.

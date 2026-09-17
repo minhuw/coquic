@@ -303,6 +303,35 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(factory.locator('.factory-scene:visible [data-station="0"][tabindex="0"]')).toBeFocused();
       const machines = factory.locator('.factory-scene:visible [data-station][tabindex="0"]');
       await expect(machines).toHaveCount(6);
+      const scene = factory.locator(".factory-scene:visible");
+      await expect(scene.locator(".factory-step-label")).toHaveText(["Signals", "Planning", "Execute", "Validate", "Review", "Integration"]);
+      await expect(factory).not.toContainText(/parallel workstations|review work in parallel/i);
+      const horizontal = await scene.evaluate((node) => node.classList.contains("factory-wide"));
+      const boxes = await machines.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }));
+      for (let index = 1; index < boxes.length; index++) {
+        const previous = boxes[index - 1]!;
+        expect(horizontal ? boxes[index]!.x : boxes[index]!.y).toBeGreaterThan(horizontal ? previous.x + previous.width : previous.y + previous.height);
+      }
+      // Seek the SAME rendered task animation through every stage, not separate segment spawns.
+      const task = scene.locator('[data-factory-item="task"]');
+      await expect(task).toHaveCount(1);
+      const savedTime = await task.evaluate((node) => Number(node.getAnimations()[0]!.currentTime));
+      for (const [progress, station] of [[0.25, 2], [0.5, 3], [0.75, 4], [0.999, 5]]) {
+        await task.evaluate((node, progress) => { const animation = node.getAnimations()[0]!; animation.currentTime = Number(animation.effect!.getTiming().duration) * progress; }, progress!);
+        const distance = await scene.evaluate((node, station) => {
+          const piece = node.querySelector('[data-factory-item="task"] button')!.getBoundingClientRect();
+          const machine = node.querySelectorAll('.factory-machine')[station]!.getBoundingClientRect();
+          return { x: Math.abs(piece.x + piece.width / 2 - machine.x - machine.width / 2), y: Math.abs(piece.y + piece.height / 2 - machine.y - machine.height / 2) };
+        }, station!);
+        expect(distance.x).toBeLessThan(10);
+        expect(distance.y).toBeLessThan(10);
+      }
+      await task.evaluate((node, time) => { node.getAnimations()[0]!.currentTime = time; }, savedTime);
+      const staticBoxes = await factory.locator(".factory-readout, .factory-scene:visible .factory-machine, .factory-scene:visible .factory-step-label").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }));
+      for (let a = 0; a < staticBoxes.length; a++) for (let b = a + 1; b < staticBoxes.length; b++) {
+        const first = staticBoxes[a]!, second = staticBoxes[b]!;
+        expect(first.right <= second.left || second.right <= first.left || first.bottom <= second.top || second.bottom <= first.top).toBeTruthy();
+      }
       const glyphs = ["radio", "list-tree", "square-terminal", "shield-check", "scan-eye", "git-merge"];
       await expect(icons).toHaveCount(6);
       for (let index = 0; index < 6; index++) {
@@ -315,7 +344,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(icon).toHaveCSS("fill", "none");
         expect(await icon.locator("*").evaluateAll((shapes) => shapes.every((shape) => getComputedStyle(shape).fill === "none"))).toBeTruthy();
         await expect(trigger).toHaveAttribute("role", "button");
-        await expect(trigger).toHaveAccessibleName(`Inspect ${["Signals", "Planning", "Tasks", "Tasks", "Tasks", "Integration"][index]}`);
+        await expect(trigger).toHaveAccessibleName(`Inspect ${["Signals", "Planning", "Execute", "Validate", "Review", "Integration"][index]}`);
         if (index === 0) await trigger.focus(); else await page.keyboard.press("Tab");
         await expect(trigger).toBeFocused();
         const hit = await trigger.boundingBox();
@@ -333,7 +362,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await inspector.getByRole("button", { name: "Close", exact: true }).click();
         await expect(trigger).toBeFocused();
       }
-      await factory.locator('.factory-scene:visible [aria-label="Inspect Planning"]').click();
+      await factory.locator('.factory-scene:visible [aria-label="Inspect Planning"]').click({ position: { x: 8, y: 8 } });
       await expect(factory.getByRole("heading", { name: "Planning", exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`factory-inspector-${colorScheme}-${viewport.width}.png`) });
       await factory.getByRole("button", { name: "Close", exact: true }).click();

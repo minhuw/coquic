@@ -193,8 +193,10 @@ announced without replacing retained valid evidence with an error message.
   Integration`. Signals, Planning, Tasks, and Integration aggregate state comes
   only from the validated public live snapshot; the control loop is an
   instrument and navigation device, not an aggregate health score.
-- One dominant viewport-wide animated factory connects Signals, Planning, parallel
-  Tasks workstations, and Integration. The compact heading contains Steward,
+- One dominant viewport-wide animated factory connects Signals, Planning,
+  Tasks (Execute → Validate → Review), and Integration. Each representative task
+  traverses all three task stages on one path; multiple tasks may pipeline that
+  sequence. All six labels remain visible in wide and compact layouts. The compact heading contains Steward,
   “Demo animation”, pause/play, and View evidence; no explanatory grid or slogans.
 - Fixed representative pieces are demonstration only, never jobs or progress
   inferred from counts. Real snapshot values sit beside each station, Tasks once

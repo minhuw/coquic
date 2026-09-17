@@ -719,12 +719,16 @@ pause/play control, and View evidence. No eyebrow, slogan, caption paragraph,
 numbered station row, permanent explanation grid, or inverse status banner.
 
 The connected conveyor carries fixed representative pieces through Signals,
-Planning, parallel Tasks benches, and Integration. This user-requested canvas
+Planning, Tasks (Execute → Validate → Review), and Integration. One task piece
+traverses all three task stages in order on one continuous path; concurrency is
+across tasks, never parallel stages of one task. A subtle bracket groups Tasks
+with one readout. Wide layouts order all six stations left-to-right; compact
+layouts stack all six with distinct visible step labels. This user-requested canvas
 alone is exempt from static-only motion and evidence-width rules. Motion never
 represents jobs, progress, or activity inferred from a snapshot. Keep a light
 neutral plane with the existing dark-token remapping.
 
-Place real snapshot values beside all four stations, with Tasks shown once for
+Place real snapshot values beside the four workflow groups, with Tasks shown once for
 the whole work area. One plain semantic time shows “Updated HH:MM UTC”, adding
 “ (stale)” when stale and retaining the exact observation timestamp in datetime.
 Unavailable keeps its recovery text. No daemon mode, TTL, tooltip, or freshness

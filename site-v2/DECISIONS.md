@@ -441,3 +441,13 @@ passes all three stations before Integration. Six ordered, visibly labeled
 stations reflow vertically on compact screens; a subtle bracket and one Tasks
 readout group the three stages. Concurrency belongs to different tasks using
 the same workflow. Live/archive contracts and motion controls are unchanged.
+
+
+## 2026-09-14 — Parallel complete task lanes
+
+Extend the sequential-stage correction with three illustrative complete task
+lanes, not three alternative stages. Each lane executes, validates, and reviews
+before shared Integration; one Planning node branches into all three. Wide rows
+become compact vertical lanes. Fixed pieces use staggered timing, independent of
+live counts. Keep one aggregate Tasks readout, lane-specific accessible trigger
+names, and the existing inspector, motion controls, and data contracts.

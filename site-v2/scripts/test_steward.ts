@@ -1156,10 +1156,9 @@ async function main() {
       assert(!line.includes("Workflow inspector"));
       assert(!line.includes("factory-explore"));
       assert.equal((line.match(/class="factory-readout factory-readout-/g) ?? []).length, 4);
-      assert.equal((line.match(/data-station="[0-3]"/g) ?? []).length, 12);
-      assert.equal((line.match(/data-factory-item/g) ?? []).length, 6);
-      assert.equal((line.match(/data-factory-item="task"/g) ?? []).length, 2);
-      assert.doesNotMatch(line, /parallel|split|rejoin/i);
+      assert.equal((line.match(/data-station="[0-3]"/g) ?? []).length, 24);
+      assert.equal((line.match(/data-factory-item/g) ?? []).length, 10);
+      assert.equal((line.match(/data-factory-item="task"/g) ?? []).length, 6);
       if (availability === "unavailable") {
         assert.equal((line.match(/>Unavailable<\/span>/g) ?? []).length, 4);
         assert(!line.includes(">Idle"));

@@ -719,11 +719,14 @@ pause/play control, and View evidence. No eyebrow, slogan, caption paragraph,
 numbered station row, permanent explanation grid, or inverse status banner.
 
 The connected conveyor carries fixed representative pieces through Signals,
-Planning, Tasks (Execute → Validate → Review), and Integration. One task piece
-traverses all three task stages in order on one continuous path; concurrency is
-across tasks, never parallel stages of one task. A subtle bracket groups Tasks
-with one readout. Wide layouts order all six stations left-to-right; compact
-layouts stack all six with distinct visible step labels. This user-requested canvas
+Planning, three parallel Tasks lanes (each Execute → Validate → Review), and
+shared Integration. Each lane has one representative task piece traversing its
+entire sequence in order before merging into Integration. The three lanes are
+fixed illustration geometry, never derived from snapshot counts. Wide layouts
+use three horizontal rows; compact layouts use three vertical lanes branching
+below Planning and merging above Integration. All stage labels remain visible,
+at least 11px, with stable targets at least 44px even at 320px. One Tasks readout
+aggregates all lanes; no repeated counts or additional lane labels. This canvas
 alone is exempt from static-only motion and evidence-width rules. Motion never
 represents jobs, progress, or activity inferred from a snapshot. Keep a light
 neutral plane with the existing dark-token remapping.

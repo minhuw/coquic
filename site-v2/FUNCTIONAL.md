@@ -195,8 +195,10 @@ announced without replacing retained valid evidence with an error message.
   instrument and navigation device, not an aggregate health score.
 - One dominant viewport-wide animated factory connects Signals, Planning,
   Tasks (Execute → Validate → Review), and Integration. Each representative task
-  traverses all three task stages on one path; multiple tasks may pipeline that
-  sequence. All six labels remain visible in wide and compact layouts. The compact heading contains Steward,
+  traverses Execute, Validate, then Review on its own continuous path. Three fixed
+  illustrative lanes run in parallel between shared Planning and Integration,
+  horizontally on wide screens and vertically on compact screens. All stage
+  labels remain visible; lane count never depends on snapshot counts. The compact heading contains Steward,
   “Demo animation”, pause/play, and View evidence; no explanatory grid or slogans.
 - Fixed representative pieces are demonstration only, never jobs or progress
   inferred from counts. Real snapshot values sit beside each station, Tasks once

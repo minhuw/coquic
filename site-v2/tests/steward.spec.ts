@@ -302,39 +302,67 @@ for (const colorScheme of ["light", "dark"] as const) {
       await factory.getByRole("button", { name: "Close", exact: true }).click();
       await expect(factory.locator('.factory-scene:visible [data-station="0"][tabindex="0"]')).toBeFocused();
       const machines = factory.locator('.factory-scene:visible [data-station][tabindex="0"]');
-      await expect(machines).toHaveCount(6);
+      await expect(machines).toHaveCount(12);
       const scene = factory.locator(".factory-scene:visible");
-      await expect(scene.locator(".factory-step-label")).toHaveText(["Signals", "Planning", "Execute", "Validate", "Review", "Integration"]);
-      await expect(factory).not.toContainText(/parallel workstations|review work in parallel/i);
+      const labels = ["Signals", "Planning", ...Array(3).fill(["Execute", "Validate", "Review"]).flat(), "Integration"];
+      await expect(scene.locator(".factory-step-label")).toHaveText(labels);
+      await expect(factory.locator(".factory-readout-2")).toHaveCount(1);
+      await expect(factory.locator(".factory-readout-2 .data-text")).toHaveText("2 / 4");
       const horizontal = await scene.evaluate((node) => node.classList.contains("factory-wide"));
-      const boxes = await machines.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }));
-      for (let index = 1; index < boxes.length; index++) {
-        const previous = boxes[index - 1]!;
-        expect(horizontal ? boxes[index]!.x : boxes[index]!.y).toBeGreaterThan(horizontal ? previous.x + previous.width : previous.y + previous.height);
+      for (const lane of [1, 2, 3]) {
+        const stages = scene.locator(`.factory-machine[data-lane="${lane}"]`);
+        const boxes = await stages.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }));
+        for (let index = 1; index < boxes.length; index++) {
+          const previous = boxes[index - 1]!;
+          expect(horizontal ? boxes[index]!.x : boxes[index]!.y).toBeGreaterThan(horizontal ? previous.x + previous.width : previous.y + previous.height);
+        }
+        // The same piece must pass each stage and shared Integration in order.
+        const task = scene.locator(`[data-factory-item="task"][data-lane="${lane}"]`);
+        await expect(task).toHaveCount(1);
+        const savedTime = await task.evaluate((node) => Number(node.getAnimations()[0]!.currentTime));
+        const stops = await scene.evaluate((node, lane) => {
+          const piece = node.querySelector(`[data-factory-item="task"][data-lane="${lane}"]`)!;
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", getComputedStyle(piece).offsetPath.slice(6, -2));
+          const length = path.getTotalLength();
+          return [...node.querySelectorAll(`.factory-machine[data-lane="${lane}"], .factory-machine[data-station="3"]`)].map((machine) => {
+            const matrix = (machine.parentElement as unknown as SVGGElement).transform.baseVal.consolidate()!.matrix;
+            let distance = Infinity, at = 0;
+            for (let step = 0; step <= length; step++) {
+              const point = path.getPointAtLength(step);
+              const next = Math.hypot(point.x - matrix.e, point.y - matrix.f);
+              if (next < distance) { distance = next; at = step / length; }
+            }
+            return { distance, progress: Math.min(at, 0.9999) };
+          });
+        }, lane);
+        expect(stops).toHaveLength(4);
+        for (let index = 0; index < stops.length; index++) {
+          const stop = stops[index]!;
+          expect(stop.distance).toBeLessThan(2);
+          if (index) expect(stop.progress).toBeGreaterThan(stops[index - 1]!.progress);
+          await task.evaluate((node, progress) => { const animation = node.getAnimations()[0]!; const timing = animation.effect!.getTiming(); animation.currentTime = Number(timing.duration) * (1 + progress) + (timing.delay ?? 0); }, stop.progress);
+          await page.evaluate(() => new Promise(requestAnimationFrame));
+          const distance = await scene.evaluate((node, { lane, index }) => {
+            const piece = node.querySelector(`[data-factory-item="task"][data-lane="${lane}"] button`)!.getBoundingClientRect();
+            const machine = (index < 3 ? node.querySelectorAll(`.factory-machine[data-lane="${lane}"]`)[index]! : node.querySelector('.factory-machine[data-station="3"]')!).getBoundingClientRect();
+            return Math.hypot(piece.x + piece.width / 2 - machine.x - machine.width / 2, piece.y + piece.height / 2 - machine.y - machine.height / 2);
+          }, { lane, index });
+          expect(distance).toBeLessThan(3);
+        }
+        await task.evaluate((node, time) => { node.getAnimations()[0]!.currentTime = time; }, savedTime);
       }
-      // Seek the SAME rendered task animation through every stage, not separate segment spawns.
-      const task = scene.locator('[data-factory-item="task"]');
-      await expect(task).toHaveCount(1);
-      const savedTime = await task.evaluate((node) => Number(node.getAnimations()[0]!.currentTime));
-      for (const [progress, station] of [[0.25, 2], [0.5, 3], [0.75, 4], [0.999, 5]]) {
-        await task.evaluate((node, progress) => { const animation = node.getAnimations()[0]!; animation.currentTime = Number(animation.effect!.getTiming().duration) * progress; }, progress!);
-        const distance = await scene.evaluate((node, station) => {
-          const piece = node.querySelector('[data-factory-item="task"] button')!.getBoundingClientRect();
-          const machine = node.querySelectorAll('.factory-machine')[station]!.getBoundingClientRect();
-          return { x: Math.abs(piece.x + piece.width / 2 - machine.x - machine.width / 2), y: Math.abs(piece.y + piece.height / 2 - machine.y - machine.height / 2) };
-        }, station!);
-        expect(distance.x).toBeLessThan(10);
-        expect(distance.y).toBeLessThan(10);
+      for (const label of await scene.locator(".factory-step-label").all()) {
+        expect(await label.evaluate((node) => parseFloat(getComputedStyle(node).fontSize) * (node as SVGTextElement).getScreenCTM()!.a)).toBeGreaterThanOrEqual(11);
       }
-      await task.evaluate((node, time) => { node.getAnimations()[0]!.currentTime = time; }, savedTime);
-      const staticBoxes = await factory.locator(".factory-readout, .factory-scene:visible .factory-machine, .factory-scene:visible .factory-step-label").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }));
+      const staticBoxes = await factory.locator(".factory-freshness, .factory-readout, .factory-scene:visible .factory-machine, .factory-scene:visible .factory-step-label").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }));
       for (let a = 0; a < staticBoxes.length; a++) for (let b = a + 1; b < staticBoxes.length; b++) {
         const first = staticBoxes[a]!, second = staticBoxes[b]!;
         expect(first.right <= second.left || second.right <= first.left || first.bottom <= second.top || second.bottom <= first.top).toBeTruthy();
       }
-      const glyphs = ["radio", "list-tree", "square-terminal", "shield-check", "scan-eye", "git-merge"];
-      await expect(icons).toHaveCount(6);
-      for (let index = 0; index < 6; index++) {
+      const glyphs = ["radio", "list-tree", ...Array(3).fill(["square-terminal", "shield-check", "scan-eye"]).flat(), "git-merge"];
+      await expect(icons).toHaveCount(12);
+      for (let index = 0; index < 12; index++) {
         const trigger = machines.nth(index);
         const icon = trigger.locator(`svg.lucide-${glyphs[index]}`);
         await expect(icon).toBeVisible();
@@ -344,7 +372,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(icon).toHaveCSS("fill", "none");
         expect(await icon.locator("*").evaluateAll((shapes) => shapes.every((shape) => getComputedStyle(shape).fill === "none"))).toBeTruthy();
         await expect(trigger).toHaveAttribute("role", "button");
-        await expect(trigger).toHaveAccessibleName(`Inspect ${["Signals", "Planning", "Execute", "Validate", "Review", "Integration"][index]}`);
+        await expect(trigger).toHaveAccessibleName(`Inspect ${labels[index]}${index >= 2 && index < 11 ? `, lane ${Math.floor((index - 2) / 3) + 1}` : ""}`);
         if (index === 0) await trigger.focus(); else await page.keyboard.press("Tab");
         await expect(trigger).toBeFocused();
         const hit = await trigger.boundingBox();

@@ -181,10 +181,10 @@ summary {
 .factory-drawing { position: relative; width: 100%; }
 .factory-scene { display: block; width: 100%; }
 .factory-compact { display: none; }
-.factory-scene text { fill: var(--text-muted); font: 14px var(--font-sans); }
+.factory-scene text { fill: var(--text-muted); font: 18px var(--font-sans); }
+.factory-label-background { fill: var(--canvas); }
 .factory-tracks { stroke: var(--line); stroke-width: 32; }
 .factory-rails { stroke: var(--line-strong); stroke-width: 20; }
-.factory-task-bracket { stroke: var(--line-strong); stroke-width: 1; }
 .factory-machine { cursor: pointer; fill: var(--surface); stroke: var(--ink); stroke-width: 2; }
 .factory-machine-icon { fill: none; stroke: var(--accent); }
 .factory-machine:hover > rect, .factory-machine:focus-visible > rect { fill: var(--accent-soft); }
@@ -202,10 +202,10 @@ summary {
 .factory-readout { position: absolute; width: max-content; max-width: 14%; overflow-wrap: anywhere; display: flex; flex-direction: column; padding: 8px; min-height: 44px; font-size: 14px; background: var(--canvas); border-bottom: 2px solid transparent; transform: translateX(-50%); }
 .factory-readout .data-text { font-size: 18px; }
 .factory-readout[aria-current] { border-color: var(--accent); }
-.factory-readout-0 { left: 12.5%; top: 8%; }
-.factory-readout-1 { left: 27.5%; top: 8%; }
-.factory-readout-2 { left: 57.5%; top: 8%; }
-.factory-readout-3 { left: 87.5%; top: 8%; }
+.factory-readout-0 { left: 10%; top: 8%; }
+.factory-readout-1 { left: 25%; top: 8%; }
+.factory-readout-2 { left: 58.3333%; top: 8%; }
+.factory-readout-3 { left: 90%; top: 8%; }
 @keyframes factory-travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
 @media (prefers-reduced-motion: reduce) { .steward-factory * { animation-play-state: paused !important; } }
 @media (max-width: 900px) {
@@ -214,13 +214,14 @@ summary {
   .factory-opening .factory-control { font-size: 12px; }
   .factory-wide { display: none; }
   .factory-compact { display: block; }
+  .factory-compact text { font-size: 14px; }
   .factory-drawing { max-width: 440px; align-self: center; }
   .factory-readout { max-width: 44%; font-size: 12px; padding: 4px 8px; transform: translate(-50%, -50%); }
   .factory-readout .data-text { font-size: 16px; }
-  .factory-readout-0 { left: 72%; top: 10.4167%; }
-  .factory-readout-1 { left: 72%; top: 26.0417%; }
-  .factory-readout-2 { left: 72%; top: 57.2917%; }
-  .factory-readout-3 { left: 72%; top: 88.5417%; }
+  .factory-readout-0 { left: 72%; top: 9%; }
+  .factory-readout-1 { left: 72%; top: 23%; }
+  .factory-readout-2 { left: 72%; top: 31%; }
+  .factory-readout-3 { left: 72%; top: 90%; }
   .factory-inspector { width: calc(100% - 32px); padding: 16px; }
 }
 @media (forced-colors: active) {

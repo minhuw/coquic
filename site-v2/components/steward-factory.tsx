@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
+import { GitMerge, ListTree, Radio, ScanEye, ShieldCheck, SquareTerminal } from "lucide-react";
 import type { StewardLiveSnapshot } from "@/lib/steward-live/schema";
 
 const stations = [
@@ -10,6 +11,8 @@ const stations = [
   { name: "Tasks", machine: "Parallel workstations", description: "Execute, validate, and review work in parallel. Active and queued counts are live; identities, transcripts, and usage belong to published tasks." },
   { name: "Integration", machine: "Integration assembly", description: "Bring reviewed work together for integration. Active and queued counts do not expose progress or completion events; available evidence is in published tasks." },
 ] as const;
+
+const machineIcons = [Radio, ListTree, SquareTerminal, ShieldCheck, ScanEye, GitMerge] as const;
 
 // Fixed illustrative pieces and paths, deliberately unrelated to snapshot counters.
 const widePaths = [
@@ -38,16 +41,18 @@ function FactoryScene({ compact, inspect }: { compact: boolean; inspect: (statio
       <g className="factory-rails" fill="none" strokeDasharray="2 12">
         {paths.map((d) => <path key={d} d={d} />)}
       </g>
-      {machines.map(([x, y, station], index) => (
-        <g key={index} transform={`translate(${x}, ${y})`}>
-          <g className={`factory-machine factory-machine-${station}`} onClick={(event) => inspect(station!, false, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inspect(station!, false, event.currentTarget); } }} role="button" tabIndex={0} data-station={station} aria-label={`Inspect ${stations[station!]!.name}`}>
-            <rect x={compact ? -40 : -62} y="-40" width={compact ? 80 : 124} height="90" rx="8" />
-            <path d={station === 0 ? "M-24-20H24L12 8H-12Z M-12 8V22H12V8" : station === 1 ? "M-25-18H25L0 10Z M0 10V28 M-22 28L0 10L22 28" : station === 2 ? "M-25 25H25 M-20 25V-18H20V10H-20 M-10-6L-3 0L-10 6 M3 6H12" : "M-25 24H25 M-22-22V4 M22-22V4 M-22-10H22 M-12 10L0 3L12 10V25H-12Z"} />
-            <g className="factory-mechanism"><path d="M-16-30H16" /></g>
+      {machines.map(([x, y, station], index) => {
+        const Icon = machineIcons[index]!;
+        return (
+          <g key={index} transform={`translate(${x}, ${y})`}>
+            <g className={`factory-machine factory-machine-${station}`} onClick={(event) => inspect(station!, false, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inspect(station!, false, event.currentTarget); } }} role="button" tabIndex={0} data-station={station} aria-label={`Inspect ${stations[station!]!.name}`}>
+              <rect x={compact ? -40 : -62} y="-40" width={compact ? 80 : 124} height="90" rx="8" />
+              <Icon className="factory-machine-icon" x={-22} y={-17} width={44} height={44} strokeWidth={1.8} aria-hidden="true" focusable="false" />
+            </g>
+            {!compact && station !== 0 && station !== 1 && <text y="78" textAnchor="middle">{station === 2 ? ["Execute", "Validate", "Review"][index - 2] : stations[station!]!.machine}</text>}
           </g>
-          {!compact && station !== 0 && station !== 1 && <text y="78" textAnchor="middle">{station === 2 ? ["Execute", "Validate", "Review"][index - 2] : stations[station!]!.machine}</text>}
-        </g>
-      ))}
+        );
+      })}
       {paths.map((d, index) => {
         const station = index < 2 ? 0 : index < 5 ? 2 : 3;
         const label = index < 2 ? "signal piece" : index < 5 ? "task piece" : "integration piece";

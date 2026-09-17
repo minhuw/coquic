@@ -185,10 +185,9 @@ summary {
 .factory-tracks { stroke: var(--line); stroke-width: 32; }
 .factory-rails { stroke: var(--line-strong); stroke-width: 20; }
 .factory-machine { cursor: pointer; fill: var(--surface); stroke: var(--ink); stroke-width: 2; }
-.factory-machine > path, .factory-mechanism { fill: none; stroke: var(--accent); stroke-width: 3; }
+.factory-machine-icon { fill: none; stroke: var(--accent); }
 .factory-machine:hover > rect, .factory-machine:focus-visible > rect { fill: var(--accent-soft); }
 .factory-machine:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-.factory-mechanism { animation: factory-sort 2s ease-in-out infinite alternate; }
 .factory-item { offset-rotate: 0deg; offset-anchor: 0px 0px; animation: factory-travel 10s linear infinite; }
 .factory-piece { width: 64px; height: 64px; display: grid; place-items: center; cursor: pointer; }
 .factory-wide .factory-piece { width: 96px; height: 96px; }
@@ -207,7 +206,6 @@ summary {
 .factory-readout-2 { left: 64%; top: 12%; }
 .factory-readout-3 { left: 78%; top: 12%; }
 @keyframes factory-travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
-@keyframes factory-sort { to { transform: translateY(12px); } }
 @media (prefers-reduced-motion: reduce) { .steward-factory * { animation-play-state: paused !important; } }
 @media (max-width: 900px) {
   .factory-opening { align-items: flex-start; flex-wrap: wrap; padding: 16px; gap: 12px; }
@@ -228,7 +226,7 @@ summary {
   .factory-tracks { stroke: CanvasText; }
   .factory-rails { stroke: Canvas; }
   .factory-machine, .factory-piece svg { fill: Canvas; stroke: CanvasText; }
-  .factory-machine > path, .factory-mechanism { stroke: LinkText; }
+  .factory-machine-icon { stroke: LinkText; }
   .factory-readout[aria-current] { border-color: Highlight; }
   .factory-machine:focus-visible { outline-color: Highlight; }
 }

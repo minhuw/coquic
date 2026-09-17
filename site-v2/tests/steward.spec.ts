@@ -288,11 +288,11 @@ for (const colorScheme of ["light", "dark"] as const) {
       await pause.focus(); await page.keyboard.press("Enter");
       await expect(factory.getByRole("button", { name: "Play animation" })).toBeFocused();
       const frozen = await item.boundingBox();
-      const mechanism = factory.locator(".factory-scene:visible .factory-mechanism").first();
-      const mechanismBefore = await mechanism.boundingBox();
+      const icons = factory.locator(".factory-scene:visible .factory-machine-icon");
+      const iconBefore = await icons.first().boundingBox();
       await page.waitForTimeout(350);
       expect(await item.boundingBox()).toEqual(frozen);
-      expect(await mechanism.boundingBox()).toEqual(mechanismBefore);
+      expect(await icons.first().boundingBox()).toEqual(iconBefore);
       const piece = item.getByRole("button");
       const target = await piece.boundingBox();
       expect(target!.width).toBeGreaterThanOrEqual(44);
@@ -303,8 +303,19 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(factory.locator('.factory-scene:visible [data-station="0"][tabindex="0"]')).toBeFocused();
       const machines = factory.locator('.factory-scene:visible [data-station][tabindex="0"]');
       await expect(machines).toHaveCount(6);
+      const glyphs = ["radio", "list-tree", "square-terminal", "shield-check", "scan-eye", "git-merge"];
+      await expect(icons).toHaveCount(6);
       for (let index = 0; index < 6; index++) {
         const trigger = machines.nth(index);
+        const icon = trigger.locator(`svg.lucide-${glyphs[index]}`);
+        await expect(icon).toBeVisible();
+        await expect(icon).toHaveAttribute("aria-hidden", "true");
+        await expect(icon).toHaveAttribute("focusable", "false");
+        await expect(icon).toHaveAttribute("stroke-width", "1.8");
+        await expect(icon).toHaveCSS("fill", "none");
+        expect(await icon.locator("*").evaluateAll((shapes) => shapes.every((shape) => getComputedStyle(shape).fill === "none"))).toBeTruthy();
+        await expect(trigger).toHaveAttribute("role", "button");
+        await expect(trigger).toHaveAccessibleName(`Inspect ${["Signals", "Planning", "Tasks", "Tasks", "Tasks", "Integration"][index]}`);
         if (index === 0) await trigger.focus(); else await page.keyboard.press("Tab");
         await expect(trigger).toBeFocused();
         const hit = await trigger.boundingBox();
